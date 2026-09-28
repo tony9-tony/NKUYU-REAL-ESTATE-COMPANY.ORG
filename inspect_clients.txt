@@ -1,0 +1,23 @@
+property_images rows: 36
+files in C:\Users\nic\Desktop\RealEstate-System.org\data\uploads\properties: 1
+
+with the file present: 1
+file MISSING on disk:  35
+  id=1 property=5 stored="unit-1790342388839.png" original="unit.png"
+  id=4 property=8 stored="unit-1790342674962.png" original="unit.png"
+  id=6 property=10 stored="unit-1790345473528.png" original="unit.png"
+  id=7 property=11 stored="unit-1790346177340.png" original="unit.png"
+  id=8 property=12 stored="unit-1790346258544.png" original="unit.png"
+  id=9 property=13 stored="unit-1790346319878.png" original="unit.png"
+  id=10 property=14 stored="unit-1790349178647.png" original="unit.png"
+  id=11 property=15 stored="unit-1790349276682.png" original="unit.png"
+  ...and 27 more
+
+lookup for id=1: C:\Users\nic\Desktop\RealEstate-System.org\data\uploads\properties\unit-1790342388839.png
+  exists: false
+
+lookup for id=4: C:\Users\nic\Desktop\RealEstate-System.org\data\uploads\properties\unit-1790342674962.png
+  exists: false
+
+lookup for id=6: C:\Users\nic\Desktop\RealEstate-System.org\data\uploads\properties\unit-1790345473528.png
+  exists: false

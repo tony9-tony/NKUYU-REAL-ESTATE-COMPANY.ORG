@@ -1,0 +1,29 @@
+
+> realestate-system@1.0.0 test:export
+> node --import ./test_support/guard.mjs export_test.mjs
+
+[guard] using existing test database "mkuyu_org_test"
+[guard] live database    : mkuyu_org  (never written to)
+[guard] test database    : mkuyu_org_test
+[harness] test database "mkuyu_org_test" prepared (schema, roles, departments, demo + legacy accounts)
+[harness] export: server ready on :3206 (database: mkuyu_org_test)
+generate: 201 id 3
+ok    export properties/xlsx: status=200 bytes=7405
+ok    export properties/pdf: status=200 bytes=2961
+ok    export properties/docx: status=200 bytes=9337
+ok    export properties/pptx: status=200 bytes=126267
+ok    export clients/xlsx: status=200 bytes=7347
+ok    export clients/pdf: status=200 bytes=2881
+ok    export clients/docx: status=200 bytes=9301
+ok    export clients/pptx: status=200 bytes=121879
+ok    export income/xlsx: status=200 bytes=7331
+ok    export income/pdf: status=200 bytes=2884
+ok    export income/docx: status=200 bytes=9263
+ok    export income/pptx: status=200 bytes=97554
+ok    export debt/xlsx: status=200 bytes=7784
+ok    export debt/pdf: status=200 bytes=3533
+ok    export debt/docx: status=200 bytes=9793
+ok    export debt/pptx: status=200 bytes=263865
+ok    export with project filter: status=200 bytes=7236
+
+EXPORT_ALL_PASSED

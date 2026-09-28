@@ -1,0 +1,20 @@
+=== client -> contract workflow ===
+ok    a sales officer signed in
+FAIL  a new client completed without a contract is refused with 400 (201)
+FAIL  the refusal explains a contract is required ("")
+ok    a prospect (status=lead) is created without a contract (201)
+ok    the buyer record is created as a prospect first
+ok    a contract is created for that client (201)
+ok    the contract carries the discounted final price (90000000.00)
+FAIL  a client with a contract can be completed (500)
+FAIL  the completed client is active
+ok    a lead is created without a contract (201)
+FAIL  a lead can still be converted to a client record (400)
+ok    a converted lead is a prospect, not a completed client (undefined)
+FAIL  a contract_id that does not exist is refused (201)
+FAIL  a caller without client create rights is still refused (401, create=false)
+FAIL  an existing client with no contract is still editable (500)
+ok    editing a historical client did not change its data
+ok    a contract can still be created without a linked client (201)
+
+8 CLIENT WORKFLOW CHECK(S) FAILED

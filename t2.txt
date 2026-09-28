@@ -1,0 +1,40 @@
+\$_.Name : The term '\$_.Name' is not recognized as the name of a cmdlet, function, 
+script file, or operable program. Check the spelling of the name, or if a path was 
+included, verify that the path is correct and try again.
+At line:1 char:72
++ ... txt -ErrorAction SilentlyContinue | ForEach-Object { \$_.Name + ' = ' ...
++                                                          ~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (\$_.Name:String) [], CommandNotFoundExc 
+   eption
+    + FullyQualifiedErrorId : CommandNotFoundException
+ 
+\$_.Name : The term '\$_.Name' is not recognized as the name of a cmdlet, function, 
+script file, or operable program. Check the spelling of the name, or if a path was 
+included, verify that the path is correct and try again.
+At line:1 char:72
++ ... txt -ErrorAction SilentlyContinue | ForEach-Object { \$_.Name + ' = ' ...
++                                                          ~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (\$_.Name:String) [], CommandNotFoundExc 
+   eption
+    + FullyQualifiedErrorId : CommandNotFoundException
+ 
+\$_.Name : The term '\$_.Name' is not recognized as the name of a cmdlet, function, 
+script file, or operable program. Check the spelling of the name, or if a path was 
+included, verify that the path is correct and try again.
+At line:1 char:72
++ ... txt -ErrorAction SilentlyContinue | ForEach-Object { \$_.Name + ' = ' ...
++                                                          ~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (\$_.Name:String) [], CommandNotFoundExc 
+   eption
+    + FullyQualifiedErrorId : CommandNotFoundException
+ 
+\$_.Name : The term '\$_.Name' is not recognized as the name of a cmdlet, function, 
+script file, or operable program. Check the spelling of the name, or if a path was 
+included, verify that the path is correct and try again.
+At line:1 char:72
++ ... txt -ErrorAction SilentlyContinue | ForEach-Object { \$_.Name + ' = ' ...
++                                                          ~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (\$_.Name:String) [], CommandNotFoundExc 
+   eption
+    + FullyQualifiedErrorId : CommandNotFoundException
+ 

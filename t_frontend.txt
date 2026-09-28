@@ -1,0 +1,187 @@
+
+> realestate-system@1.0.0 test:frontend
+> node frontend_smoke_test.mjs
+
+ok    app.js evaluates in the sandbox
+ok    administrator renders "dashboard" (6612 bytes)
+ok    administrator renders "admin-dashboard" (1819 bytes)
+ok    administrator renders "projects" (800 bytes)
+ok    administrator renders "properties" (2572 bytes)
+ok    administrator renders "clients" (1751 bytes)
+ok    administrator renders "contracts" (2409 bytes)
+ok    administrator renders "debts" (3765 bytes)
+ok    administrator renders "appointments" (2268 bytes)
+ok    administrator renders "documents" (2618 bytes)
+ok    administrator renders "reports" (2496 bytes)
+ok    administrator renders "organization" (10115 bytes)
+ok    director renders "dashboard" (6607 bytes)
+ok    director renders "admin-dashboard" (6607 bytes)
+ok    director renders "projects" (800 bytes)
+ok    director renders "properties" (2572 bytes)
+ok    director renders "clients" (1751 bytes)
+ok    director renders "contracts" (2409 bytes)
+ok    director renders "debts" (3765 bytes)
+ok    director renders "appointments" (2268 bytes)
+ok    director renders "documents" (2618 bytes)
+ok    director renders "reports" (2496 bytes)
+ok    director renders "organization" (6607 bytes)
+ok    sales renders "dashboard" (5209 bytes)
+ok    sales renders "admin-dashboard" (5209 bytes)
+ok    sales renders "projects" (800 bytes)
+ok    sales renders "properties" (2572 bytes)
+ok    sales renders "clients" (1751 bytes)
+ok    sales renders "contracts" (2272 bytes)
+ok    sales renders "debts" (5209 bytes)
+ok    sales renders "appointments" (2268 bytes)
+ok    sales renders "documents" (2618 bytes)
+ok    sales renders "reports" (2496 bytes)
+ok    sales renders "organization" (5209 bytes)
+ok    finance renders "dashboard" (3759 bytes)
+ok    finance renders "admin-dashboard" (3759 bytes)
+ok    finance renders "projects" (3759 bytes)
+ok    finance renders "properties" (3759 bytes)
+ok    finance renders "clients" (1706 bytes)
+ok    finance renders "contracts" (2364 bytes)
+ok    finance renders "debts" (3720 bytes)
+ok    finance renders "appointments" (3759 bytes)
+ok    finance renders "documents" (3759 bytes)
+ok    finance renders "reports" (2451 bytes)
+ok    finance renders "organization" (3759 bytes)
+ok    property renders "dashboard" (2239 bytes)
+ok    property renders "admin-dashboard" (2239 bytes)
+ok    property renders "projects" (794 bytes)
+ok    property renders "properties" (2572 bytes)
+ok    property renders "clients" (1751 bytes)
+ok    property renders "contracts" (2239 bytes)
+ok    property renders "debts" (2239 bytes)
+ok    property renders "appointments" (2268 bytes)
+ok    property renders "documents" (2618 bytes)
+ok    property renders "reports" (2239 bytes)
+ok    property renders "organization" (2239 bytes)
+
+=== reminders visibility follows the reminders module ===
+ok    finance dashboard shows the payment reminders panel
+ok    finance payments view shows recorded payments
+ok    finance payments view shows the reminders register
+ok    sales dashboard hides the reminders panel
+ok    legal dashboard hides the reminders panel
+ok    property officer dashboard hides the reminders panel
+ok    the MD keeps the reminders panel
+
+=== reset password control is administrator-only ===
+ok    administrator sees the Reset password control
+ok    the MD is not offered Reset password
+ok    a sales officer is not offered Reset password
+
+=== contract form pricing fields ===
+ok    the contract form has an editable original price
+ok    the contract form has an editable discount percentage
+ok    the contract form shows the calculated discount amount
+ok    the contract form shows the calculated final price
+ok    the final price is not a submitted field
+ok    the discount amount is not a submitted field
+ok    the old free-text contract value field is gone
+ok    the final price input is read-only
+ok    the discount amount input is read-only
+ok    a finance officer is not offered Reset password
+
+=== navigation contains only the authorized workspace ===
+ok    administrator: "dashboard" is present in the navigation
+ok    administrator: "admin-dashboard" is present in the navigation
+ok    administrator: "projects" is present in the navigation
+ok    administrator: "properties" is present in the navigation
+ok    administrator: "clients" is present in the navigation
+ok    administrator: "contracts" is present in the navigation
+ok    administrator: "debts" is present in the navigation
+ok    administrator: "appointments" is present in the navigation
+ok    administrator: "documents" is present in the navigation
+ok    administrator: "reports" is present in the navigation
+ok    administrator: "organization" is present in the navigation
+ok    director: "admin-dashboard" is absent from the navigation
+ok    director: "organization" is absent from the navigation
+ok    director: "dashboard" is present in the navigation
+ok    director: "projects" is present in the navigation
+ok    director: "properties" is present in the navigation
+ok    director: "clients" is present in the navigation
+ok    director: "contracts" is present in the navigation
+ok    director: "debts" is present in the navigation
+ok    director: "appointments" is present in the navigation
+ok    director: "documents" is present in the navigation
+ok    director: "reports" is present in the navigation
+ok    finance: "admin-dashboard" is absent from the navigation
+ok    finance: "organization" is absent from the navigation
+ok    finance: "properties" is absent from the navigation
+ok    finance: "appointments" is absent from the navigation
+ok    finance: "dashboard" is present in the navigation
+ok    finance: "clients" is present in the navigation
+ok    finance: "contracts" is present in the navigation
+ok    finance: "debts" is present in the navigation
+ok    finance: "reports" is present in the navigation
+ok    sales: "admin-dashboard" is absent from the navigation
+ok    sales: "organization" is absent from the navigation
+ok    sales: "debts" is absent from the navigation
+ok    sales: "dashboard" is present in the navigation
+ok    sales: "projects" is present in the navigation
+ok    sales: "properties" is present in the navigation
+ok    sales: "clients" is present in the navigation
+ok    sales: "contracts" is present in the navigation
+ok    sales: "appointments" is present in the navigation
+ok    sales: "documents" is present in the navigation
+ok    sales: "reports" is present in the navigation
+ok    property: "admin-dashboard" is absent from the navigation
+ok    property: "organization" is absent from the navigation
+ok    property: "contracts" is absent from the navigation
+ok    property: "debts" is absent from the navigation
+ok    property: "reports" is absent from the navigation
+ok    property: "dashboard" is present in the navigation
+ok    property: "projects" is present in the navigation
+ok    property: "properties" is present in the navigation
+ok    property: "clients" is present in the navigation
+ok    property: "appointments" is present in the navigation
+ok    property: "documents" is present in the navigation
+ok    the MD is returned to the dashboard from "admin-dashboard"
+ok    the MD is returned to the dashboard from "organization"
+ok    the MD holds no manage_* permission that would justify administration
+
+=== finance can open the contract behind an installment ===
+ok    the finance fixture has both an installment and its contract
+ok    finance installment rows offer View contract
+ok    a caller without the contracts module gets no View contract button
+
+=== admin portal is separated from the staff portal ===
+ok    administrator (admin) enters the ADMIN portal /admin
+ok    administrator keeps the Admin overview item
+ok    administrator keeps the Administration item
+ok    director (staff) enters the STAFF portal /staff
+ok    director (staff): Admin overview is ABSENT from the staff portal nav
+ok    director (staff): Administration is ABSENT from the staff portal nav
+ok    director: "admin-dashboard" is not reachable (redirected to dashboard)
+ok    director: "organization" is not reachable (redirected to dashboard)
+ok    sales (staff) enters the STAFF portal /staff
+ok    sales (staff): Admin overview is ABSENT from the staff portal nav
+ok    sales (staff): Administration is ABSENT from the staff portal nav
+ok    sales: "admin-dashboard" is not reachable (redirected to dashboard)
+ok    sales: "organization" is not reachable (redirected to dashboard)
+ok    finance (staff) enters the STAFF portal /staff
+ok    finance (staff): Admin overview is ABSENT from the staff portal nav
+ok    finance (staff): Administration is ABSENT from the staff portal nav
+ok    finance: "admin-dashboard" is not reachable (redirected to dashboard)
+ok    finance: "organization" is not reachable (redirected to dashboard)
+ok    property (staff) enters the STAFF portal /staff
+ok    property (staff): Admin overview is ABSENT from the staff portal nav
+ok    property (staff): Administration is ABSENT from the staff portal nav
+ok    property: "admin-dashboard" is not reachable (redirected to dashboard)
+ok    property: "organization" is not reachable (redirected to dashboard)
+
+=== new client form guides the contract requirement ===
+ok    the client form states that completing a client needs a contract
+ok    the client form offers the contract step
+ok    the contract step carries the original price
+ok    the contract step carries the discount percentage
+ok    the final price in the client form is read-only
+ok    the discount amount in the client form is read-only
+ok    the prospect option is still offered
+ok    a caller without the contracts module still sees the requirement explained
+ok    a caller without the contracts module is not offered the contract form
+
+FRONTEND_RENDER_ALL_PASSED

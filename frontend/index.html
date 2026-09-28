@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0b6b4d" />
+  <title>MKUYU · Private Office</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/app.css" />
+</head>
+<body>
+  <div class="ambient" aria-hidden="true">
+    <span class="ambient-orb ambient-orb-1"></span>
+    <span class="ambient-orb ambient-orb-2"></span>
+    <span class="ambient-orb ambient-orb-3"></span>
+    <div class="ambient-grid"></div>
+  </div>
+
+  <section class="auth-screen" id="auth-screen">
+    <div class="auth-art">
+      <div class="auth-brand"><span class="brand-mark">M</span><span>MKUYU</span></div>
+      <div class="auth-art-copy">
+        <div class="eyebrow light">Private office · Real estate intelligence</div>
+        <h1>Manage every<br /><em>valuable detail.</em></h1>
+        <p>A calm, premium workspace for projects, properties, clients, contracts, payments, appointments, and documents.</p>
+        <div class="auth-art-stats">
+          <div><strong>01</strong><span>Portfolio</span></div>
+          <div><strong>02</strong><span>People</span></div>
+          <div><strong>03</strong><span>Performance</span></div>
+        </div>
+      </div>
+      <div class="auth-art-foot"><span class="status-dot"></span> Secure workspace ready</div>
+    </div>
+    <div class="auth-stage">
+      <div class="auth-card glass">
+        <div class="auth-card-head">
+          <div>
+            <div class="eyebrow">Welcome to your office</div>
+            <h2 id="auth-title">Sign in</h2>
+            <p id="auth-subtitle">Use your private workspace credentials.</p>
+          </div>
+          <span class="auth-seal">MK</span>
+        </div>
+        <form id="auth-form">
+          <div class="field" id="display-name-field" hidden>
+            <label for="auth-name">Your name</label>
+            <input id="auth-name" name="display_name" autocomplete="name" placeholder="e.g. Amina Mwalimu" />
+          </div>
+          <div class="field">
+            <label for="auth-email">Email address</label>
+            <input id="auth-email" name="email" type="email" autocomplete="email" required placeholder="you@company.com" />
+          </div>
+          <div class="field">
+            <label for="auth-password">Password</label>
+            <input id="auth-password" name="password" type="password" autocomplete="current-password" required minlength="8" placeholder="At least 8 characters" />
+          </div>
+          <p class="auth-message" id="auth-message" hidden></p>
+          <button class="btn btn-primary btn-block" id="auth-submit" type="submit">Enter workspace <span>↗</span></button>
+        </form>
+        <div class="auth-switch"><span id="auth-switch-label">New private workspace?</span><button class="text-btn" id="auth-toggle" type="button">Create an account</button></div>
+        <div class="auth-footnote"><span class="lock-icon">●</span> Sessions are protected and stored locally on this device.</div>
+      </div>
+    </div>
+  </section>
+
+  <div class="workspace" id="workspace" hidden>
+    <aside class="sidebar glass">
+      <div class="brand">
+        <div class="brand-logo">M</div>
+        <div class="brand-text"><div class="brand-name">MKUYU</div><div class="brand-sub">Private office</div></div>
+      </div>
+      <div class="side-label">Workspace</div>
+      <nav class="nav" id="primary-nav"></nav>
+      <div class="sidebar-footer">
+        <button class="btn btn-soft btn-block" data-action="backup-now" data-admin-only title="Create a consistent copy of the database and download it">Backup workspace</button>
+        <div class="user-chip"><div class="user-avatar" id="user-avatar">V</div><div class="user-copy"><strong id="user-name">Office</strong><span id="user-email">Private workspace</span></div><button class="icon-btn" data-action="logout" title="Sign out">×</button></div>
+        <div class="system-line"><span class="status-dot"></span><span>Live records · v2.0</span></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar glass">
+        <div class="mobile-menu"><button class="icon-btn" data-action="toggle-menu" aria-label="Open navigation">☰</button></div>
+        <div><div class="eyebrow" id="page-eyebrow">Overview</div><h1 class="page-title" id="page-title">Dashboard</h1><p class="page-sub" id="page-sub">Your portfolio at a glance.</p></div>
+        <div class="topbar-actions" id="topbar-actions"></div>
+      </header>
+      <section class="content" id="content"></section>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="modal-backdrop" hidden><div class="modal glass" id="modal"></div></div>
+  <div class="toast" id="toast" hidden></div>
+  <script src="/js/app.js"></script>
+</body>
+</html>

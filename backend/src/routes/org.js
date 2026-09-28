@@ -1,0 +1,496 @@
+import { Router } from "express";
+import { query, queryOne, withTransaction } from "../db.js";
+import { organizationId, permissionKeys, requirePermission, requireAdmin, requireModuleAccess, requireScope } from "../org/rbac.js";
+import { addRecordShare, can, canAccessModule, clearAccessCache, currentAccess, isScope, isVisibility, listRecordShares, ownershipFields, removeRecordShare, scopeCondition } from "../org/access.js";
+import { audit } from "../org/audit.js";
+import { hashPassword, publicUser } from "../auth.js";
+import { Project } from "../models/project.js";
+import { Contract } from "../models/contract.js";
+import { Debt } from "../models/debt.js";
+import { Payment } from "../models/payment.js";
+import { Reminder } from "../models/reminder.js";
+import { Report } from "../models/report.js";
+import { Appointment, Client, Document, Property } from "../models/catalog.js";
+import { REPORT_TYPES, PAYMENT_METHODS, reportTypeIsFinancial } from "../models/reportTypes.js";
+import { CONTRACT_ACTIONS, availableActions, canTransition } from "../contracts/workflow.js";
+import { ROLE_DUTIES, CONTRACT_OWNERSHIP, ROLE_HOME_DEPARTMENT, checkRoleDuties, checkContractOwnership, checkNoSystemAdminLeak, checkDeadPermissions } from "../org/duties.js";
+
+const router = Router();
+const id = (value, field = "id") => { const n = Number(value); if (!Number.isInteger(n) || n < 1) { const e = new Error(`${field} must be a positive integer`); e.status = 400; throw e; } return n; };
+const text = (value, field, max = 160) => { if (typeof value !== "string" || !value.trim() || value.trim().length > max) { const e = new Error(`${field} is required`); e.status = 400; throw e; } return value.trim(); };
+const rank = (value, fallback = 0) => { const n = value === undefined || value === null || value === "" ? fallback : Number(value); if (!Number.isInteger(n) || n < 0 || n > 100) { const e = new Error("rank must be an integer between 0 and 100"); e.status = 400; throw e; } return n; };
+const scope = (value, fallback = "own") => { const selected = value === undefined || value === null || value === "" ? fallback : String(value); if (!isScope(selected)) { const e = new Error("scope must be own, department or organization"); e.status = 400; throw e; } return selected; };
+const rows = async (sql, values = []) => (await query(sql, values)).rows;
+// Express 4 does not catch rejected promises from async middleware, so this
+// wrapper must always funnel errors into next() or the process dies.
+const requireAnyPermission = (...permissions) => async (req, res, next) => {
+  try {
+    const granted = await permissionKeys(req.user.id);
+    if (!permissions.some((permission) => granted.includes(permission))) return res.status(403).json({ error: "permission denied" });
+    next();
+  } catch (error) { next(error); }
+};
+
+/**
+ * Audit modules that describe the SYSTEM rather than the business.
+ *
+ * A `view_audit` holder (the ICTO) may read these to investigate access and
+ * security incidents, but never the business trail. Declared here, before any
+ * route that uses it, because the workspace route and /org/audit both filter on
+ * it at request time.
+ */
+const AUDIT_SYSTEM_MODULES = [
+  "auth", "user", "department", "role", "role_permissions", "settings", "backup",
+  "contract_permissions", "allocation", "share", "approval",
+];
+
+// Record types that carry ownership metadata, used by the sharing endpoints.
+// `module` is the permission key suffix used for module access.
+const recordTables = {
+  project: { table: "projects", module: "projects" },
+  client: { table: "clients", module: "clients" },
+  contract: { table: "contracts", module: "contracts" },
+  property: { table: "properties", module: "properties" },
+  appointment: { table: "appointments", module: "appointments" },
+  document: { table: "documents", module: "documents" },
+  debt: { table: "debts", module: "debts" },
+  payment: { table: "payments", module: "payments" },
+  // Reminders are a real module with their own access key and endpoint, so they
+  // belong in the list or Finance never sees them in its workspace.
+  //
+  // `ownable: false` is load-bearing: a reminder has no owner_id/created_by/
+  // department_id/visibility columns because it inherits the scope of the
+  // installment (debt) it belongs to. It therefore cannot be allocated or shared
+  // in its own right, and any query that assumed those columns would 500.
+  reminder: { table: "reminders", module: "reminders", ownable: false },
+  report: { table: "reports", module: "reports" },
+  lead: { table: "leads", module: "leads" },
+  follow_up: { table: "follow_ups", module: "follow_ups" },
+};
+
+/**
+ * Resolve an entity name to its table and alias.
+ *
+ * Records without their own ownership columns (reminders inherit the scope of
+ * the installment they belong to) cannot be allocated or shared, so they are
+ * rejected here with a clear 400. Without this guard the ownership SQL would
+ * reference columns that do not exist and surface as a 500.
+ */
+function recordTable(entity) {
+  const entry = recordTables[entity];
+  if (!entry) { const e = new Error("unknown record type"); e.status = 404; throw e; }
+  if (entry.ownable === false) { const e = new Error(`${entity} records cannot be allocated or shared on their own`); e.status = 400; throw e; }
+  return { table: entry.table, alias: entry.table.charAt(0) };
+}
+
+/** Authorization bootstrap payload: permissions, effective scope, allowed modules. */
+async function buildMe(req) {
+  const permissions = req.access?.permissions || (await permissionKeys(req.user.id));
+  // `modules` uses the same keys as the `access_<module>` permission keys.
+  const modules = Object.entries(recordTables)
+    .filter(([, entry]) => canAccessModule(req.access, entry.module))
+    .map(([, entry]) => entry.module)
+    .sort();
+  return {
+    organization_id: await organizationId(),
+    permissions,
+    financial: can(req.access, "view_financial"),
+    scope: req.access?.scope || "own",
+    rank: req.access?.rank ?? 0,
+    modules,
+    user: await publicUser(req.user),
+  };
+}
+
+/**
+ * Scoped row list for tables that do not have their own model module.
+ *
+ * `fragment` is the WHERE tail (filters only) and `orderBy` is the sort. They
+ * are separate parameters because this helper appends `ORDER BY` itself: a
+ * caller that passed a combined "AND ... ORDER BY ..." string produced two
+ * ORDER BY clauses and a 500. `fragment` is deliberately the only place a
+ * caller can add conditions.
+ */
+async function scopedList(table, alias, entity, fragment = "", orderBy = "") {
+  const values = [await organizationId()];
+  const visible = scopeCondition(alias, entity, currentAccess(), values);
+  return rows(`SELECT ${alias}.* FROM ${table} ${alias} WHERE ${alias}.organization_id=$1 AND ${visible}${fragment ? ` AND ${fragment.replace(/^\s*AND\s+/i, "")}` : ""}${orderBy ? ` ORDER BY ${orderBy}` : ""}`, values);
+}
+
+/**
+ * The workflow steps this caller may take on this contract right now. Derived
+ * server-side from the caller's own permissions, so the UI never has to guess
+ * and a hidden button is also a request the API would refuse.
+ */
+function contractActionsFor(contract, req) {
+  if (!contract?.status) return [];
+  const names = req.access?.isAdmin
+    ? Object.keys(CONTRACT_ACTIONS)
+    : availableActions(contract.status, req.access?.permissions || []).map((entry) => entry.action);
+  return names
+    .filter((name) => canTransition(contract.status, name))
+    .map((name) => ({ action: name, label: CONTRACT_ACTIONS[name].label, to: CONTRACT_ACTIONS[name].to }));
+}
+
+/** Organization/management counters, scoped and financially gated. */
+async function dashboardMetrics(req) {
+  const access = req.access;
+  const count = async (table, alias, entity, extra = "") => {
+    const values = [await organizationId()];
+    const visible = scopeCondition(alias, entity, access, values);
+    return Number((await queryOne(`SELECT COUNT(*) AS value FROM ${table} ${alias} WHERE ${alias}.organization_id=$1 AND ${visible}${extra}`, values)).value || 0);
+  };
+  const total = async (table, alias, entity, extra = "") => {
+    const values = [await organizationId()];
+    const visible = scopeCondition(alias, entity, access, values);
+    return Number((await queryOne(`SELECT COALESCE(SUM(${alias}.amount),0) AS value FROM ${table} ${alias} WHERE ${alias}.organization_id=$1 AND ${visible}${extra}`, values)).value || 0);
+  };
+  const financial = can(access, "view_financial");
+  return {
+    financial,
+    projects: await count("projects", "p", "project"),
+    properties: await count("properties", "p", "property"),
+    available_properties: await count("properties", "p", "property", " AND p.status='available'"),
+    clients: await count("clients", "c", "client"),
+    leads: await count("leads", "l", "lead", " AND l.status<>'converted'"),
+    contracts: await count("contracts", "c", "contract"),
+    follow_ups: await count("follow_ups", "f", "follow_up", " AND f.status='open'"),
+    payments: financial ? await total("payments", "p", "payment") : null,
+    outstanding: financial ? await total("debts", "d", "debt", " AND d.status <> 'paid'") : null,
+    overdue: financial ? await total("debts", "d", "debt", " AND d.status <> 'paid' AND d.due_date<CURRENT_DATE") : null,
+  };
+}
+
+/** Collections buckets used by the finance and administration panels. */
+async function collections(req) {
+  const access = req.access;
+  const debts = (extra) => scopedList("debts", "d", "debt", `d.status<>'paid'${extra}`, "d.due_date");
+  return {
+    outstanding: await debts(""),
+    overdue: await debts(" AND d.due_date<CURRENT_DATE"),
+    due_soon: await debts(" AND d.due_date BETWEEN CURRENT_DATE AND CURRENT_DATE+INTERVAL '14 days'"),
+    follow_ups: await scopedList("follow_ups", "f", "follow_up", "f.status='open'", "f.due_at"),
+  };
+}
+
+/**
+ * Authorization bootstrap. The frontend uses this to build navigation and
+ * dashboards, so it also reports the effective scope and allowed modules.
+ */
+/**
+ * One-call workspace bootstrap. The dashboard previously fired nine parallel
+ * requests; this returns exactly the same payload in a single round trip, and
+ * only the modules the caller actually holds. The response is private to the
+ * caller (per-user), so it is marked no-store.
+ */
+router.get("/workspace", async (req, res, next) => {
+  try {
+    const access = req.access;
+    const financial = can(access, "view_financial");
+    const admin = req.user?.role === "admin";
+    const has = (module) => canAccessModule(access, module);
+    const org = await organizationId();
+    // Everything the dashboard needs is fetched concurrently in one round trip.
+    // The heavy administration extras (organization counters and collections) are
+    // deliberately left out: they are only used on the Administration screen and
+    // would otherwise dominate the time-to-first-paint.
+    const [projects, contracts, clients, properties, appointments, documents, debts, payments, reminders, summary, projectReports, reportTypes, reportHistory, me, leads, followUps, departments, roles, users, audit, approvals] = await Promise.all([
+      has("projects") ? Project.all() : [],
+      has("contracts") ? Contract.all() : [],
+      has("clients") ? Client.all() : [],
+      has("properties") ? Property.all() : [],
+      has("appointments") ? Appointment.all() : [],
+      has("documents") ? Document.all() : [],
+      has("debts") && financial ? Debt.all() : [],
+      has("payments") && financial ? Payment.all() : [],
+      has("reminders") && financial ? Reminder.due() : [],
+      has("reports") ? Report.summary() : null,
+      has("reports") ? Report.byProject() : [],
+      has("reports") ? { types: REPORT_TYPES.filter((type) => financial || !reportTypeIsFinancial(type.id)), payment_methods: PAYMENT_METHODS, financial } : { types: [], payment_methods: [] },
+      has("reports") ? Report.history({}) : [],
+      buildMe(req),
+      has("leads") ? scopedList("leads", "l", "lead", "", "l.created_at DESC") : [],
+      has("follow_ups") ? scopedList("follow_ups", "f", "follow_up", "", "f.due_at") : [],
+      admin ? rows("SELECT * FROM departments WHERE organization_id=$1 ORDER BY name", [org]) : [],
+      admin ? rows("SELECT r.*, COALESCE((SELECT json_agg(p.permission_key ORDER BY p.permission_key) FROM role_permissions rpx JOIN permissions p ON p.id=rpx.permission_id WHERE rpx.role_id=r.id),'[]'::json) AS permissions FROM roles r WHERE r.organization_id=$1 ORDER BY r.rank DESC, r.name", [org]) : [],
+      admin ? rows("SELECT u.id,u.email,u.display_name,u.role,u.active FROM users u WHERE u.organization_id=$1 ORDER BY u.display_name", [org]) : [],
+      // The full audit trail is administrator-only. A `view_audit` holder such as
+      // the ICTO receives only system/security events, never business activity.
+      admin
+        ? rows("SELECT a.*,u.display_name AS user_name FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id WHERE a.organization_id=$1 ORDER BY a.created_at DESC LIMIT 100", [org])
+        : can(access, "view_audit")
+          ? rows("SELECT a.id,a.action,a.module,a.record_id,a.created_at,u.display_name AS user_name FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id WHERE a.organization_id=$1 AND a.module=ANY($2::text[]) ORDER BY a.created_at DESC LIMIT 100", [org, [...AUDIT_SYSTEM_MODULES]])
+          : [],
+      can(access, "approve") ? rows("SELECT * FROM approvals WHERE organization_id=$1 ORDER BY created_at DESC LIMIT 100", [org]) : [],
+    ]);
+    res.set("Cache-Control", "private, no-store");
+    res.json({
+      me,
+      projects, contracts, clients, properties, appointments, documents, debts, payments, reminders,
+      summary, projectReports, reportTypes, reportHistory, leads, followUps,
+      // Contracts carry their own available_actions, computed per caller, so the
+      // Legal desk shows review buttons a Sales officer will never see.
+      contracts: contracts.map((contract) => ({ ...contract, available_actions: contractActionsFor(contract, req) })),
+      admin: { departments, roles, users, audit, approvals, dashboard: null, collections: null },
+    });
+  } catch (error) { next(error); }
+});
+
+router.get("/me", async (req, res, next) => {
+  try { res.json(await buildMe(req)); } catch (error) { next(error); }
+});
+router.get("/departments", requireAdmin(), async (req,res,next)=>{try{res.json(await rows("SELECT * FROM departments WHERE organization_id=$1 ORDER BY name",[await organizationId()]));}catch(e){next(e);}});
+router.post("/departments", requireAdmin(), async (req,res,next)=>{try{const org=await organizationId();const r=await queryOne("INSERT INTO departments (organization_id,name,description) VALUES ($1,$2,$3) RETURNING *",[org,text(req.body?.name,"name"),req.body?.description||null]);await audit(req,"created","department",r.id);res.status(201).json(r);}catch(e){next(e);}});
+router.put("/departments/:id", requireAdmin(), async (req,res,next)=>{try{const r=await queryOne("UPDATE departments SET name=COALESCE($1,name),description=COALESCE($2,description),active=COALESCE($3,active) WHERE id=$4 AND organization_id=$5 RETURNING *",[req.body?.name||null,req.body?.description||null,req.body?.active===undefined?null:Boolean(req.body.active),id(req.params.id,"department_id"),await organizationId()]);if(!r)return res.status(404).json({error:"department not found"});clearAccessCache();await audit(req,"updated","department",r.id);res.json(r);}catch(e){next(e);}});
+router.get("/roles", requireAdmin(), async (req,res,next)=>{try{res.json(await rows("SELECT r.*,COUNT(rp.permission_id)::int AS permission_count,COALESCE((SELECT json_agg(p.permission_key ORDER BY p.permission_key) FROM role_permissions rpx JOIN permissions p ON p.id=rpx.permission_id WHERE rpx.role_id=r.id),'[]'::json) AS permissions FROM roles r LEFT JOIN role_permissions rp ON rp.role_id=r.id WHERE r.organization_id=$1 GROUP BY r.id ORDER BY r.rank DESC, r.name",[await organizationId()]));}catch(e){next(e);}});
+router.post("/roles", requireAdmin(), async (req,res,next)=>{try{const r=await queryOne("INSERT INTO roles (organization_id,name,description,rank,scope) VALUES ($1,$2,$3,$4,$5) RETURNING *",[await organizationId(),text(req.body?.name,"name"),req.body?.description||null,rank(req.body?.rank),scope(req.body?.scope)]);await audit(req,"created","role",r.id);res.status(201).json(r);}catch(e){next(e);}});
+router.put("/roles/:id", requireAdmin(), async (req,res,next)=>{try{const r=await queryOne("UPDATE roles SET name=COALESCE($1,name),description=COALESCE($2,description),rank=COALESCE($3,rank),scope=COALESCE($4,scope),active=COALESCE($5,active) WHERE id=$6 AND organization_id=$7 RETURNING *",[req.body?.name||null,req.body?.description||null,req.body?.rank===undefined?null:rank(req.body.rank),req.body?.scope===undefined?null:scope(req.body.scope),req.body?.active===undefined?null:Boolean(req.body.active),id(req.params.id,"role_id"),await organizationId()]);if(!r)return res.status(404).json({error:"role not found"});clearAccessCache();await audit(req,"updated","role",r.id);res.json(r);}catch(e){next(e);}});
+router.get("/permissions", requireAdmin(), async (req,res,next)=>{try{res.json(await rows("SELECT * FROM permissions ORDER BY permission_key"));}catch(e){next(e);}});
+
+/**
+ * The access matrix: Department -> Role -> Duty -> Permission -> Scope.
+ * Administrator only, because it describes who can do what across the office.
+ * The `audit` block runs the same bidirectional checks the test suite uses, so a
+ * misconfigured role is visible in the API rather than only in a terminal.
+ */
+router.get("/access-matrix", requireAdmin(), async (req, res, next) => {
+  try {
+    const org = await organizationId();
+    const roleRows = await rows(
+      `SELECT r.id,r.name,r.description,r.rank,r.scope,
+              COALESCE((SELECT json_agg(p.permission_key ORDER BY p.permission_key)
+                          FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id
+                         WHERE rp.role_id=r.id),'[]'::json) AS permissions,
+              COALESCE((SELECT json_agg(json_build_object('key',d.duty_key,'label',d.label,'description',d.description,
+                        'permissions',COALESCE((SELECT json_agg(p.permission_key ORDER BY p.permission_key)
+                                                  FROM duty_permissions dp JOIN permissions p ON p.id=dp.permission_id
+                                                 WHERE dp.duty_id=d.id),'[]'::json))
+                          ORDER BY d.sort_order)
+                          FROM duties d WHERE d.role_id=r.id),'[]'::json) AS duties,
+              COALESCE((SELECT json_agg(dep.name ORDER BY dep.name)
+                          FROM (SELECT DISTINCT ud.department_id FROM user_roles ur JOIN user_departments ud ON ud.user_id=ur.user_id
+                                 WHERE ur.role_id=r.id) x
+                          JOIN departments dep ON dep.id=x.department_id),'[]'::json) AS staff_departments
+         FROM roles r WHERE r.organization_id=$1 ORDER BY r.rank DESC, r.name`,
+      [org],
+    );
+    // Ownership is policed against each role's designed home department, not
+    // against whoever happens to hold the role today.
+    const rolesByName = {};
+    for (const role of roleRows) {
+      rolesByName[role.name] = {
+        name: role.name,
+        department: ROLE_HOME_DEPARTMENT[role.name] || null,
+        permissions: role.permissions || [],
+      };
+    }
+    const unmapped = Object.values(rolesByName).filter((role) => !role.department).map((role) => role.name);
+    const dutyProblems = [];
+    for (const role of roleRows) {
+      const result = checkRoleDuties(role.name, role.permissions || [], ROLE_DUTIES[role.name] || []);
+      if (result.missingPermission.length || result.unjustifiedPermission.length) {
+        dutyProblems.push({ role: role.name, ...result });
+      }
+    }
+    res.json({
+      departments: await rows("SELECT id,name,description,active FROM departments WHERE organization_id=$1 ORDER BY name", [org]),
+      roles: roleRows,
+      audit: {
+        dutyProblems,
+        contractOwnershipViolations: checkContractOwnership(rolesByName),
+        systemAdminLeaks: checkNoSystemAdminLeak(rolesByName),
+        deadPermissions: checkDeadPermissions(rolesByName),
+        unmappedRoles: unmapped,
+        contractOwnership: CONTRACT_OWNERSHIP,
+      },
+    });
+  } catch (error) { next(error); }
+});
+router.put("/roles/:id/permissions", requireAdmin(), async (req,res,next)=>{try{const roleId=id(req.params.id,"role_id");const role=await queryOne("SELECT id FROM roles WHERE id=$1 AND organization_id=$2",[roleId,await organizationId()]);if(!role)return res.status(404).json({error:"role not found"});await withTransaction(async(client)=>{await client.query("DELETE FROM role_permissions WHERE role_id=$1",[roleId]);for(const key of (Array.isArray(req.body?.permissions)?req.body.permissions:[]))await client.query("INSERT INTO role_permissions(role_id,permission_id) SELECT $1,id FROM permissions WHERE permission_key=$2 ON CONFLICT DO NOTHING",[roleId,String(key)]);});clearAccessCache();await audit(req,"updated","role_permissions",roleId);res.json({ok:true});}catch(e){next(e);}});
+router.get("/users", requireAdmin(), async (req,res,next)=>{try{const result=await rows("SELECT u.id,u.email,u.display_name,u.role,u.active,u.created_at,COALESCE((SELECT json_agg(json_build_object('id',r.id,'name',r.name,'rank',r.rank) ORDER BY r.rank DESC) FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=u.id),'[]'::json) AS roles,COALESCE((SELECT json_agg(json_build_object('id',d.id,'name',d.name)) FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=u.id),'[]'::json) AS departments FROM users u WHERE u.organization_id=$1 ORDER BY u.display_name",[await organizationId()]);res.json(result);}catch(e){next(e);}});
+router.post("/users", requireAdmin(), async (req,res,next)=>{try{const password=String(req.body?.password||"");if(password.length<8)return res.status(400).json({error:"password must be at least 8 characters"});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map(Number))];const departmentIds=[...new Set((Array.isArray(req.body?.department_ids)?req.body.department_ids:[]).map(Number))].filter(Boolean);if(!roleIds.length)return res.status(400).json({error:"select at least one role for the staff member"});const org=await organizationId();const roles=await rows("SELECT id FROM roles WHERE organization_id=$1 AND id=ANY($2::int[]) AND active=TRUE",[org,roleIds]);if(roles.length!==new Set(roleIds.map(Number)).size)return res.status(400).json({error:"one or more selected roles are invalid"});const r=await queryOne("INSERT INTO users(organization_id,email,password_hash,display_name,role) VALUES($1,$2,$3,$4,'staff') RETURNING id,email,display_name,role,active,created_at",[org,text(req.body?.email,"email").toLowerCase(),hashPassword(password),text(req.body?.display_name,"display_name",80)]);for(const roleId of roleIds)await query("INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE id=$2 AND organization_id=$3",[r.id,id(roleId,"role_id"),org]);for(const departmentId of departmentIds)await query("INSERT INTO user_departments(user_id,department_id) SELECT $1,id FROM departments WHERE id=$2 AND organization_id=$3",[r.id,id(departmentId,"department_id"),org]);clearAccessCache();await audit(req,"created","user",r.id,{role_ids:roleIds});res.status(201).json(r);}catch(e){next(e);}});
+router.put("/users/:id", requireAdmin(), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");const org=await organizationId();const target=await queryOne("SELECT id,email FROM users WHERE id=$1 AND organization_id=$2",[userId,org]);if(!target)return res.status(404).json({error:"user not found"});const r=await queryOne("UPDATE users SET display_name=COALESCE($1,display_name),active=COALESCE($2,active) WHERE id=$3 AND organization_id=$4 RETURNING id,email,display_name,role,active,created_at",[req.body?.display_name||null,req.body?.active===undefined?null:Boolean(req.body.active),userId,org]);
+    // A password reset changes the credential and nothing else: the user id, role,
+    // department, permissions and every owned record are untouched. Live sessions
+    // are dropped so a token minted against the old password cannot outlive it.
+    if(req.body?.password){if(String(req.body.password).length<8)return res.status(400).json({error:"password must be at least 8 characters"});await query("UPDATE users SET password_hash=$1 WHERE id=$2",[hashPassword(req.body.password),userId]);await query("DELETE FROM sessions WHERE user_id=$1",[userId]);clearAccessCache();await audit(req,"password_reset","user",userId,{email:target.email,sessions_invalidated:true});}
+    if(!r)return res.status(404).json({error:"user not found"});clearAccessCache();await audit(req,"updated","user",userId);res.json(r);}catch(e){next(e);}});
+router.put("/users/:id/roles", requireAdmin(), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");await withTransaction(async(c)=>{await c.query("DELETE FROM user_roles WHERE user_id=$1",[userId]);for(const roleId of(req.body?.role_ids||[]))await c.query("INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE id=$2 AND organization_id=$3 ON CONFLICT DO NOTHING",[userId,id(roleId,"role_id"),await organizationId()]);});clearAccessCache();await audit(req,"changed_role","user",userId);res.json({ok:true});}catch(e){next(e);}});
+router.put("/users/:id/departments", requireAdmin(), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");await withTransaction(async(c)=>{await c.query("DELETE FROM user_departments WHERE user_id=$1",[userId]);for(const departmentId of(req.body?.department_ids||[]))await c.query("INSERT INTO user_departments(user_id,department_id) SELECT $1,id FROM departments WHERE id=$2 AND organization_id=$3 ON CONFLICT DO NOTHING",[userId,id(departmentId,"department_id"),await organizationId()]);});clearAccessCache();await audit(req,"changed_department","user",userId);res.json({ok:true});}catch(e){next(e);}});
+/**
+ * Audit log.
+ *
+ * Two levels, both read-only:
+ *   - the full trail (every module, every user) for administrators;
+ *   - a system-security slice for `view_audit` holders such as the ICTO, which
+ *     excludes business modules entirely so owning an incident trail never
+ *     turns into reading contracts, clients or money.
+ *
+ * Nothing here writes, so a reader can never alter what they are reviewing.
+ */
+router.get("/audit", requireAnyPermission("view_audit", "manage_settings"), async (req, res, next) => {
+  try {
+    const org = await organizationId();
+    const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+    // Only a true administrator sees the complete trail. `manage_settings` is NOT
+    // enough: the ICTO holds it, and owning the system does not mean owning every
+    // business action ever recorded. This mirrors requireAdmin() elsewhere.
+    const full = req.access?.isAdmin === true;
+    if (full) {
+      return res.json(await rows(
+        "SELECT a.*,u.display_name AS user_name FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id WHERE a.organization_id=$1 ORDER BY a.created_at DESC,a.id DESC LIMIT $2",
+        [org, limit],
+      ));
+    }
+    const systemModules = [...AUDIT_SYSTEM_MODULES];
+    return res.json({
+      scope: "system",
+      note: "System and security events only. Business-module activity is withheld.",
+      entries: await rows(
+        `SELECT a.id,a.action,a.module,a.record_id,a.details_json,a.created_at,u.display_name AS user_name
+           FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id
+          WHERE a.organization_id=$1 AND a.module=ANY($2::text[])
+          ORDER BY a.created_at DESC,a.id DESC LIMIT $3`,
+        [org, systemModules, limit],
+      ),
+    });
+  } catch (error) { next(error); }
+});
+router.get("/approvals", requireAnyPermission("approve", "view_reports"), async (req, res, next) => { try { const o = await organizationId(); const status = req.query.status || null; if (status && !["pending", "approved", "rejected"].includes(status)) return res.status(400).json({ error: "status is invalid" }); res.json(await rows(`SELECT a.*,r.display_name AS requested_by_name,d.display_name AS decided_by_name FROM approvals a LEFT JOIN users r ON r.id=a.requested_by LEFT JOIN users d ON d.id=a.approved_by WHERE a.organization_id=$1 ${status ? "AND a.status=$2" : ""} ORDER BY a.created_at DESC,a.id DESC LIMIT 250`, status ? [o, status] : [o])); } catch (e) { next(e); } });
+router.post("/approvals", requirePermission("approve"), async (req, res, next) => { try { const o = await organizationId(); const r = await queryOne("INSERT INTO approvals(organization_id,module,record_id,requested_by,status,notes) VALUES($1,$2,$3,$4,'pending',$5) RETURNING *", [o, text(req.body?.module, "module", 80), id(req.body?.record_id, "record_id"), req.user.id, req.body?.notes || null]); await audit(req, "created", "approval", r.id); res.status(201).json(r); } catch (e) { next(e); } });
+router.put("/approvals/:id", requirePermission("approve"), async (req, res, next) => { try { const approvalId = id(req.params.id, "approval_id"); const status = String(req.body?.status || ""); if (!["approved", "rejected", "pending"].includes(status)) return res.status(400).json({ error: "status must be approved, rejected, or pending" }); const o = await organizationId(); const r = await queryOne("UPDATE approvals SET status=$1,approved_by=CASE WHEN $1='pending' THEN NULL ELSE $2 END,decided_at=CASE WHEN $1='pending' THEN NULL ELSE NOW() END,notes=COALESCE($3,notes) WHERE id=$4 AND organization_id=$5 RETURNING *", [status, req.user.id, req.body?.notes || null, approvalId, o]); if (!r) return res.status(404).json({ error: "approval not found" }); await audit(req, status === "pending" ? "reopened" : "decided", "approval", r.id, { status }); res.json(r); } catch (e) { next(e); } });
+
+router.get("/leads", requireModuleAccess("leads"), async(req,res,next)=>{try{const values=[await organizationId()];const visible=scopeCondition("l","lead",req.access,values);res.json(await rows(`SELECT l.* FROM leads l WHERE l.organization_id=$1 AND ${visible} ORDER BY l.created_at DESC`,values));}catch(e){next(e);}});
+router.post("/leads", requireModuleAccess("leads"), requirePermission("create"), async(req,res,next)=>{try{const own=ownershipFields(req.access);const r=await queryOne("INSERT INTO leads(organization_id,name,email,phone,source,status,notes,assigned_to,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *",[await organizationId(),text(req.body?.name,"name"),req.body?.email||null,req.body?.phone||null,req.body?.source||null,req.body?.status||"new",req.body?.notes||null,req.body?.assigned_to||req.user.id,own.owner_id,own.created_by,own.department_id,own.visibility]);await audit(req,"created","lead",r.id);res.status(201).json(r);}catch(e){next(e);}});
+// Conversion registers a person as a client record; it is NOT a signature. The
+// record is therefore created as a PROSPECT ('lead'), so the completed-client rule
+// (a client must have a contract) is never violated by converting a lead. Sales
+// attaches the contract and completes the client afterwards.
+router.post("/leads/:id/convert", requireModuleAccess("leads"), requirePermission("create"), async(req,res,next)=>{try{const leadId=id(req.params.id,"lead_id");const values=[leadId,await organizationId()];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND ${scopeCondition("l","lead",req.access,values)}`,values);if(!lead)return res.status(404).json({error:"lead not found"});const client=await queryOne("INSERT INTO clients(organization_id,name,email,phone,client_type,status,notes,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,'buyer','lead',$5,$6,$7,$8,$9) RETURNING *",[values[1],lead.name,lead.email,lead.phone,lead.notes,lead.owner_id,lead.created_by,lead.department_id,lead.visibility]);await query("UPDATE leads SET client_id=$1,status='converted',converted_at=NOW() WHERE id=$2",[client.id,lead.id]);await audit(req,"converted","lead",lead.id,{client_id:client.id});res.status(201).json(client);}catch(e){next(e);}});
+router.get("/follow-ups", requireModuleAccess("follow_ups"), async(req,res,next)=>{try{const values=[await organizationId()];const visible=scopeCondition("f","follow_up",req.access,values);res.json(await rows(`SELECT f.* FROM follow_ups f WHERE f.organization_id=$1 AND ${visible} ORDER BY f.due_at`,values));}catch(e){next(e);}});
+router.post("/follow-ups", requireModuleAccess("follow_ups"), requirePermission("create"), async(req,res,next)=>{try{const own=ownershipFields(req.access);const r=await queryOne("INSERT INTO follow_ups(organization_id,lead_id,client_id,assigned_to,due_at,next_due_at,follow_up_type,status,outcome,notes,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *",[await organizationId(),req.body?.lead_id||null,req.body?.client_id||null,req.body?.assigned_to||req.user.id,req.body?.due_at,req.body?.next_due_at||null,req.body?.follow_up_type||"call",req.body?.status||"open",req.body?.outcome||null,req.body?.notes||null,own.owner_id,own.created_by,own.department_id,own.visibility]);await audit(req,"created","follow_up",r.id);res.status(201).json(r);}catch(e){next(e);}});
+// Dashboard counters honour the caller's record scope, and monetary counters are
+// only produced for callers holding `view_financial`.
+router.get("/dashboard", requireAnyPermission("manage_permissions", "manage_users", "view_reports"), requireScope("organization", "department"), async(req,res,next)=>{try{res.json(await dashboardMetrics(req));}catch(e){next(e);}});
+router.get("/collections",requireAnyPermission("manage_users", "view_financial"),async(req,res,next)=>{try{res.json(await collections(req));}catch(e){next(e);}});
+router.get("/settings",requireAdmin(),async(req,res,next)=>{try{res.json(await rows("SELECT setting_key,setting_value FROM settings WHERE organization_id=$1 ORDER BY setting_key",[await organizationId()]));}catch(e){next(e);}});
+router.put("/settings/:key",requireAdmin(),async(req,res,next)=>{try{const o=await organizationId();const key=text(req.params.key,"setting_key",80);const value=String(req.body?.value??"");await query("INSERT INTO settings(organization_id,setting_key,setting_value) VALUES($1,$2,$3) ON CONFLICT(organization_id,setting_key) DO UPDATE SET setting_value=EXCLUDED.setting_value",[o,key,value]);await audit(req,"updated","setting",key);res.json({setting_key:key,setting_value:value});}catch(e){next(e);}});
+router.get("/public-listings",async(req,res,next)=>{try{res.json(await rows("SELECT id,name,property_type,status,price,location,area,bedrooms,bathrooms,description FROM properties WHERE organization_id=$1 AND public_listing=TRUE AND public_listing_status='approved' ORDER BY created_at DESC",[await organizationId()]));}catch(e){next(e);}});
+// Sector workspaces. Each workspace lists the modules it covers; the response is
+// filtered by what the caller actually holds, so a sector never advertises a
+// module the caller cannot open.
+const workspaces = {
+  management: { label: "Managing Director", modules: ["projects", "properties", "clients", "leads", "contracts", "documents", "appointments", "debts", "payments", "reports"] },
+  sales: { label: "Sales", modules: ["leads", "follow_ups", "clients", "properties", "appointments", "contracts", "documents", "reports"] },
+  marketing: { label: "Marketing", modules: ["leads", "follow_ups", "properties", "documents", "clients", "reports"] },
+  finance: { label: "Finance", modules: ["contracts", "debts", "payments", "reminders", "clients", "reports"] },
+  property: { label: "Property", modules: ["projects", "properties", "clients", "appointments", "documents"] },
+  legal: { label: "Contracts & Legal", modules: ["contracts", "documents", "clients", "projects"] },
+  administration: { label: "Administration", modules: [] },
+};
+router.get("/workspaces/:workspace",async(req,res,next)=>{try{const key=String(req.params.workspace).toLowerCase();const workspace=workspaces[key];if(!workspace)return res.status(404).json({error:"workspace not found"});const isAdmin=req.access?.isAdmin;const modules=isAdmin?[...workspace.modules,"administration"]:workspace.modules.filter((module)=>canAccessModule(req.access,module));res.json({workspace:key,label:workspace.label,modules,permissions:req.access?.permissions||[],scope:req.access?.scope||"own",financial:can(req.access,"view_financial")});}catch(e){next(e);}});
+router.get("/workspaces",async(req,res,next)=>{try{res.json(Object.entries(workspaces).map(([key,value])=>({workspace:key,label:value.label,modules:value.modules})));}catch(e){next(e);}});
+
+/**
+ * Record allocation overview. Administrators use this to find records that are
+ * still in the office-wide pool (created before ownership existed) and to move
+ * them to an owner, a department and a visibility.
+ */
+router.get("/records/allocation", requireAdmin(), async (req, res, next) => {
+  try {
+    const org = await organizationId();
+    const limit = Math.min(Math.max(Number(req.query.limit) || 25, 1), 100);
+    const onlyUnassigned = req.query.unassigned !== "0";
+    const entities = [];
+    for (const [entity, entry] of Object.entries(recordTables)) {
+      // Records with no ownership columns of their own (reminders inherit the
+      // scope of their installment) cannot be allocated, so they are reported
+      // as skipped rather than queried against columns that do not exist.
+      if (entry.ownable === false) { entities.push({ entity, table: entry.table, ownable: false, total: 0, unassigned: 0, records: [] }); continue; }
+      const alias = entry.table.charAt(0);
+      const where = `${alias}.organization_id = $1${onlyUnassigned ? ` AND ${alias}.owner_id IS NULL AND ${alias}.created_by IS NULL` : ""}`;
+      const totals = await queryOne(
+        `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE ${alias}.owner_id IS NULL AND ${alias}.created_by IS NULL)::int AS unassigned FROM ${entry.table} ${alias} WHERE ${alias}.organization_id = $1`,
+        [org],
+      );
+      const labelColumn = { projects: "name", clients: "name", contracts: "client_name", properties: "name", appointments: "title", documents: "title", debts: "client_name", payments: "client_name", reports: "title", leads: "name", follow_ups: "follow_up_type" }[entry.table] || "id";
+      const records = await rows(
+        `SELECT ${alias}.id, ${alias}.${labelColumn} AS label, ${alias}.owner_id, ${alias}.department_id, ${alias}.visibility, (SELECT COUNT(*)::int FROM record_shares rs WHERE rs.entity = $2 AND rs.record_id = ${alias}.id) AS share_count
+           FROM ${entry.table} ${alias} WHERE ${where} ORDER BY ${alias}.created_at DESC LIMIT $3`,
+        [org, entity, limit],
+      );
+      entities.push({ entity, table: entry.table, label_field: labelColumn, total: totals.total, unassigned: totals.unassigned, records });
+    }
+    res.json({ entities, limit });
+  } catch (error) { next(error); }
+});
+
+// Administrators allocate legacy records: this is how an unassigned record
+// leaves the office-wide pool and starts following owner/department rules.
+router.put("/records/:entity/:id/access", requireAdmin(), async (req, res, next) => {
+  try {
+    const { table, alias } = recordTable(String(req.params.entity || ""));
+    const recordId = id(req.params.id, "record_id");
+    const ownerId = req.body?.owner_id === undefined || req.body.owner_id === null || req.body.owner_id === "" ? null : id(req.body.owner_id, "owner_id");
+    const departmentId = req.body?.department_id === undefined || req.body.department_id === null || req.body.department_id === "" ? null : id(req.body.department_id, "department_id");
+    const visibility = req.body?.visibility === undefined || req.body.visibility === null || req.body.visibility === "" ? null : String(req.body.visibility);
+    if (visibility && !isVisibility(visibility)) return res.status(400).json({ error: "visibility must be own, department or organization" });
+    const org = await organizationId();
+    if (ownerId && !await queryOne("SELECT 1 AS ok FROM users WHERE id=$1 AND organization_id=$2", [ownerId, org])) return res.status(400).json({ error: "owner_id is not a member of this organization" });
+    if (departmentId && !await queryOne("SELECT 1 AS ok FROM departments WHERE id=$1 AND organization_id=$2", [departmentId, org])) return res.status(400).json({ error: "department_id is not a department of this organization" });
+    const record = await queryOne(`UPDATE ${table} ${alias} SET owner_id=COALESCE($1,owner_id),created_by=COALESCE($1,created_by),department_id=$2,visibility=COALESCE($3,visibility) WHERE ${alias}.id=$4 AND ${alias}.organization_id=$5 RETURNING *`, [ownerId, departmentId, visibility, recordId, org]);
+    if (!record) return res.status(404).json({ error: "record not found" });
+    await audit(req, "reassigned", String(req.params.entity), recordId, { owner_id: ownerId, department_id: departmentId, visibility });
+    res.json(record);
+  } catch (e) { next(e); }
+});
+
+// Sharing is available to the record owner, department managers, and admins.
+async function requireShareable(req, entity, recordId) {
+  const { table, alias } = recordTable(entity);
+  const access = req.access;
+  const values = [recordId, await organizationId()];
+  const visible = scopeCondition(alias, entity, access, values);
+  const record = await queryOne(`SELECT ${alias}.* FROM ${table} ${alias} WHERE ${alias}.id=$1 AND ${alias}.organization_id=$2 AND ${visible}`, values);
+  if (!record) { const e = new Error("record not found"); e.status = 404; throw e; }
+  if (access.isAdmin || access.scope === "organization" || record.owner_id === access.userId || (access.scope === "department" && record.department_id && access.departmentIds.includes(record.department_id))) return record;
+  const e = new Error("only the owner, a department manager or an administrator can share this record");
+  e.status = 403;
+  throw e;
+}
+
+router.get("/records/:entity/:id/shares", async (req, res, next) => {
+  try {
+    const entity = String(req.params.entity || "");
+    const record = await requireShareable(req, entity, id(req.params.id, "record_id"));
+    res.json(await listRecordShares(entity, record.id));
+  } catch (e) { next(e); }
+});
+router.post("/records/:entity/:id/shares", requirePermission("edit"), async (req, res, next) => {
+  try {
+    const entity = String(req.params.entity || "");
+    const record = await requireShareable(req, entity, id(req.params.id, "record_id"));
+    const userId = req.body?.user_id ? id(req.body.user_id, "user_id") : null;
+    const departmentId = req.body?.department_id ? id(req.body.department_id, "department_id") : null;
+    if (!userId && !departmentId) return res.status(400).json({ error: "share with a user_id or a department_id" });
+    const org = await organizationId();
+    if (userId && !await queryOne("SELECT 1 AS ok FROM users WHERE id=$1 AND organization_id=$2", [userId, org])) return res.status(400).json({ error: "user_id is not a member of this organization" });
+    if (departmentId && !await queryOne("SELECT 1 AS ok FROM departments WHERE id=$1 AND organization_id=$2", [departmentId, org])) return res.status(400).json({ error: "department_id is not a department of this organization" });
+    const share = await addRecordShare({ entity, recordId: record.id, userId, departmentId, createdBy: req.user.id });
+    await audit(req, "shared", entity, record.id, { user_id: userId, department_id: departmentId });
+    res.status(201).json(share);
+  } catch (e) { next(e); }
+});
+router.delete("/records/:entity/:id/shares/:shareId", requirePermission("edit"), async (req, res, next) => {
+  try {
+    const entity = String(req.params.entity || "");
+    const record = await requireShareable(req, entity, id(req.params.id, "record_id"));
+    const shareId = id(req.params.shareId, "share_id");
+    const removed = await removeRecordShare(shareId);
+    if (!removed || Number(removed.record_id) !== Number(record.id) || removed.entity !== entity) return res.status(404).json({ error: "share not found" });
+    await audit(req, "unshared", entity, record.id, { share_id: shareId });
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
+export default router;

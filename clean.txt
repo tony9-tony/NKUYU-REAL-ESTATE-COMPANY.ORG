@@ -1,0 +1,7 @@
+matrix accounts to remove: 28
+before: {"users":43,"contracts":33,"clients":57,"projects":32,"leads":2,"debts":131,"payments":27,"documents":20,"reports":34}
+removed: {"contracts":5,"leads":1,"clients":2,"projects":2,"audit":52,"users":28}
+after:  {"users":15,"contracts":28,"clients":55,"projects":30,"leads":1,"debts":127,"payments":27,"documents":20,"reports":34}
+
+CLEANUP_SCOPED_CORRECTLY
+matrix accounts remaining: 0

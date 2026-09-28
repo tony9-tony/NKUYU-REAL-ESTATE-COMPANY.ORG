@@ -1,0 +1,28 @@
+
+> realestate-system@1.0.0 test:partial
+> node --import ./test_support/guard.mjs partial_status_test.mjs
+
+[guard] using existing test database "mkuyu_org_test"
+[guard] live database    : mkuyu_org  (never written to)
+[guard] test database    : mkuyu_org_test
+ok    0 paid and not yet due stays pending
+ok    0 paid and past due is overdue
+ok    300 paid against 500 is partial
+ok    the part payment total is still 300
+ok    part paid and past due is partial, not overdue
+ok    250 paid against 500 is partial before the rest arrives
+ok    the balance completes it to paid
+ok    paying more than the amount is paid
+ok    the reopened installment starts partial
+ok    removing the part payment returns it to overdue
+ok    the payment total is back to zero
+ok    the status vocabulary includes partial
+ok    the vocabulary still carries all four values
+ok    exactly the amount is paid
+ok    one cent short is partial
+ok    one cent in is partial
+ok    a zero-value installment is pending, not paid
+ok    unpaid and past due is overdue
+ok    unpaid and not yet due is pending
+
+PARTIAL_STATUS_ALL_PASSED

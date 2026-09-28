@@ -1,0 +1,5 @@
+checks=134
+
+ROTATION_AND_UI_ALL_PASSED
+
+

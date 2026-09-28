@@ -1,0 +1,139 @@
+import { query, queryOne } from "../db.js";
+import { organizationId } from "../org/rbac.js";
+import { clearRecordShares, currentAccess, OWNERSHIP_COLUMNS, ownershipValues, scopeCondition } from "../org/access.js";
+import { propertyUploadsDir, storedFileExists } from "../uploads.js";
+
+// A gallery row is not proof that its file exists: the row and the artefact are
+// stored separately, so a restore, a moved data directory or a cleanup can leave
+// the row behind after the file is gone. `image_count` and `cover_image_id` are
+// therefore resolved against the filesystem before a caller is told which
+// pictures it can actually fetch. This only changes what is REPORTED; no row is
+// ever written, hidden or removed here.
+async function withAvailableImages(propertyRows) {
+  if (!propertyRows) return propertyRows;
+  const rows = Array.isArray(propertyRows) ? propertyRows : [propertyRows];
+  const withImages = rows.filter((row) => row && row.image_count > 0);
+  if (!withImages.length) return propertyRows;
+
+  const galleries = await query(
+    "SELECT id, property_id, stored_name FROM property_images WHERE organization_id=$1 AND property_id = ANY($2::int[]) ORDER BY id",
+    [await organizationId(), withImages.map((row) => row.id)],
+  );
+  const byProperty = new Map();
+  for (const image of galleries.rows) {
+    if (!byProperty.has(image.property_id)) byProperty.set(image.property_id, []);
+    byProperty.get(image.property_id).push(image);
+  }
+  for (const row of withImages) {
+    const images = byProperty.get(row.id) || [];
+    const available = images.filter((image) => storedFileExists(propertyUploadsDir, image.stored_name));
+    // The cover is the first picture that can actually be served, so a property
+    // whose lowest-id picture was lost still shows a real one instead of a 404.
+    row.cover_image_id = available.length ? available[0].id : null;
+    row.image_count = available.length;
+    // Surfaces the discrepancy instead of hiding it: the records still exist and
+    // an administrator can still act on them.
+    row.missing_image_count = images.length - available.length;
+  }
+  return propertyRows;
+}
+
+const propertySelect = `SELECT p.*,pr.name AS project_name,(SELECT COUNT(*)::int FROM property_images pi WHERE pi.property_id=p.id) AS image_count,(SELECT id FROM property_images pi WHERE pi.property_id=p.id ORDER BY pi.id LIMIT 1) AS cover_image_id FROM properties p LEFT JOIN projects pr ON pr.id=p.project_id`;
+const clientSelect = "SELECT c.*,pr.name AS project_name FROM clients c LEFT JOIN projects pr ON pr.id=c.project_id";
+const appointmentSelect = "SELECT a.*,c.name AS client_name,c.phone AS client_phone,p.name AS property_name,pr.name AS project_name FROM appointments a JOIN clients c ON c.id=a.client_id LEFT JOIN properties p ON p.id=a.property_id LEFT JOIN projects pr ON pr.id=a.project_id";
+const documentSelect = "SELECT d.*,c.name AS client_name,co.client_name AS contract_client,pr.name AS project_name FROM documents d LEFT JOIN clients c ON c.id=d.client_id LEFT JOIN contracts co ON co.id=d.contract_id LEFT JOIN projects pr ON pr.id=d.project_id";
+
+async function list(sql, alias, entity, values, conditions, order = "") {
+  const access = await currentAccess();
+  const all = [await organizationId(), ...values];
+  const where = [`${alias}.organization_id=$1`, ...conditions, scopeCondition(alias, entity, access, all)];
+  return query(`${sql} WHERE ${where.join(" AND ")}${order}`, all).then((x) => x.rows);
+}
+
+async function get(sql, alias, entity, id) {
+  const values = [id, await organizationId()];
+  const access = await currentAccess();
+  return queryOne(`${sql} WHERE ${alias}.id=$1 AND ${alias}.organization_id=$2 AND ${scopeCondition(alias, entity, access, values)}`, values);
+}
+
+async function create(sql, values) {
+  const access = await currentAccess();
+  const all = [await organizationId(), ...values];
+  ownershipValues(all, access);
+  return queryOne(sql, all);
+}
+
+// For tables without ownership metadata (gallery rows, reached through a
+// property that the route has already scope-checked).
+async function createPlain(sql, values) {
+  return queryOne(sql, [await organizationId(), ...values]);
+}
+
+async function update(entity, table, id, sql, values) {
+  const access = await currentAccess();
+  // Bind order: the SET values, then the row id and the organization id, then the
+  // scope predicate's own values. The scope predicate APPENDS to this array, so
+  // the id/organization placeholders are numbered from `values.length` BEFORE it
+  // runs. Numbering them afterwards reused the scope's numbers and Postgres
+  // compared an integer id against a text value.
+  const all = [...values, id, await organizationId()];
+  const alias = table.charAt(0);
+  const idParam = values.length + 1;
+  const orgParam = values.length + 2;
+  const scope = scopeCondition(alias, entity, access, all);
+  // The statement must carry the same alias the WHERE clause refers to, or
+  // Postgres raises "missing FROM-clause entry for table <alias>".
+  const aliased = sql.replace(new RegExp(`^UPDATE\\s+${table}\\s`, "i"), `UPDATE ${table} ${alias} `);
+  return query(`${aliased} WHERE ${alias}.id=$${idParam} AND ${alias}.organization_id=$${orgParam} AND ${scope}`, all);
+}
+
+async function remove(entity, table, id) {
+  const access = await currentAccess();
+  const values = [id, await organizationId()];
+  const alias = table.charAt(0);
+  const scope = scopeCondition(alias, entity, access, values);
+  const result = await query(`DELETE FROM ${table} ${alias} WHERE ${alias}.id=$1 AND ${alias}.organization_id=$2 AND ${scope}`, values);
+  if (result.rowCount) await clearRecordShares(entity, id);
+  return result;
+}
+
+export const Property = {
+  all(projectId = null, status = null) { const v = [], c = []; if (projectId) { v.push(projectId); c.push(`p.project_id=$${v.length + 1}`); } if (status) { v.push(status); c.push(`p.status=$${v.length + 1}`); } return list(propertySelect, "p", "property", v, c, " ORDER BY p.created_at DESC").then(withAvailableImages); },
+  async get(id) { return withAvailableImages(await get(propertySelect, "p", "property", id)); },
+  create(data) { return create(`INSERT INTO properties(organization_id,project_id,name,property_type,status,price,location,area,bedrooms,bathrooms,description,featured,${OWNERSHIP_COLUMNS}) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`, [data.project_id || null, data.name, data.property_type, data.status, data.price, data.location, data.area, data.bedrooms || 0, data.bathrooms || 0, data.description || null, Boolean(data.featured)]); },
+  update(id, data) { return update("property", "properties", id, "UPDATE properties SET project_id=$1,name=$2,property_type=$3,status=$4,price=$5,location=$6,area=$7,bedrooms=$8,bathrooms=$9,description=$10,featured=$11", [data.project_id || null, data.name, data.property_type, data.status, data.price, data.location, data.area, data.bedrooms || 0, data.bathrooms || 0, data.description || null, Boolean(data.featured)]); },
+  remove(id) { return remove("property", "properties", id); },
+};
+
+export const PropertyImage = {
+  async listFor(propertyId) { const o=await organizationId(); return query("SELECT * FROM property_images WHERE property_id=$1 AND organization_id=$2 ORDER BY id",[propertyId,o]).then((x)=>x.rows); },
+  async get(propertyId,imageId) { const o=await organizationId(); return queryOne("SELECT * FROM property_images WHERE property_id=$1 AND id=$2 AND organization_id=$3",[propertyId,imageId,o]); },
+  async countFor(propertyId) { const o=await organizationId(); return (await queryOne("SELECT COUNT(*)::int AS count FROM property_images WHERE property_id=$1 AND organization_id=$2",[propertyId,o])).count; },
+  create(propertyId,data) { return createPlain("INSERT INTO property_images(organization_id,property_id,original_filename,stored_name,file_size,mime_type) VALUES($1,$2,$3,$4,$5,$6) RETURNING id",[propertyId,data.original_filename||null,data.stored_name,data.file_size??null,data.mime_type||null]); },
+  async remove(imageId) { const o=await organizationId(); return query("DELETE FROM property_images WHERE id=$1 AND organization_id=$2",[imageId,o]); },
+};
+
+export const Client = {
+  all(projectId = null, status = null) { const v = [], c = []; if (projectId) { v.push(projectId); c.push(`c.project_id=$${v.length + 1}`); } if (status) { v.push(status); c.push(`c.status=$${v.length + 1}`); } return list(clientSelect, "c", "client", v, c, " ORDER BY c.created_at DESC"); },
+  get(id) { return get(clientSelect, "c", "client", id); },
+  create(data) { return create(`INSERT INTO clients(organization_id,project_id,name,email,phone,client_type,status,notes,${OWNERSHIP_COLUMNS}) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`, [data.project_id || null, data.name, data.email || null, data.phone || null, data.client_type, data.status, data.notes || null]); },
+  update(id, data) { return update("client", "clients", id, "UPDATE clients SET project_id=$1,name=$2,email=$3,phone=$4,client_type=$5,status=$6,notes=$7", [data.project_id || null, data.name, data.email || null, data.phone || null, data.client_type, data.status, data.notes || null]); },
+  remove(id) { return remove("client", "clients", id); },
+};
+
+
+export const Appointment = {
+  all(status = null, projectId = null) { const v = [], c = []; if (status) { v.push(status); c.push(`a.status=$${v.length + 1}`); } if (projectId) { v.push(projectId); c.push(`a.project_id=$${v.length + 1}`); } return list(appointmentSelect, "a", "appointment", v, c, " ORDER BY a.starts_at ASC"); },
+  get(id) { return get(appointmentSelect, "a", "appointment", id); },
+  create(data) { return create(`INSERT INTO appointments(organization_id,client_id,property_id,project_id,title,appointment_type,starts_at,ends_at,status,notes,${OWNERSHIP_COLUMNS}) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`, [data.client_id, data.property_id || null, data.project_id || null, data.title, data.appointment_type, data.starts_at, data.ends_at || null, data.status, data.notes || null]); },
+  update(id, data) { return update("appointment", "appointments", id, "UPDATE appointments SET client_id=$1,property_id=$2,project_id=$3,title=$4,appointment_type=$5,starts_at=$6,ends_at=$7,status=$8,notes=$9", [data.client_id, data.property_id || null, data.project_id || null, data.title, data.appointment_type, data.starts_at, data.ends_at || null, data.status, data.notes || null]); },
+  remove(id) { return remove("appointment", "appointments", id); },
+};
+
+export const Document = {
+  all(status = null, projectId = null) { const v = [], c = []; if (status) { v.push(status); c.push(`d.status=$${v.length + 1}`); } if (projectId) { v.push(projectId); c.push(`d.project_id=$${v.length + 1}`); } return list(documentSelect, "d", "document", v, c, " ORDER BY d.created_at DESC"); },
+  get(id) { return get(documentSelect, "d", "document", id); },
+  create(data) { return create(`INSERT INTO documents(organization_id,project_id,contract_id,client_id,title,category,status,file_reference,notes,original_filename,stored_name,file_size,mime_type,uploaded_at,${OWNERSHIP_COLUMNS}) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`, [data.project_id || null, data.contract_id || null, data.client_id || null, data.title, data.category, data.status, data.file_reference || null, data.notes || null, data.original_filename || null, data.stored_name || null, data.file_size ?? null, data.mime_type || null, data.uploaded_at || null]); },
+  update(id, data) { return update("document", "documents", id, "UPDATE documents SET project_id=$1,contract_id=$2,client_id=$3,title=$4,category=$5,status=$6,file_reference=$7,notes=$8", [data.project_id || null, data.contract_id || null, data.client_id || null, data.title, data.category, data.status, data.file_reference || null, data.notes || null]); },
+  remove(id) { return remove("document", "documents", id); },
+};

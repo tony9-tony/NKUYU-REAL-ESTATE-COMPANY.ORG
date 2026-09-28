@@ -1,0 +1,8 @@
+
+> realestate-system@1.0.0 test:unit
+> node --import ./test_support/guard.mjs unit_test.mjs
+
+[guard] using existing test database "mkuyu_org_test"
+[guard] live database    : mkuyu_org  (never written to)
+[guard] test database    : mkuyu_org_test
+UNIT_TESTS_PASSED

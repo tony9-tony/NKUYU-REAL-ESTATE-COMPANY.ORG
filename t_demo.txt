@@ -1,0 +1,260 @@
+
+> realestate-system@1.0.0 test:demo
+> node --import ./test_support/guard.mjs demo_account_test.mjs
+
+[guard] using existing test database "mkuyu_org_test"
+[guard] live database    : mkuyu_org  (never written to)
+[guard] test database    : mkuyu_org_test
+[harness] test database "mkuyu_org_test" prepared (schema, roles, departments, demo + legacy accounts)
+[harness] demo-accounts: server ready on :3205 (database: mkuyu_org_test)
+=== demo accounts ===
+ok    md@demo.mkuyu.local: logs in with the rotated demo password
+ok    md@demo.mkuyu.local: exists in the staff register
+ok    md@demo.mkuyu.local: role is "Managing Director"
+ok    md@demo.mkuyu.local: department is "MANAGEMENT"
+ok    md@demo.mkuyu.local: display name is "Joseph Mwakalinga"
+ok    md@demo.mkuyu.local: holds approve_management
+ok    md@demo.mkuyu.local: does NOT hold approve_legal
+ok    md@demo.mkuyu.local: does NOT hold review_legal
+ok    md@demo.mkuyu.local: does NOT hold validate_finance
+ok    md@demo.mkuyu.local: does NOT hold manage_users
+ok    md@demo.mkuyu.local: does NOT hold manage_roles
+ok    md@demo.mkuyu.local: does NOT hold manage_settings
+ok    md@demo.mkuyu.local: does NOT hold view_audit
+ok    md@demo.mkuyu.local: workspace includes contracts
+ok    md@demo.mkuyu.local: workspace includes payments
+ok    md@demo.mkuyu.local: workspace includes projects
+ok    finance.manager@demo.mkuyu.local: logs in with the rotated demo password
+ok    finance.manager@demo.mkuyu.local: exists in the staff register
+ok    finance.manager@demo.mkuyu.local: role is "Finance Manager"
+ok    finance.manager@demo.mkuyu.local: department is "FINANCE & ACCOUNTS"
+ok    finance.manager@demo.mkuyu.local: display name is "Grace Mushi"
+ok    finance.manager@demo.mkuyu.local: holds validate_finance
+ok    finance.manager@demo.mkuyu.local: holds view_financial
+ok    finance.manager@demo.mkuyu.local: does NOT hold approve_legal
+ok    finance.manager@demo.mkuyu.local: does NOT hold approve_management
+ok    finance.manager@demo.mkuyu.local: workspace includes debts
+ok    finance.manager@demo.mkuyu.local: workspace includes payments
+ok    finance.manager@demo.mkuyu.local: workspace includes reminders
+ok    finance@demo.mkuyu.local: logs in with the rotated demo password
+ok    finance@demo.mkuyu.local: exists in the staff register
+ok    finance@demo.mkuyu.local: role is "Finance Officer"
+ok    finance@demo.mkuyu.local: department is "FINANCE & ACCOUNTS"
+ok    finance@demo.mkuyu.local: display name is "Peter Ndosi"
+ok    finance@demo.mkuyu.local: holds validate_finance
+ok    finance@demo.mkuyu.local: does NOT hold approve_legal
+ok    finance@demo.mkuyu.local: does NOT hold approve_management
+ok    finance@demo.mkuyu.local: workspace includes debts
+ok    finance@demo.mkuyu.local: workspace includes payments
+ok    sales.manager@demo.mkuyu.local: logs in with the rotated demo password
+ok    sales.manager@demo.mkuyu.local: exists in the staff register
+ok    sales.manager@demo.mkuyu.local: role is "Department Manager"
+ok    sales.manager@demo.mkuyu.local: department is "SALES, MARKETING & OPERATIONS"
+ok    sales.manager@demo.mkuyu.local: display name is "Daniel Kibe"
+ok    sales.manager@demo.mkuyu.local: holds submit_contract
+ok    sales.manager@demo.mkuyu.local: does NOT hold approve_legal
+ok    sales.manager@demo.mkuyu.local: does NOT hold validate_finance
+ok    sales.manager@demo.mkuyu.local: does NOT hold approve_management
+ok    sales.manager@demo.mkuyu.local: does NOT hold view_financial
+ok    sales.manager@demo.mkuyu.local: workspace includes leads
+ok    sales.manager@demo.mkuyu.local: workspace includes properties
+ok    sales.manager@demo.mkuyu.local: workspace includes projects
+ok    sales.manager@demo.mkuyu.local: workspace excludes debts
+ok    sales.manager@demo.mkuyu.local: workspace excludes payments
+ok    sales.manager@demo.mkuyu.local: direct /debts refused (403)
+ok    sales.manager@demo.mkuyu.local: direct /payments refused (403)
+ok    sales@demo.mkuyu.local: logs in with the rotated demo password
+ok    sales@demo.mkuyu.local: exists in the staff register
+ok    sales@demo.mkuyu.local: role is "Sales, Marketing & Operations Officer"
+ok    sales@demo.mkuyu.local: department is "SALES, MARKETING & OPERATIONS"
+ok    sales@demo.mkuyu.local: display name is "Amina Sanga"
+ok    sales@demo.mkuyu.local: holds submit_contract
+ok    sales@demo.mkuyu.local: does NOT hold approve_legal
+ok    sales@demo.mkuyu.local: does NOT hold validate_finance
+ok    sales@demo.mkuyu.local: does NOT hold approve_management
+ok    sales@demo.mkuyu.local: workspace includes leads
+ok    sales@demo.mkuyu.local: workspace includes clients
+ok    sales@demo.mkuyu.local: workspace includes contracts
+ok    sales@demo.mkuyu.local: workspace excludes debts
+ok    sales@demo.mkuyu.local: workspace excludes payments
+ok    sales@demo.mkuyu.local: workspace excludes reminders
+ok    sales@demo.mkuyu.local: direct /debts refused (403)
+ok    sales@demo.mkuyu.local: direct /payments refused (403)
+ok    legal.manager@demo.mkuyu.local: logs in with the rotated demo password
+ok    legal.manager@demo.mkuyu.local: exists in the staff register
+ok    legal.manager@demo.mkuyu.local: role is "Legal Manager"
+ok    legal.manager@demo.mkuyu.local: department is "LEGAL"
+ok    legal.manager@demo.mkuyu.local: display name is "Fatuma Juma"
+ok    legal.manager@demo.mkuyu.local: holds approve_legal
+ok    legal.manager@demo.mkuyu.local: holds review_legal
+ok    legal.manager@demo.mkuyu.local: holds request_changes
+ok    legal.manager@demo.mkuyu.local: does NOT hold validate_finance
+ok    legal.manager@demo.mkuyu.local: does NOT hold approve_management
+ok    legal.manager@demo.mkuyu.local: does NOT hold submit_contract
+ok    legal.manager@demo.mkuyu.local: workspace includes contracts
+ok    legal.manager@demo.mkuyu.local: workspace includes documents
+ok    legal.manager@demo.mkuyu.local: workspace excludes debts
+ok    legal.manager@demo.mkuyu.local: workspace excludes payments
+ok    legal.manager@demo.mkuyu.local: direct /debts refused (403)
+ok    legal.manager@demo.mkuyu.local: direct /payments refused (403)
+ok    legal@demo.mkuyu.local: logs in with the rotated demo password
+ok    legal@demo.mkuyu.local: exists in the staff register
+ok    legal@demo.mkuyu.local: role is "Legal Officer"
+ok    legal@demo.mkuyu.local: department is "LEGAL"
+ok    legal@demo.mkuyu.local: display name is "Baraka Said"
+ok    legal@demo.mkuyu.local: holds approve_legal
+ok    legal@demo.mkuyu.local: holds review_legal
+ok    legal@demo.mkuyu.local: does NOT hold validate_finance
+ok    legal@demo.mkuyu.local: does NOT hold approve_management
+ok    legal@demo.mkuyu.local: workspace includes contracts
+ok    legal@demo.mkuyu.local: workspace includes documents
+ok    legal@demo.mkuyu.local: workspace excludes debts
+ok    legal@demo.mkuyu.local: workspace excludes payments
+ok    legal@demo.mkuyu.local: direct /debts refused (403)
+ok    legal@demo.mkuyu.local: direct /payments refused (403)
+ok    icto@demo.mkuyu.local: logs in with the rotated demo password
+ok    icto@demo.mkuyu.local: exists in the staff register
+ok    icto@demo.mkuyu.local: role is "ICTO"
+ok    icto@demo.mkuyu.local: department is "ICT & ADMINISTRATION"
+ok    icto@demo.mkuyu.local: display name is "Neema Ally"
+ok    icto@demo.mkuyu.local: holds manage_users
+ok    icto@demo.mkuyu.local: holds manage_roles
+ok    icto@demo.mkuyu.local: holds manage_permissions
+ok    icto@demo.mkuyu.local: holds manage_settings
+ok    icto@demo.mkuyu.local: holds view_audit
+ok    icto@demo.mkuyu.local: does NOT hold approve
+ok    icto@demo.mkuyu.local: does NOT hold approve_legal
+ok    icto@demo.mkuyu.local: does NOT hold validate_finance
+ok    icto@demo.mkuyu.local: does NOT hold approve_management
+ok    icto@demo.mkuyu.local: does NOT hold view_financial
+ok    icto@demo.mkuyu.local: workspace excludes contracts
+ok    icto@demo.mkuyu.local: workspace excludes clients
+ok    icto@demo.mkuyu.local: workspace excludes properties
+ok    icto@demo.mkuyu.local: workspace excludes leads
+ok    icto@demo.mkuyu.local: workspace excludes projects
+ok    icto@demo.mkuyu.local: workspace excludes debts
+ok    icto@demo.mkuyu.local: workspace excludes payments
+ok    icto@demo.mkuyu.local: workspace excludes reminders
+ok    icto@demo.mkuyu.local: workspace excludes documents
+ok    icto@demo.mkuyu.local: workspace excludes appointments
+ok    icto@demo.mkuyu.local: workspace excludes reports
+ok    icto@demo.mkuyu.local: workspace excludes follow_ups
+ok    icto@demo.mkuyu.local: direct /contracts refused (403)
+ok    icto@demo.mkuyu.local: direct /clients refused (403)
+ok    itsupport@demo.mkuyu.local: logs in with the rotated demo password
+ok    itsupport@demo.mkuyu.local: exists in the staff register
+ok    itsupport@demo.mkuyu.local: role is "Administration & IT Support Officer"
+ok    itsupport@demo.mkuyu.local: department is "ICT & ADMINISTRATION"
+ok    itsupport@demo.mkuyu.local: display name is "Salim Mwakalinga"
+ok    itsupport@demo.mkuyu.local: holds manage_users
+ok    itsupport@demo.mkuyu.local: does NOT hold manage_roles
+ok    itsupport@demo.mkuyu.local: does NOT hold manage_permissions
+ok    itsupport@demo.mkuyu.local: does NOT hold manage_settings
+ok    itsupport@demo.mkuyu.local: does NOT hold view_audit
+ok    itsupport@demo.mkuyu.local: does NOT hold approve_legal
+ok    itsupport@demo.mkuyu.local: workspace excludes contracts
+ok    itsupport@demo.mkuyu.local: workspace excludes clients
+ok    itsupport@demo.mkuyu.local: workspace excludes debts
+ok    itsupport@demo.mkuyu.local: workspace excludes payments
+ok    itsupport@demo.mkuyu.local: direct /contracts refused (403)
+ok    itsupport@demo.mkuyu.local: direct /clients refused (403)
+ok    cs.manager@demo.mkuyu.local: logs in with the rotated demo password
+ok    cs.manager@demo.mkuyu.local: exists in the staff register
+ok    cs.manager@demo.mkuyu.local: role is "Customer Service Manager"
+ok    cs.manager@demo.mkuyu.local: department is "CUSTOMER SERVICE"
+ok    cs.manager@demo.mkuyu.local: display name is "Zainab Mbeki"
+ok    cs.manager@demo.mkuyu.local: does NOT hold approve_legal
+ok    cs.manager@demo.mkuyu.local: does NOT hold submit_contract
+ok    cs.manager@demo.mkuyu.local: does NOT hold validate_finance
+ok    cs.manager@demo.mkuyu.local: does NOT hold view_financial
+ok    cs.manager@demo.mkuyu.local: workspace includes clients
+ok    cs.manager@demo.mkuyu.local: workspace includes appointments
+ok    cs.manager@demo.mkuyu.local: workspace includes follow_ups
+ok    cs.manager@demo.mkuyu.local: workspace excludes contracts
+ok    cs.manager@demo.mkuyu.local: workspace excludes debts
+ok    cs.manager@demo.mkuyu.local: workspace excludes payments
+ok    cs.manager@demo.mkuyu.local: direct /contracts refused (403)
+ok    cs.manager@demo.mkuyu.local: direct /debts refused (403)
+ok    cs@demo.mkuyu.local: logs in with the rotated demo password
+ok    cs@demo.mkuyu.local: exists in the staff register
+ok    cs@demo.mkuyu.local: role is "Customer Service Officer"
+ok    cs@demo.mkuyu.local: department is "CUSTOMER SERVICE"
+ok    cs@demo.mkuyu.local: display name is "Asha Rajabu"
+ok    cs@demo.mkuyu.local: does NOT hold approve_legal
+ok    cs@demo.mkuyu.local: does NOT hold submit_contract
+ok    cs@demo.mkuyu.local: does NOT hold validate_finance
+ok    cs@demo.mkuyu.local: does NOT hold view_financial
+ok    cs@demo.mkuyu.local: workspace includes clients
+ok    cs@demo.mkuyu.local: workspace includes appointments
+ok    cs@demo.mkuyu.local: workspace includes follow_ups
+ok    cs@demo.mkuyu.local: workspace excludes contracts
+ok    cs@demo.mkuyu.local: workspace excludes debts
+ok    cs@demo.mkuyu.local: workspace excludes payments
+ok    cs@demo.mkuyu.local: direct /contracts refused (403)
+ok    cs@demo.mkuyu.local: direct /debts refused (403)
+
+=== ICTO audit / security boundary (Task 1) ===
+ok    ICTO can read the security audit trail (200)
+ok    ICTO receives the system-scoped view, not the full trail
+ok    ICTO's audit payload is a structured, filtered list
+ok    ICTO's audit view leaks no business-module events (0 found)
+ok    admin still receives the full unfiltered audit trail
+ok    the admin payload is the complete trail, not the filtered object
+ok    ICTO is refused /org/users (403)
+ok    ICTO is refused /org/roles (403)
+ok    ICTO is refused /org/departments (403)
+ok    ICTO is refused /org/permissions (403)
+ok    ICTO is refused /org/access-matrix (403)
+ok    MD is refused the audit trail (403)
+ok    sales@demo.mkuyu.local is refused the audit trail (403)
+ok    finance@demo.mkuyu.local is refused the audit trail (403)
+ok    legal@demo.mkuyu.local is refused the audit trail (403)
+ok    cs@demo.mkuyu.local is refused the audit trail (403)
+ok    itsupport@demo.mkuyu.local is refused the audit trail (403)
+
+=== organization shape (Task 5) ===
+ok    exactly six departments (6)
+ok    MANAGEMENT has the "Managing Director" role
+ok    FINANCE & ACCOUNTS has the "Finance Manager" role
+ok    FINANCE & ACCOUNTS has the "Finance Officer" role
+ok    SALES, MARKETING & OPERATIONS has the "Department Manager" role
+ok    SALES, MARKETING & OPERATIONS has the "Sales, Marketing & Operations Officer" role
+ok    SALES, MARKETING & OPERATIONS has the "Sales Officer" role
+ok    SALES, MARKETING & OPERATIONS has the "Marketing Officer" role
+ok    SALES, MARKETING & OPERATIONS has the "Property Officer" role
+ok    ICT & ADMINISTRATION has the "ICTO" role
+ok    ICT & ADMINISTRATION has the "Administration & IT Support Officer" role
+ok    ICT & ADMINISTRATION has the "System Administrator" role
+ok    LEGAL has the "Legal Manager" role
+ok    LEGAL has the "Legal Officer" role
+ok    CUSTOMER SERVICE has the "Customer Service Manager" role
+ok    CUSTOMER SERVICE has the "Customer Service Officer" role
+ok    the retired role "Sales and Marketing Officer" does not exist
+ok    the retired role "Supervisor" does not exist
+ok    the general Staff Member role is still present
+ok    no staff display name still says "Sales and Marketing Officer"
+
+=== audit integrity (Task 6/7) ===
+ok    duty/permission consistency holds: []
+ok    contract lifecycle remains owned by one department
+ok    system administration remains inside ICT
+ok    no role holds an unusable permission
+ok    every role maps to a home department
+ok    System Administrator: 3 duties (2-8)
+ok    Managing Director: 4 duties (2-8)
+ok    Legal Manager: 7 duties (2-8)
+ok    Department Manager: 4 duties (2-8)
+ok    ICTO: 5 duties (2-8)
+ok    Legal Officer: 6 duties (2-8)
+ok    Customer Service Manager: 4 duties (2-8)
+ok    Finance Manager: 5 duties (2-8)
+ok    Administration & IT Support Officer: 3 duties (2-8)
+ok    Sales, Marketing & Operations Officer: 7 duties (2-8)
+ok    Customer Service Officer: 6 duties (2-8)
+ok    Finance Officer: 5 duties (2-8)
+ok    Marketing Officer: 6 duties (2-8)
+ok    Property Officer: 5 duties (2-8)
+ok    Sales Officer: 6 duties (2-8)
+ok    Staff Member: 2 duties (2-8)
+
+DEMO_ACCOUNTS_ALL_PASSED

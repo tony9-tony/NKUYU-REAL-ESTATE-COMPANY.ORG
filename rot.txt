@@ -1,0 +1,145 @@
+=== TASK 1/2: legacy rotation ===
+ok    admin@mkuyu.local: account exists (id=1)
+ok    admin@mkuyu.local: the OLD password no longer authenticates (401)
+ok    admin@mkuyu.local: the NEW password authenticates (200)
+ok    admin@mkuyu.local: user id unchanged (1 -> 1)
+ok    admin@mkuyu.local: user.role column unchanged (admin)
+ok    admin@mkuyu.local: assigned role unchanged (System Administrator)
+ok    admin@mkuyu.local: department unchanged (ICT & ADMINISTRATION)
+ok    admin@mkuyu.local: permissions unchanged (31 keys)
+ok    admin@mkuyu.local: display name unchanged ("System Administrator")
+ok    admin@mkuyu.local: owned records preserved (contracts=14 clients=14 projects=14 reports=31)
+ok    admin@mkuyu.local: audit history intact (583 -> 584)
+ok    admin@mkuyu.local: rotation recorded in the audit trail (1 event)
+ok    admin@mkuyu.local: stored as scrypt hash (len 168)
+ok    admin@mkuyu.local: no plaintext password in the stored hash
+ok    md@mkuyu.local: account exists (id=95)
+ok    md@mkuyu.local: the OLD password no longer authenticates (401)
+ok    md@mkuyu.local: the NEW password authenticates (200)
+ok    md@mkuyu.local: user id unchanged (95 -> 95)
+ok    md@mkuyu.local: user.role column unchanged (staff)
+ok    md@mkuyu.local: assigned role unchanged (Managing Director)
+ok    md@mkuyu.local: department unchanged (MANAGEMENT)
+ok    md@mkuyu.local: permissions unchanged (22 keys)
+ok    md@mkuyu.local: display name unchanged ("Joseph Mwakalinga")
+ok    md@mkuyu.local: owned records preserved (contracts=0 clients=0 projects=1 reports=0)
+ok    md@mkuyu.local: audit history intact (23 -> 24)
+ok    md@mkuyu.local: rotation recorded in the audit trail (1 event)
+ok    md@mkuyu.local: stored as scrypt hash (len 168)
+ok    md@mkuyu.local: no plaintext password in the stored hash
+ok    sales.officer@mkuyu.local: account exists (id=2)
+ok    sales.officer@mkuyu.local: the OLD password no longer authenticates (401)
+ok    sales.officer@mkuyu.local: the NEW password authenticates (200)
+ok    sales.officer@mkuyu.local: user id unchanged (2 -> 2)
+ok    sales.officer@mkuyu.local: user.role column unchanged (staff)
+ok    sales.officer@mkuyu.local: assigned role unchanged (Sales, Marketing & Operations Officer)
+ok    sales.officer@mkuyu.local: department unchanged (SALES, MARKETING & OPERATIONS)
+ok    sales.officer@mkuyu.local: permissions unchanged (15 keys)
+ok    sales.officer@mkuyu.local: display name unchanged ("Sales, Marketing & Operations Officer (sales.officer)")
+ok    sales.officer@mkuyu.local: owned records preserved (contracts=0 clients=0 projects=0 reports=0)
+ok    sales.officer@mkuyu.local: audit history intact (20 -> 21)
+ok    sales.officer@mkuyu.local: rotation recorded in the audit trail (1 event)
+ok    sales.officer@mkuyu.local: stored as scrypt hash (len 168)
+ok    sales.officer@mkuyu.local: no plaintext password in the stored hash
+ok    amina.sales@mkuyu.local: account exists (id=3)
+ok    amina.sales@mkuyu.local: the OLD password no longer authenticates (401)
+ok    amina.sales@mkuyu.local: the NEW password authenticates (200)
+ok    amina.sales@mkuyu.local: user id unchanged (3 -> 3)
+ok    amina.sales@mkuyu.local: user.role column unchanged (staff)
+ok    amina.sales@mkuyu.local: assigned role unchanged (Sales, Marketing & Operations Officer)
+ok    amina.sales@mkuyu.local: department unchanged (SALES, MARKETING & OPERATIONS)
+ok    amina.sales@mkuyu.local: permissions unchanged (15 keys)
+ok    amina.sales@mkuyu.local: display name unchanged ("Amina Sales")
+ok    amina.sales@mkuyu.local: owned records preserved (contracts=0 clients=0 projects=0 reports=2)
+ok    amina.sales@mkuyu.local: audit history intact (11 -> 12)
+ok    amina.sales@mkuyu.local: rotation recorded in the audit trail (1 event)
+ok    amina.sales@mkuyu.local: stored as scrypt hash (len 168)
+ok    amina.sales@mkuyu.local: no plaintext password in the stored hash
+
+=== administrator unchanged ===
+ok    admin@mkuyu.local is still an administrator (role=admin)
+ok    admin retains its full permission set (31)
+ok    admin can still administer staff
+
+=== TASK 5: admin password reset preserves history ===
+ok    admin reset the password for amina.sales@mkuyu.local (200)
+ok    amina.sales@mkuyu.local authenticates with the reset password
+ok    amina.sales@mkuyu.local cannot use the pre-reset password
+ok    reset: user id unchanged
+ok    reset: user.role unchanged
+ok    reset: assigned role unchanged
+ok    reset: department unchanged
+ok    reset: permissions unchanged
+ok    reset: owned records preserved (reports=2)
+ok    reset: audit history grew, not shrank (12 -> 13)
+ok    reset: recorded as a password_reset audit event (5)
+ok    reset: the event is attributed to the acting administrator (admin@mkuyu.local)
+ok    restored the documented demo credential after the reset test
+ok    the MD cannot reset a staff password
+ok    the ICTO cannot reset a staff password on this build
+
+=== TASK 3: reminders visibility and authorization ===
+ok    Finance workspace advertises the reminders module
+ok    Finance can read /reminders (200, 7 rows)
+ok    Finance workspace payload carries the reminders array
+ok    sales@demo.mkuyu.local is refused /reminders (403)
+ok    legal@demo.mkuyu.local is refused /reminders (403)
+ok    cs@demo.mkuyu.local is refused /reminders (403)
+ok    the MD keeps financial oversight of reminders
+ok    the ICTO is refused the reminders register
+
+=== TASK 4: role visibility, cross-checked against the API ===
+ok    md@demo.mkuyu.local: workspace shows contracts
+ok    md@demo.mkuyu.local: workspace shows payments
+ok    md@demo.mkuyu.local: workspace shows reminders
+ok    md@demo.mkuyu.local: workspace shows projects
+ok    MD holds no system administration
+ok    MD holds no legal approval or finance validation
+ok    MD holds management approval
+ok    MD cannot read the staff register
+ok    finance.manager@demo.mkuyu.local: workspace shows debts
+ok    finance.manager@demo.mkuyu.local: workspace shows payments
+ok    finance.manager@demo.mkuyu.local: workspace shows reminders
+ok    finance.manager@demo.mkuyu.local: workspace shows contracts
+ok    finance.manager@demo.mkuyu.local: workspace hides documents
+ok    sales@demo.mkuyu.local: workspace shows leads
+ok    sales@demo.mkuyu.local: workspace shows clients
+ok    sales@demo.mkuyu.local: workspace shows contracts
+ok    sales@demo.mkuyu.local: workspace shows properties
+ok    sales@demo.mkuyu.local: workspace hides debts
+ok    sales@demo.mkuyu.local: workspace hides payments
+ok    sales@demo.mkuyu.local: workspace hides reminders
+ok    Sales cannot open the finance installment register
+ok    legal@demo.mkuyu.local: workspace shows contracts
+ok    legal@demo.mkuyu.local: workspace shows documents
+ok    legal@demo.mkuyu.local: workspace shows clients
+ok    legal@demo.mkuyu.local: workspace hides debts
+ok    legal@demo.mkuyu.local: workspace hides payments
+ok    legal@demo.mkuyu.local: workspace hides reminders
+ok    Legal cannot perform finance-only validation
+ok    Legal cannot reach the finance reminder register
+ok    icto@demo.mkuyu.local: workspace hides contracts
+ok    icto@demo.mkuyu.local: workspace hides clients
+ok    icto@demo.mkuyu.local: workspace hides leads
+ok    icto@demo.mkuyu.local: workspace hides debts
+ok    icto@demo.mkuyu.local: workspace hides payments
+ok    icto@demo.mkuyu.local: workspace hides reminders
+ok    icto@demo.mkuyu.local: workspace hides documents
+ok    icto@demo.mkuyu.local: workspace hides properties
+ok    icto@demo.mkuyu.local: workspace hides projects
+ok    ICTO is refused /org/users
+ok    ICTO is refused /org/roles
+ok    ICTO is refused /org/departments
+ok    ICTO is refused /org/permissions
+ok    ICTO is refused /org/access-matrix
+ok    ICTO holds no business module access
+ok    cs@demo.mkuyu.local: workspace shows clients
+ok    cs@demo.mkuyu.local: workspace shows appointments
+ok    cs@demo.mkuyu.local: workspace shows follow_ups
+ok    cs@demo.mkuyu.local: workspace hides contracts
+ok    cs@demo.mkuyu.local: workspace hides debts
+ok    cs@demo.mkuyu.local: workspace hides payments
+ok    cs@demo.mkuyu.local: workspace hides reminders
+ok    Customer Service cannot open the contract register
+
+ROTATION_AND_UI_ALL_PASSED

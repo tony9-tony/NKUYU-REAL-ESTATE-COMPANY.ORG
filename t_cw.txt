@@ -1,0 +1,31 @@
+
+> realestate-system@1.0.0 test:clientflow
+> node --import ./test_support/guard.mjs client_workflow_test.mjs
+
+[guard] using existing test database "mkuyu_org_test"
+[guard] live database    : mkuyu_org  (never written to)
+[guard] test database    : mkuyu_org_test
+[harness] test database "mkuyu_org_test" prepared (schema, roles, departments, demo + legacy accounts)
+[harness] client-workflow: server ready on :3203 (database: mkuyu_org_test)
+=== client -> contract workflow ===
+ok    a sales officer signed in
+ok    a new client completed without a contract is refused with 400 (400)
+ok    the refusal explains a contract is required ("a client cannot be completed without a contract: create the contract for this client, or save the client as a prospect (status: lead) until the contract is signed")
+ok    a client completed without a contract is filed as a prospect, never a completed client (201/lead)
+ok    completing a client with no contract is refused (400)
+ok    a prospect (status=lead) is created without a contract (201)
+ok    the buyer record is created as a prospect first
+ok    a contract is created for that client (201)
+ok    the contract carries the discounted final price (90000000.00)
+ok    a client with a contract can be completed (200)
+ok    the completed client is active
+ok    a lead is created without a contract (201)
+ok    a lead can still be converted to a client record (201 {"id":13,"organization_id":1,"project_id":null,"name":"Workflow Lead 1790596837539","email":null,"phone":null,"client_type":"buyer","status":"lead","notes":null)
+ok    a converted lead is a prospect, not a completed client (lead)
+ok    a contract_id that does not exist is refused (404)
+ok    a caller without the contracts module cannot create a completed client (400, clients=true)
+ok    an existing client with no contract is still editable (200)
+ok    editing a historical client did not change its data
+ok    a contract can still be created without a linked client (201)
+
+CLIENT_WORKFLOW_ALL_PASSED

@@ -1,0 +1,85 @@
+=== 1. live database connection ===
+  DATABASE_URL (config) : postgresql://postgres@localhost:5432/mkuyu_org
+  connected database   : mkuyu_org
+  connected user       : postgres
+  server               : ::1/128:5432
+  database size        : 12 MB
+  organizations        : 1
+
+=== 2. safety copy of the CURRENT state ===
+  written : SAFETY-COPY-current-state-2026-09-28T11-28-00.json
+  size    : 423.3 KB
+  contents: 28 tables, 2837 rows
+
+  current row counts:
+    users                15
+    projects             1
+    clients              2
+    properties           66
+    property_images      36
+    contracts            1
+    debts                5
+    payments             1
+    documents            28
+    audit_logs           1599
+    sessions             366
+
+=== 3. files in data/backups/ ===
+  2026-09-28T11:28:00.139Z      433413 B  SAFETY-COPY-current-state-2026-09-28T11-28-00.json
+  2026-09-28T11:19:06.913Z      109315 B  system-2026-09-28T11-19-06.json
+  2026-09-28T10:44:50.561Z      228969 B  system-2026-09-28T10-44-50.json
+  2026-09-28T10:30:22.603Z      219764 B  system-2026-09-28T10-30-22.json
+  2026-09-28T10:09:11.854Z      211850 B  system-2026-09-28T10-09-11.json
+  2026-09-28T09:45:11.106Z      206510 B  system-2026-09-28T09-45-11.json
+  2026-09-28T09:20:26.392Z      217958 B  system-2026-09-28T09-20-26.json
+  2026-09-28T09:14:51.047Z      209278 B  system-2026-09-28T09-14-50.json
+  2026-09-28T08:56:34.349Z      191226 B  system-2026-09-28T08-56-34.json
+  2026-09-28T08:06:08.019Z      198029 B  system-2026-09-28T08-06-07.json
+  2026-09-28T07:54:41.794Z      198029 B  system-2026-09-28T07-54-41.json
+  2026-09-28T07:34:16.324Z      163884 B  system-2026-09-28T07-34-16.json
+  2026-09-28T07:30:36.515Z      163884 B  system-2026-09-28T07-30-36.json
+  2026-09-28T05:43:09.224Z      160393 B  system-2026-09-28T05-43-09.json
+  2026-09-28T05:22:02.926Z      156429 B  system-2026-09-28T05-22-02.json
+  2026-09-28T05:16:44.985Z      156429 B  system-2026-09-28T05-16-44.json
+  2026-09-28T05:16:03.625Z      152938 B  system-2026-09-28T05-16-03.json
+  2026-09-28T05:15:11.955Z      147606 B  system-2026-09-28T05-15-11.json
+  2026-09-28T05:10:21.561Z      140069 B  system-2026-09-28T05-10-21.json
+  2026-09-28T05:03:21.952Z      134745 B  system-2026-09-28T05-03-21.json
+  2026-09-28T04:56:11.930Z      113837 B  system-2026-09-28T04-56-11.json
+  2026-09-28T04:08:58.243Z      109770 B  system-2026-09-28T04-08-58.json
+  2026-09-28T03:42:19.297Z      100878 B  system-2026-09-28T03-42-19.json
+  2026-09-25T17:54:45.986Z       95458 B  system-2026-09-25T17-54-45.json
+  2026-09-25T17:39:51.516Z       90635 B  system-2026-09-25T17-39-51.json
+  2026-09-25T13:24:40.101Z       78828 B  system-2026-09-25T13-24-39.dump
+  2026-09-25T13:24:26.700Z       78358 B  system-2026-09-25T13-24-26.dump
+  2026-09-25T13:24:11.443Z       77939 B  system-2026-09-25T13-24-10.dump
+  2026-09-25T12:51:44.390Z       75267 B  system-2026-09-25T12-51-41.dump
+
+=== 4. newest pre-existing backup: system-2026-09-28T11-19-06.json ===
+  size  : 106.8 KB
+  taken : 2026-09-28T11:19:06.913Z
+  created_at (inside): 2026-09-28T11:19:06.910Z
+  format            : mkuyu-json-snapshot v1
+  tables in snapshot: 24
+
+=== 5. does the backup contain the missing records? ===
+  contracts          1 records
+  clients            2 records
+  projects           1 records
+  payments           1 records
+  debts              5 records
+  documents          28 records
+  properties         66 records
+  property_images    TABLE ABSENT
+
+=== 6. backup counts vs. counts before the accidental deletion ===
+  table          backup   before-loss     now   verdict
+  contracts           1            34      1   backup is short by 33
+  clients             2            70      2   backup is short by 68
+  projects            1            34      1   backup is short by 33
+  properties         66            66     66   backup covers it
+  payments            1            30      1   backup is short by 29
+  debts               5           157      5   backup is short by 152
+  documents          28            28     28   backup covers it
+
+(no DELETE, UPDATE, INSERT, DROP or migration was performed)
