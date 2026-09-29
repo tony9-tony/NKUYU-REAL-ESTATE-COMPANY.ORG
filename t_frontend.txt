@@ -1,62 +1,71 @@
-
-> realestate-system@1.0.0 test:frontend
-> node frontend_smoke_test.mjs
-
+[guard] using existing test database "mkuyu_org_test"
+[guard] live database    : mkuyu_org  (never written to)
+[guard] test database    : mkuyu_org_test
 ok    app.js evaluates in the sandbox
-ok    administrator renders "dashboard" (6612 bytes)
+ok    administrator renders "dashboard" (6628 bytes)
 ok    administrator renders "admin-dashboard" (1819 bytes)
-ok    administrator renders "projects" (800 bytes)
-ok    administrator renders "properties" (2572 bytes)
-ok    administrator renders "clients" (1751 bytes)
-ok    administrator renders "contracts" (2409 bytes)
-ok    administrator renders "debts" (3765 bytes)
-ok    administrator renders "appointments" (2268 bytes)
-ok    administrator renders "documents" (2618 bytes)
+ok    administrator renders "projects" (816 bytes)
+ok    administrator renders "properties" (2588 bytes)
+ok    administrator renders "clients" (1767 bytes)
+ok    administrator renders "contracts" (2418 bytes)
+ok    administrator renders "debts" (3813 bytes)
+ok    administrator renders "appointments" (2284 bytes)
+ok    administrator renders "documents" (2634 bytes)
 ok    administrator renders "reports" (2496 bytes)
-ok    administrator renders "organization" (10115 bytes)
-ok    director renders "dashboard" (6607 bytes)
-ok    director renders "admin-dashboard" (6607 bytes)
-ok    director renders "projects" (800 bytes)
-ok    director renders "properties" (2572 bytes)
-ok    director renders "clients" (1751 bytes)
-ok    director renders "contracts" (2409 bytes)
-ok    director renders "debts" (3765 bytes)
-ok    director renders "appointments" (2268 bytes)
-ok    director renders "documents" (2618 bytes)
+ok    administrator renders "duties" (125 bytes)
+ok    administrator renders "assignments" (2013 bytes)
+ok    administrator renders "organization" (10317 bytes)
+ok    director renders "dashboard" (6623 bytes)
+ok    director renders "admin-dashboard" (6623 bytes)
+ok    director renders "projects" (816 bytes)
+ok    director renders "properties" (2588 bytes)
+ok    director renders "clients" (1767 bytes)
+ok    director renders "contracts" (2418 bytes)
+ok    director renders "debts" (3813 bytes)
+ok    director renders "appointments" (2284 bytes)
+ok    director renders "documents" (2634 bytes)
 ok    director renders "reports" (2496 bytes)
-ok    director renders "organization" (6607 bytes)
+ok    director renders "duties" (125 bytes)
+ok    director renders "assignments" (1929 bytes)
+ok    director renders "organization" (6623 bytes)
 ok    sales renders "dashboard" (5209 bytes)
 ok    sales renders "admin-dashboard" (5209 bytes)
-ok    sales renders "projects" (800 bytes)
-ok    sales renders "properties" (2572 bytes)
-ok    sales renders "clients" (1751 bytes)
-ok    sales renders "contracts" (2272 bytes)
+ok    sales renders "projects" (692 bytes)
+ok    sales renders "properties" (2595 bytes)
+ok    sales renders "clients" (1774 bytes)
+ok    sales renders "contracts" (2154 bytes)
 ok    sales renders "debts" (5209 bytes)
-ok    sales renders "appointments" (2268 bytes)
-ok    sales renders "documents" (2618 bytes)
+ok    sales renders "appointments" (2291 bytes)
+ok    sales renders "documents" (2641 bytes)
 ok    sales renders "reports" (2496 bytes)
+ok    sales renders "duties" (125 bytes)
+ok    sales renders "assignments" (1929 bytes)
 ok    sales renders "organization" (5209 bytes)
-ok    finance renders "dashboard" (3759 bytes)
-ok    finance renders "admin-dashboard" (3759 bytes)
-ok    finance renders "projects" (3759 bytes)
-ok    finance renders "properties" (3759 bytes)
-ok    finance renders "clients" (1706 bytes)
-ok    finance renders "contracts" (2364 bytes)
-ok    finance renders "debts" (3720 bytes)
-ok    finance renders "appointments" (3759 bytes)
-ok    finance renders "documents" (3759 bytes)
+ok    finance renders "dashboard" (3775 bytes)
+ok    finance renders "admin-dashboard" (3775 bytes)
+ok    finance renders "projects" (3775 bytes)
+ok    finance renders "properties" (3775 bytes)
+ok    finance renders "clients" (1729 bytes)
+ok    finance renders "contracts" (2246 bytes)
+ok    finance renders "debts" (3524 bytes)
+ok    finance renders "appointments" (3775 bytes)
+ok    finance renders "documents" (3775 bytes)
 ok    finance renders "reports" (2451 bytes)
-ok    finance renders "organization" (3759 bytes)
+ok    finance renders "duties" (125 bytes)
+ok    finance renders "assignments" (1929 bytes)
+ok    finance renders "organization" (3775 bytes)
 ok    property renders "dashboard" (2239 bytes)
 ok    property renders "admin-dashboard" (2239 bytes)
-ok    property renders "projects" (794 bytes)
-ok    property renders "properties" (2572 bytes)
-ok    property renders "clients" (1751 bytes)
+ok    property renders "projects" (686 bytes)
+ok    property renders "properties" (2595 bytes)
+ok    property renders "clients" (1774 bytes)
 ok    property renders "contracts" (2239 bytes)
 ok    property renders "debts" (2239 bytes)
-ok    property renders "appointments" (2268 bytes)
-ok    property renders "documents" (2618 bytes)
+ok    property renders "appointments" (2291 bytes)
+ok    property renders "documents" (2641 bytes)
 ok    property renders "reports" (2239 bytes)
+ok    property renders "duties" (125 bytes)
+ok    property renders "assignments" (1929 bytes)
 ok    property renders "organization" (2239 bytes)
 
 === reminders visibility follows the reminders module ===
@@ -83,6 +92,45 @@ ok    the discount amount is not a submitted field
 ok    the old free-text contract value field is gone
 ok    the final price input is read-only
 ok    the discount amount input is read-only
+
+=== duties view renders the catalogue and the approval path ===
+ok    the view shows the approval workflow
+ok    the view shows the duty breakdown
+ok    the view lists MANAGEMENT
+ok    the view lists FINANCE & ACCOUNTS
+ok    the view lists SALES, MARKETING & OPERATIONS
+ok    the view lists LEGAL
+ok    the view lists CUSTOMER SERVICE
+ok    the view lists ICT & ADMINISTRATION
+ok    the view lists the Managing Director role
+ok    the view lists the Legal Manager role
+ok    the view lists the Legal Officer role
+ok    the view lists the Finance Manager role
+ok    the view lists the Finance Officer role
+ok    the view lists the ICTO role
+ok    the view lists the Sales Officer role
+ok    the view lists the Marketing Officer role
+ok    the view lists the Property Officer role
+ok    the view lists the Customer Service Officer role
+ok    every approval stage is rendered
+ok    the stages render in pipeline order
+ok    the off-pipeline state "Changes requested" is rendered
+ok    the off-pipeline state "Rejected" is rendered
+ok    the off-pipeline state "Cancelled" is rendered
+ok    the legal approval duty is listed with its description
+ok    duties the caller holds are marked as theirs
+ok    a stage the caller decides is marked
+ok    a sales officer is shown at least one step that is theirs
+ok    a sales officer is NOT marked as deciding "Under legal review"
+ok    a sales officer is NOT marked as deciding "Legal terms approved"
+ok    a sales officer is NOT marked as deciding "Management approval"
+ok    a sales officer is NOT marked as deciding "Approved for release"
+ok    a sales officer is NOT marked as deciding "With the customer"
+ok    a sales officer is NOT marked as deciding "Active"
+ok    a sales officer is NOT marked as deciding "Completed"
+ok    a sales officer can still read the management approval step
+ok    the MD IS marked as deciding the management approval step
+ok    a duty is marked "yours" exactly when the caller holds every permission it needs
 ok    a finance officer is not offered Reset password
 
 === navigation contains only the authorized workspace ===
@@ -96,6 +144,7 @@ ok    administrator: "debts" is present in the navigation
 ok    administrator: "appointments" is present in the navigation
 ok    administrator: "documents" is present in the navigation
 ok    administrator: "reports" is present in the navigation
+ok    administrator: "duties" is present in the navigation
 ok    administrator: "organization" is present in the navigation
 ok    director: "admin-dashboard" is absent from the navigation
 ok    director: "organization" is absent from the navigation
@@ -108,6 +157,7 @@ ok    director: "debts" is present in the navigation
 ok    director: "appointments" is present in the navigation
 ok    director: "documents" is present in the navigation
 ok    director: "reports" is present in the navigation
+ok    director: "duties" is present in the navigation
 ok    finance: "admin-dashboard" is absent from the navigation
 ok    finance: "organization" is absent from the navigation
 ok    finance: "properties" is absent from the navigation
@@ -117,6 +167,7 @@ ok    finance: "clients" is present in the navigation
 ok    finance: "contracts" is present in the navigation
 ok    finance: "debts" is present in the navigation
 ok    finance: "reports" is present in the navigation
+ok    finance: "duties" is present in the navigation
 ok    sales: "admin-dashboard" is absent from the navigation
 ok    sales: "organization" is absent from the navigation
 ok    sales: "debts" is absent from the navigation
@@ -128,6 +179,7 @@ ok    sales: "contracts" is present in the navigation
 ok    sales: "appointments" is present in the navigation
 ok    sales: "documents" is present in the navigation
 ok    sales: "reports" is present in the navigation
+ok    sales: "duties" is present in the navigation
 ok    property: "admin-dashboard" is absent from the navigation
 ok    property: "organization" is absent from the navigation
 ok    property: "contracts" is absent from the navigation
@@ -139,9 +191,53 @@ ok    property: "properties" is present in the navigation
 ok    property: "clients" is present in the navigation
 ok    property: "appointments" is present in the navigation
 ok    property: "documents" is present in the navigation
+ok    property: "duties" is present in the navigation
 ok    the MD is returned to the dashboard from "admin-dashboard"
 ok    the MD is returned to the dashboard from "organization"
 ok    the MD holds no manage_* permission that would justify administration
+
+=== assignments view renders the server-authorized workspace ===
+ok    the assignments view renders
+ok    it shows the task title
+ok    priority is shown as a WORD, not as colour alone
+ok    the due date is shown
+ok    it shows who assigned the work and who received it
+ok    the assignee is offered Submit
+ok    the assignee is NOT offered Approve
+ok    a holder of no assignment authority is not offered the Assign work control
+ok    the navigation shows Assignments with the server's attention count
+ok    the reviewer is offered Approve and Request changes
+ok    the reviewer is NOT offered Submit
+ok    a holder of assign_tasks is offered the Assign work control
+ok    an empty section says so instead of inventing content
+ok    a zero attention count renders no badge
+ok    priority and status are filterable from the workspace
+
+=== the New Task button opens an authorized form ===
+ok    1. the Managing Director is offered the New Task button
+ok    2. clicking it opens the modal
+ok    3. the modal is a task form titled 'New Task'
+ok    the form has the title field
+ok    the form has the description field
+ok    the form has the assignee field
+ok    the form has the priority-input field
+ok    the form has the due field
+ok    4. the form offers the optional linked record
+ok    the priority field offers Urgent
+ok    the priority field offers High
+ok    the priority field offers Medium
+ok    the priority field offers Low
+ok    5. the assignee options are exactly the people the backend authorized
+ok    6. the reviewer list is offered
+ok    7. the form never sends an assigned_by field
+ok    8. an authorized Department Manager is offered the New Task button
+ok    9. the manager is only offered the people in their own scope
+ok    10. a staff member without assign_tasks is NOT offered the New Task button
+ok    11. and the modal stays closed for them
+ok    12. the topbar shows no New Task button for them either
+ok    13. a caller who can assign but not review still gets a working form
+ok    14. that form is still submittable
+ok    15. it simply offers no reviewer field rather than a broken one
 
 === finance can open the contract behind an installment ===
 ok    the finance fixture has both an installment and its contract

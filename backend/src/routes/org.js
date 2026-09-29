@@ -3,7 +3,9 @@ import { query, queryOne, withTransaction } from "../db.js";
 import { organizationId, permissionKeys, requirePermission, requireAdmin, requireModuleAccess, requireScope } from "../org/rbac.js";
 import { addRecordShare, can, canAccessModule, clearAccessCache, currentAccess, isScope, isVisibility, listRecordShares, ownershipFields, removeRecordShare, scopeCondition } from "../org/access.js";
 import { audit } from "../org/audit.js";
+import { attentionCount } from "../tasks/tasks.js";
 import { hashPassword, publicUser } from "../auth.js";
+import { paginatedList, paginationRequested, parsePagination, searchTerm } from "../pagination.js";
 import { Project } from "../models/project.js";
 import { Contract } from "../models/contract.js";
 import { Debt } from "../models/debt.js";
@@ -12,11 +14,22 @@ import { Reminder } from "../models/reminder.js";
 import { Report } from "../models/report.js";
 import { Appointment, Client, Document, Property } from "../models/catalog.js";
 import { REPORT_TYPES, PAYMENT_METHODS, reportTypeIsFinancial } from "../models/reportTypes.js";
-import { CONTRACT_ACTIONS, availableActions, canTransition } from "../contracts/workflow.js";
-import { ROLE_DUTIES, CONTRACT_OWNERSHIP, ROLE_HOME_DEPARTMENT, checkRoleDuties, checkContractOwnership, checkNoSystemAdminLeak, checkDeadPermissions } from "../org/duties.js";
+import { CONTRACT_ACTIONS, WORKFLOW_STAGES, WORKFLOW_EXCEPTIONS, availableActions, canTransition, workflowGraph, workflowStagePermissions } from "../contracts/workflow.js";
+import { ROLE_DUTIES, CONTRACT_OWNERSHIP, ROLE_HOME_DEPARTMENT, departmentDutyTree, checkRoleDuties, checkContractOwnership, checkNoSystemAdminLeak, checkDeadPermissions } from "../org/duties.js";
+import taskRoutes from "./tasks.js";
 
 const router = Router();
-const id = (value, field = "id") => { const n = Number(value); if (!Number.isInteger(n) || n < 1) { const e = new Error(`${field} must be a positive integer`); e.status = 400; throw e; } return n; };
+
+// The task-assignment workflow is additive and hangs off the organization router
+// so it inherits the same session, access profile and audit plumbing. It
+// authorizes itself per request and never reuses or weakens the contract
+// workflow.
+router.use("/tasks", taskRoutes);
+// Same int4 ceiling as parseId() in ./api.js: these keys are all
+// `INTEGER GENERATED ... AS IDENTITY`, so a larger number can never exist and
+// would otherwise reach PostgreSQL and come back as a 500.
+const MAX_INT4 = 2147483647;
+const id = (value, field = "id") => { const n = Number(value); if (!Number.isInteger(n) || n < 1 || n > MAX_INT4) { const e = new Error(`${field} must be a positive integer`); e.status = 400; throw e; } return n; };
 const text = (value, field, max = 160) => { if (typeof value !== "string" || !value.trim() || value.trim().length > max) { const e = new Error(`${field} is required`); e.status = 400; throw e; } return value.trim(); };
 const rank = (value, fallback = 0) => { const n = value === undefined || value === null || value === "" ? fallback : Number(value); if (!Number.isInteger(n) || n < 0 || n > 100) { const e = new Error("rank must be an integer between 0 and 100"); e.status = 400; throw e; } return n; };
 const scope = (value, fallback = "own") => { const selected = value === undefined || value === null || value === "" ? fallback : String(value); if (!isScope(selected)) { const e = new Error("scope must be own, department or organization"); e.status = 400; throw e; } return selected; };
@@ -98,6 +111,10 @@ async function buildMe(req) {
     scope: req.access?.scope || "own",
     rank: req.access?.rank ?? 0,
     modules,
+    // The navigation attention badge. A real count computed from task rows the
+    // caller is party to, not a decoration - it is 0 for a user with nothing
+    // outstanding and never counts another department's private work.
+    attention: await attentionCount(req.access),
     user: await publicUser(req.user),
   };
 }
@@ -115,6 +132,36 @@ async function scopedList(table, alias, entity, fragment = "", orderBy = "") {
   const values = [await organizationId()];
   const visible = scopeCondition(alias, entity, currentAccess(), values);
   return rows(`SELECT ${alias}.* FROM ${table} ${alias} WHERE ${alias}.organization_id=$1 AND ${visible}${fragment ? ` AND ${fragment.replace(/^\s*AND\s+/i, "")}` : ""}${orderBy ? ` ORDER BY ${orderBy}` : ""}`, values);
+}
+
+/**
+ * Paginated twin of `scopedList`, built with the same discipline: the record
+ * scope and the caller's `fragment` are assembled ONCE into a single `where`
+ * string, and both the page query and the count are built from it. A count
+ * assembled separately would be free to drift from the filter and disclose how
+ * many records the caller is not allowed to see.
+ *
+ * The `id` tiebreaker is appended so the ordering is total: without it two rows
+ * sharing a `created_at` could swap between pages, showing a record twice and
+ * hiding another.
+ */
+async function scopedListPaged(table, alias, entity, orderBy, search = null, searchColumns = []) {
+  const values = [await organizationId()];
+  const visible = scopeCondition(alias, entity, currentAccess(), values);
+  const conditions = [`${alias}.organization_id=$1`, visible];
+  // Server-side search inside the same scoped statement, so it can only narrow
+  // the caller's own records.
+  if (search && searchColumns.length) {
+    values.push(`%${search}%`);
+    const placeholder = `$${values.length}`;
+    conditions.push(`(${searchColumns.map((column) => `COALESCE(${column},'') ILIKE ${placeholder}`).join(" OR ")})`);
+  }
+  const where = ` WHERE ${conditions.join(" AND ")}`;
+  return {
+    sql: `SELECT ${alias}.* FROM ${table} ${alias}${where} ORDER BY ${orderBy}, ${alias}.id DESC`,
+    countSql: `SELECT COUNT(*)::int AS total FROM ${table} ${alias}${where}`,
+    values,
+  };
 }
 
 /**
@@ -174,15 +221,112 @@ async function collections(req) {
 }
 
 /**
+ * Scoped, per-module row counts in ONE statement.
+ *
+ * These replace `array.length` in the dashboard. Once the workspace stops
+ * shipping whole collections, a `.length` taken from a truncated page would
+ * report "12 clients" when the caller may in fact read 12,000 - silently wrong
+ * rather than obviously broken. Every count here is computed with the SAME
+ * `scopeCondition` the matching list query uses, so a count can never exceed
+ * what the caller is actually allowed to page through.
+ *
+ * One statement rather than nine so the dashboard does not fan out again.
+ * A `NULL::int` column means "this module is not in scope for you" and is
+ * deliberately different from 0, which means "in scope, and there are none".
+ */
+const COUNT_MODULES = [
+  ["projects", "projects", "project", "p", "projects"],
+  ["clients", "clients", "client", "c", "clients"],
+  ["contracts", "contracts", "contract", "k", "contracts"],
+  ["properties", "properties", "property", "pr", "properties"],
+  ["appointments", "appointments", "appointment", "ap", "appointments"],
+  ["documents", "documents", "document", "dc", "documents"],
+  ["leads", "leads", "lead", "l", "leads"],
+  ["follow_ups", "follow_ups", "follow_up", "f", "follow_ups"],
+  // Financial registers are counted only for a caller who may see them, which
+  // mirrors the gate the money lists themselves sit behind.
+  ["debts", "debts", "debt", "d", "debts"],
+  ["payments", "payments", "payment", "pm", "payments"],
+];
+
+async function scopedCounts({ financial, has }) {
+  const access = currentAccess();
+  const org = await organizationId();
+  const counts = {};
+  const columns = [];
+  // `scopeCondition` APPENDS its own placeholders to the values array, so each
+  // subquery needs its own array; numbering them all from one shared list would
+  // make every subquery after the first read the first subquery's scope
+  // parameters. Each is built and numbered independently, then the parameter
+  // lists are concatenated in the same order as the columns.
+  const allValues = [org];
+  // `has` is the same module gate the lists sit behind. A module this caller
+  // does not hold reports NULL ("you may not know about this"), never 0 and
+  // never the organization's true total - the workspace must not tell Customer
+  // Service how many contracts exist in the office.
+  const held = typeof has === "function" ? has : () => true;
+  COUNT_MODULES.forEach(([key, table, entity, alias, module]) => {
+    if (((key === "debts" || key === "payments") && !financial) || !held(module)) {
+      // Not merely zero: NULL says "you are not authorised to see this at all",
+      // so the UI can hide the figure rather than imply the office has none.
+      counts[key] = null;
+      columns.push(`NULL::int AS ${key}`);
+      return;
+    }
+    const values = [org];
+    const scope = scopeCondition(alias, entity, access, values);
+    // The subquery's own placeholders start at $2 ($1 is the organization id).
+    // Shifting them past everything already collected lets the whole rollup be
+    // one statement with one parameter list, in column order.
+    const shift = allValues.length - 1;
+    const body = `${table} ${alias} WHERE ${alias}.organization_id = $1 AND ${scope.replace(/\$(\d+)/g, (_, n) => `$${Number(n) + shift}`)}`;
+    columns.push(`(SELECT COUNT(*)::int FROM ${body}) AS ${key}`);
+    allValues.push(...values.slice(1));
+  });
+  const row = await queryOne(`SELECT ${columns.join(", ")}`, allValues);
+  for (const [key] of COUNT_MODULES) if (row[key] !== null && row[key] !== undefined) counts[key] = Number(row[key]);
+  return counts;
+}
+
+/**
  * Authorization bootstrap. The frontend uses this to build navigation and
  * dashboards, so it also reports the effective scope and allowed modules.
  */
 /**
- * One-call workspace bootstrap. The dashboard previously fired nine parallel
- * requests; this returns exactly the same payload in a single round trip, and
- * only the modules the caller actually holds. The response is private to the
- * caller (per-user), so it is marked no-store.
+ * One-call workspace bootstrap - the FIRST PAINT payload, not a data dump.
+ *
+ * The dashboard used to fire nine parallel requests and then received EVERY
+ * contract, property, client, document, installment, payment, appointment, lead
+ * and follow-up in one response - about 1.95 MB at a thousand rows per table.
+ * That cost is paid on every workspace load, by every user, before anything can
+ * be drawn, and it grew without limit as the office grew.
+ *
+ * What it returns now:
+ *   - `me`, `summary`, `projectReports`  : the identity and the server-computed
+ *     dashboard figures (unchanged, and already scope-aware).
+ *   - `counts`                           : per-module SCOPED row counts, so the
+ *     dashboard never derives a total from a truncated array.
+ *   - `projects`                         : still complete. Projects are the
+ *     spine of the app - every filter, selector and per-project rollup hangs off
+ *     them - and the table is small by nature.
+ *   - one bounded FIRST PAGE per list, plus `pages` metadata, so the first paint
+ *     has real rows to draw. The remaining pages are fetched on demand from the
+ *     already-paginated list endpoints, which is where searching now happens.
+ *
+ * Authorization is unchanged and still happens in SQL: each page goes through
+ * the same `scopeCondition` as the matching list endpoint, and the counts use
+ * the identical predicate. Nothing is fetched-then-filtered, and no count can
+ * describe a record the caller may not read.
+ *
+ * The response is private to the caller (per-user), so it is marked no-store.
  */
+const WORKSPACE_PAGE_SIZE = 50;
+
+/** One bounded, scoped first page for a list module. */
+function firstPage(build) {
+  return paginatedList({ build, page: 1, pageSize: WORKSPACE_PAGE_SIZE, offset: 0, limit: WORKSPACE_PAGE_SIZE });
+}
+
 router.get("/workspace", async (req, res, next) => {
   try {
     const access = req.access;
@@ -190,27 +334,33 @@ router.get("/workspace", async (req, res, next) => {
     const admin = req.user?.role === "admin";
     const has = (module) => canAccessModule(access, module);
     const org = await organizationId();
+    const empty = { rows: [], pagination: { page: 1, page_size: WORKSPACE_PAGE_SIZE, total: 0, total_pages: 0, has_next: false, has_previous: false } };
+    // A module the caller does not hold is reported as an EMPTY PAGE with total
+    // 0, exactly as before - the module gate has not moved, only the shape of
+    // what an empty module looks like.
+    const gated = async (allowed, build) => (allowed ? firstPage(build) : empty);
     // Everything the dashboard needs is fetched concurrently in one round trip.
     // The heavy administration extras (organization counters and collections) are
     // deliberately left out: they are only used on the Administration screen and
     // would otherwise dominate the time-to-first-paint.
-    const [projects, contracts, clients, properties, appointments, documents, debts, payments, reminders, summary, projectReports, reportTypes, reportHistory, me, leads, followUps, departments, roles, users, audit, approvals] = await Promise.all([
+    const [projects, contractsPage, clientsPage, propertiesPage, appointmentsPage, documentsPage, debtsPage, paymentsPage, reminders, summary, projectReports, reportTypes, reportHistory, me, leadsPage, followUpsPage, counts, departments, roles, users, audit, approvals] = await Promise.all([
       has("projects") ? Project.all() : [],
-      has("contracts") ? Contract.all() : [],
-      has("clients") ? Client.all() : [],
-      has("properties") ? Property.all() : [],
-      has("appointments") ? Appointment.all() : [],
-      has("documents") ? Document.all() : [],
-      has("debts") && financial ? Debt.all() : [],
-      has("payments") && financial ? Payment.all() : [],
+      gated(has("contracts"), () => Contract.paged()),
+      gated(has("clients"), () => Client.paged()),
+      gated(has("properties"), () => Property.paged()),
+      gated(has("appointments"), () => Appointment.paged()),
+      gated(has("documents"), () => Document.paged()),
+      gated(has("debts") && financial, () => Debt.paged()),
+      gated(has("payments") && financial, () => Payment.paged()),
       has("reminders") && financial ? Reminder.due() : [],
       has("reports") ? Report.summary() : null,
       has("reports") ? Report.byProject() : [],
       has("reports") ? { types: REPORT_TYPES.filter((type) => financial || !reportTypeIsFinancial(type.id)), payment_methods: PAYMENT_METHODS, financial } : { types: [], payment_methods: [] },
       has("reports") ? Report.history({}) : [],
       buildMe(req),
-      has("leads") ? scopedList("leads", "l", "lead", "", "l.created_at DESC") : [],
-      has("follow_ups") ? scopedList("follow_ups", "f", "follow_up", "", "f.due_at") : [],
+      gated(has("leads"), () => scopedListPaged("leads", "l", "lead", "l.created_at DESC")),
+      gated(has("follow_ups"), () => scopedListPaged("follow_ups", "f", "follow_up", "f.due_at")),
+      scopedCounts({ financial, has }),
       admin ? rows("SELECT * FROM departments WHERE organization_id=$1 ORDER BY name", [org]) : [],
       admin ? rows("SELECT r.*, COALESCE((SELECT json_agg(p.permission_key ORDER BY p.permission_key) FROM role_permissions rpx JOIN permissions p ON p.id=rpx.permission_id WHERE rpx.role_id=r.id),'[]'::json) AS permissions FROM roles r WHERE r.organization_id=$1 ORDER BY r.rank DESC, r.name", [org]) : [],
       admin ? rows("SELECT u.id,u.email,u.display_name,u.role,u.active FROM users u WHERE u.organization_id=$1 ORDER BY u.display_name", [org]) : [],
@@ -226,11 +376,39 @@ router.get("/workspace", async (req, res, next) => {
     res.set("Cache-Control", "private, no-store");
     res.json({
       me,
-      projects, contracts, clients, properties, appointments, documents, debts, payments, reminders,
-      summary, projectReports, reportTypes, reportHistory, leads, followUps,
+      projects, reminders,
+      // One bounded first page per list. The keys are unchanged, so the
+      // frontend's `payload.X || []` contract still holds; what changed is that
+      // an array is now a PAGE, not the whole table.
+      //
       // Contracts carry their own available_actions, computed per caller, so the
-      // Legal desk shows review buttons a Sales officer will never see.
-      contracts: contracts.map((contract) => ({ ...contract, available_actions: contractActionsFor(contract, req) })),
+      // Legal desk shows review buttons a Sales officer will never see. Applied
+      // to the page rather than to a separate key, so the contract register keeps
+      // working exactly as it did when the array was complete.
+      contracts: contractsPage.rows.map((contract) => ({ ...contract, available_actions: contractActionsFor(contract, req) })),
+      clients: clientsPage.rows,
+      properties: propertiesPage.rows,
+      appointments: appointmentsPage.rows,
+      documents: documentsPage.rows,
+      debts: debtsPage.rows,
+      payments: paymentsPage.rows,
+      leads: leadsPage.rows,
+      followUps: followUpsPage.rows,
+      pages: {
+        contracts: contractsPage.pagination,
+        clients: clientsPage.pagination,
+        properties: propertiesPage.pagination,
+        appointments: appointmentsPage.pagination,
+        documents: documentsPage.pagination,
+        debts: debtsPage.pagination,
+        payments: paymentsPage.pagination,
+        leads: leadsPage.pagination,
+        followUps: followUpsPage.pagination,
+      },
+      // Scoped totals. The dashboard reads these rather than `array.length`,
+      // which would now be a page size rather than a record count.
+      counts,
+      summary, projectReports, reportTypes, reportHistory,
       admin: { departments, roles, users, audit, approvals, dashboard: null, collections: null },
     });
   } catch (error) { next(error); }
@@ -253,6 +431,57 @@ router.get("/permissions", requireAdmin(), async (req,res,next)=>{try{res.json(a
  * The `audit` block runs the same bidirectional checks the test suite uses, so a
  * misconfigured role is visible in the API rather than only in a terminal.
  */
+/**
+ * The approval workflow and every duty on every department.
+ *
+ * Read-only reference data, open to any signed-in member: it describes the shape
+ * of the organization and who owns which decision, and contains no business
+ * record, no other person's data and no way to act. That is deliberately a
+ * different posture from GET /org/access-matrix above, which stays
+ * administrator-only because it reports which permissions each role really holds
+ * and runs the misconfiguration audit.
+ *
+ * The caller's own permissions are echoed back so the UI can mark which stages
+ * they personally decide - a highlight, never a grant. Authority still comes from
+ * CONTRACT_ACTIONS on POST /contracts/:id/transition.
+ */
+router.get("/duties", async (req, res, next) => {
+  try {
+    const org = await organizationId();
+    const permissionLabels = new Map(
+      (await rows("SELECT permission_key, label FROM permissions ORDER BY permission_key")).map((row) => [row.permission_key, row.label]),
+    );
+    const held = req.access?.isAdmin ? null : new Set(await permissionKeys(req.user.id));
+    const stagePermissions = workflowStagePermissions();
+    const stages = WORKFLOW_STAGES.map((stage) => ({
+      ...stage,
+      // `yours` marks the step this caller can actually decide. It is derived
+      // from the caller's own permission list and grants nothing.
+      yours: held === null || (held.has(stage.permission) && (stagePermissions[stage.status] || []).every((key) => held.has(key))),
+    }));
+    res.set("Cache-Control", "private, no-store");
+    res.json({
+      departments: departmentDutyTree(permissionLabels).map((department) => ({
+        ...department,
+        roles: department.roles.map((entry) => ({
+          ...entry,
+          duties: entry.duties.map((duty) => ({ ...duty, yours: held === null || duty.permissions.every((key) => held.has(key)) })),
+        })),
+      })),
+      workflow: { stages, exceptions: WORKFLOW_EXCEPTIONS, graph: workflowGraph(), ownership: CONTRACT_OWNERSHIP },
+      totals: {
+        departments: Object.keys(ROLE_HOME_DEPARTMENT).length ? new Set(Object.values(ROLE_HOME_DEPARTMENT)).size : 0,
+        roles: Object.keys(ROLE_HOME_DEPARTMENT).length,
+        duties: Object.values(ROLE_DUTIES).reduce((sum, duties) => sum + duties.length, 0),
+      },
+      // Which lifecycle permissions the caller personally holds. Read from their
+      // own access profile; it is not derived from the duty catalogue.
+      yourApprovals: [...(held || new Set())].filter((permission) => permission in CONTRACT_OWNERSHIP).sort(),
+      organization_id: org,
+    });
+  } catch (error) { next(error); }
+});
+
 router.get("/access-matrix", requireAdmin(), async (req, res, next) => {
   try {
     const org = await organizationId();
@@ -360,14 +589,27 @@ router.get("/approvals", requireAnyPermission("approve", "view_reports"), async 
 router.post("/approvals", requirePermission("approve"), async (req, res, next) => { try { const o = await organizationId(); const r = await queryOne("INSERT INTO approvals(organization_id,module,record_id,requested_by,status,notes) VALUES($1,$2,$3,$4,'pending',$5) RETURNING *", [o, text(req.body?.module, "module", 80), id(req.body?.record_id, "record_id"), req.user.id, req.body?.notes || null]); await audit(req, "created", "approval", r.id); res.status(201).json(r); } catch (e) { next(e); } });
 router.put("/approvals/:id", requirePermission("approve"), async (req, res, next) => { try { const approvalId = id(req.params.id, "approval_id"); const status = String(req.body?.status || ""); if (!["approved", "rejected", "pending"].includes(status)) return res.status(400).json({ error: "status must be approved, rejected, or pending" }); const o = await organizationId(); const r = await queryOne("UPDATE approvals SET status=$1,approved_by=CASE WHEN $1='pending' THEN NULL ELSE $2 END,decided_at=CASE WHEN $1='pending' THEN NULL ELSE NOW() END,notes=COALESCE($3,notes) WHERE id=$4 AND organization_id=$5 RETURNING *", [status, req.user.id, req.body?.notes || null, approvalId, o]); if (!r) return res.status(404).json({ error: "approval not found" }); await audit(req, status === "pending" ? "reopened" : "decided", "approval", r.id, { status }); res.json(r); } catch (e) { next(e); } });
 
-router.get("/leads", requireModuleAccess("leads"), async(req,res,next)=>{try{const values=[await organizationId()];const visible=scopeCondition("l","lead",req.access,values);res.json(await rows(`SELECT l.* FROM leads l WHERE l.organization_id=$1 AND ${visible} ORDER BY l.created_at DESC`,values));}catch(e){next(e);}});
+// Leads. Paginated twin is opt-in: without `page`/`page_size` the response is
+// still the bare array this route has always returned, which the workspace
+// aggregate and the existing tests both rely on.
+router.get("/leads", requireModuleAccess("leads"), async(req,res,next)=>{try{
+  if(!paginationRequested(req.query)){const values=[await organizationId()];const visible=scopeCondition("l","lead",req.access,values);return res.json(await rows(`SELECT l.* FROM leads l WHERE l.organization_id=$1 AND ${visible} ORDER BY l.created_at DESC`,values));}
+  const paged=await paginatedList({build:()=>scopedListPaged("leads","l","lead","l.created_at DESC",searchTerm(req.query.search),["l.name","l.email","l.notes"]),...parsePagination(req.query)});
+  res.json({data:paged.rows,pagination:paged.pagination});
+}catch(e){next(e);}});
 router.post("/leads", requireModuleAccess("leads"), requirePermission("create"), async(req,res,next)=>{try{const own=ownershipFields(req.access);const r=await queryOne("INSERT INTO leads(organization_id,name,email,phone,source,status,notes,assigned_to,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *",[await organizationId(),text(req.body?.name,"name"),req.body?.email||null,req.body?.phone||null,req.body?.source||null,req.body?.status||"new",req.body?.notes||null,req.body?.assigned_to||req.user.id,own.owner_id,own.created_by,own.department_id,own.visibility]);await audit(req,"created","lead",r.id);res.status(201).json(r);}catch(e){next(e);}});
 // Conversion registers a person as a client record; it is NOT a signature. The
 // record is therefore created as a PROSPECT ('lead'), so the completed-client rule
 // (a client must have a contract) is never violated by converting a lead. Sales
 // attaches the contract and completes the client afterwards.
 router.post("/leads/:id/convert", requireModuleAccess("leads"), requirePermission("create"), async(req,res,next)=>{try{const leadId=id(req.params.id,"lead_id");const values=[leadId,await organizationId()];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND ${scopeCondition("l","lead",req.access,values)}`,values);if(!lead)return res.status(404).json({error:"lead not found"});const client=await queryOne("INSERT INTO clients(organization_id,name,email,phone,client_type,status,notes,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,'buyer','lead',$5,$6,$7,$8,$9) RETURNING *",[values[1],lead.name,lead.email,lead.phone,lead.notes,lead.owner_id,lead.created_by,lead.department_id,lead.visibility]);await query("UPDATE leads SET client_id=$1,status='converted',converted_at=NOW() WHERE id=$2",[client.id,lead.id]);await audit(req,"converted","lead",lead.id,{client_id:client.id});res.status(201).json(client);}catch(e){next(e);}});
-router.get("/follow-ups", requireModuleAccess("follow_ups"), async(req,res,next)=>{try{const values=[await organizationId()];const visible=scopeCondition("f","follow_up",req.access,values);res.json(await rows(`SELECT f.* FROM follow_ups f WHERE f.organization_id=$1 AND ${visible} ORDER BY f.due_at`,values));}catch(e){next(e);}});
+// Follow-ups. Opt-in pagination; the default response is the bare array the
+// workspace aggregate and the existing tests depend on.
+router.get("/follow-ups", requireModuleAccess("follow_ups"), async(req,res,next)=>{try{
+  if(!paginationRequested(req.query)){const values=[await organizationId()];const visible=scopeCondition("f","follow_up",req.access,values);return res.json(await rows(`SELECT f.* FROM follow_ups f WHERE f.organization_id=$1 AND ${visible} ORDER BY f.due_at`,values));}
+  const paged=await paginatedList({build:()=>scopedListPaged("follow_ups","f","follow_up","f.due_at",searchTerm(req.query.search),["f.notes","f.follow_up_type"]),...parsePagination(req.query)});
+  res.json({data:paged.rows,pagination:paged.pagination});
+}catch(e){next(e);}});
 router.post("/follow-ups", requireModuleAccess("follow_ups"), requirePermission("create"), async(req,res,next)=>{try{const own=ownershipFields(req.access);const r=await queryOne("INSERT INTO follow_ups(organization_id,lead_id,client_id,assigned_to,due_at,next_due_at,follow_up_type,status,outcome,notes,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *",[await organizationId(),req.body?.lead_id||null,req.body?.client_id||null,req.body?.assigned_to||req.user.id,req.body?.due_at,req.body?.next_due_at||null,req.body?.follow_up_type||"call",req.body?.status||"open",req.body?.outcome||null,req.body?.notes||null,own.owner_id,own.created_by,own.department_id,own.visibility]);await audit(req,"created","follow_up",r.id);res.status(201).json(r);}catch(e){next(e);}});
 // Dashboard counters honour the caller's record scope, and monetary counters are
 // only produced for callers holding `view_financial`.

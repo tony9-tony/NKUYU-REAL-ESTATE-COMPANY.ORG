@@ -58,7 +58,10 @@ const sandbox = {
   console,
   setTimeout: (fn) => { fn(); return 0; }, clearTimeout() {},
   setInterval: () => 0, clearInterval() {},
+  // URLSearchParams is a browser global the app already relies on for its list
+  // queries; the sandbox has to provide it or any lazily-loaded list would throw.
   URL: { createObjectURL: () => "blob:stub", revokeObjectURL() {} },
+  URLSearchParams,
   Intl, Date, Math, Number, String, Boolean, Array, Object, JSON, Promise, Error, Set, Map,
   FormData: class { append() {} }, Blob: class {}, Event: class { constructor() {} },
 };
@@ -75,6 +78,9 @@ globalThis.__app = {
   get currentUser() { return currentUser; },
   set currentUser(value) { currentUser = value; },
   render, applyWorkspace, updateNavigation, enterWorkspace, openModal,
+  openGenerateContractModal, propertyOptionsForProject, addMonthsToDate,
+  openTaskModal, taskModalHtml: () => document.getElementById("modal").innerHTML,
+  modalOpen: () => document.getElementById("modal-backdrop").hidden === false,
   setView(view) { state.view = view; },
 };
 `;
@@ -164,7 +170,7 @@ function workspacePayload(profile) {
 
 
 
-const views = ["dashboard", "admin-dashboard", "projects", "properties", "clients", "contracts", "debts", "appointments", "documents", "reports", "organization"];
+const views = ["dashboard", "admin-dashboard", "projects", "properties", "clients", "contracts", "debts", "appointments", "documents", "reports", "duties", "assignments", "organization"];
 
 // Keep the rendered markup per role/view so the visibility assertions below can
 // inspect it, rather than only proving that render() did not throw.
@@ -222,6 +228,26 @@ check(!(rendered["legal:dashboard"] || "").includes("Payment reminders"), "legal
 check(!(rendered["property:dashboard"] || "").includes("Payment reminders"), "property officer dashboard hides the reminders panel");
 check((rendered["director:dashboard"] || "").includes("Payment reminders"), "the MD keeps the reminders panel");
 
+console.log("\n=== dashboard with an empty business workspace ===");
+{
+  const profile = scenario.director;
+  const payload = workspacePayload(profile);
+  for (const key of ["projects", "properties", "contracts", "clients", "appointments", "documents", "debts", "payments", "leads", "followUps"]) payload[key] = [];
+  payload.summary = { financial: true, active_projects: 0, contracts_total: 0, properties_available: 0, clients_active: 0, appointments_scheduled: 0, documents_pending: 0, debts_pending: { count: 0, total: 0 }, debts_overdue: { count: 0, total: 0 }, income_all: { count: 0, total: 0 }, income_30d: { count: 0, total: 0 }, contracts_new: { count: 0, total: 0 }, contracts_terminal: { count: 0, total: 0 } };
+  app.currentUser = { role: "staff", display_name: "Joseph Mwakalinga", email: "md@mkuyu.local" };
+  app.state.organization.me = payload.me;
+  app.state.attention = { total: 0, mine: 0, review: 0 };
+  app.applyWorkspace(payload);
+  app.state.view = "dashboard";
+  app.render();
+  const html = getElement("content").innerHTML;
+  check(html.includes("Your workspace is ready"), "empty dashboard has a clear, data-aware introduction");
+  check(html.includes("No pending tasks"), "empty dashboard reports no pending tasks");
+  check(html.includes("No active contracts"), "empty dashboard explains where contracts will appear");
+  check(!html.includes("2.4k+") && !html.includes("TZS 86B") && !html.includes("99.2%"), "empty dashboard does not fabricate business statistics");
+  check(getElement("primary-nav").innerHTML.includes("nav-group-label"), "navigation sections are grouped after RBAC filtering");
+}
+
 // --- Password reset is offered only where the API would accept it ------------
 // The API gates the reset on requireAdmin(), so the button must not be rendered
 // for any non-administrator, however privileged that caller is.
@@ -254,6 +280,144 @@ console.log("\n=== contract form pricing fields ===");
   check(/id="field-final-price"[^>]*readonly/.test(modalHtml), "the final price input is read-only");
   check(/id="field-discount-amount"[^>]*readonly/.test(modalHtml), "the discount amount input is read-only");
 }
+
+console.log("\n=== Generate Contract overlay ===");
+{
+  const profile = scenario.sales;
+  const payload = workspacePayload(profile);
+  app.currentUser = { role: profile.role, display_name: "sales user", email: "sales@mkuyu.local" };
+  app.state.organization.me = payload.me;
+  app.applyWorkspace(payload);
+  app.state.contractTemplates = [];
+  app.state.properties = [
+    { id: 30, name: "Villa 12", location: "Dar es Salaam", project_id: 1, price: 900000 },
+    { id: 31, name: "Villa 13", location: "Arusha", project_id: 2, price: 800000 },
+  ];
+  sandbox.fetch = async (url) => String(url).includes("/contract-templates") ? okResponse([]) : okResponse({});
+  context.fetch = sandbox.fetch;
+  await app.openGenerateContractModal();
+  const modalHtml = getElement("modal").innerHTML;
+  check((rendered["sales:contracts"] || "").includes('data-action="generate-contract"'), "the Contracts register offers Generate Contract");
+  check(app.modalOpen(), "Generate Contract opens the existing modal overlay");
+  for (const field of ["gc-client-name", "gc-client-phone", "gc-client-email", "gc-company", "gc-project", "gc-property", "gc-property-number", "gc-property-location", "gc-start", "gc-end", "gc-duration", "gc-duration-unit", "gc-date", "gc-original", "gc-discount", "gc-discount-amount", "gc-final-price", "gc-deposit", "gc-installments", "gc-frequency", "gc-first-due", "gc-template"]) {
+    check(modalHtml.includes(`id="${field}"`), `generation form includes ${field}`);
+  }
+  check(/id="gc-property"[^>]*required/.test(modalHtml), "property is required");
+  check(/id="gc-duration"[^>]*required/.test(modalHtml), "agreement duration is required");
+  check(/id="gc-discount-amount"[^>]*readonly/.test(modalHtml), "discount amount is read-only");
+  check(/id="gc-final-price"[^>]*readonly/.test(modalHtml), "final price is read-only");
+  check(!/name="(?:discount_amount|final_price|value)"/.test(modalHtml), "derived prices and contracts.value are not submitted fields");
+  const filteredProperties = app.propertyOptionsForProject("1");
+  check(filteredProperties.includes('value="30"') && !filteredProperties.includes('value="31"'), "property options are restricted to the selected project");
+  check(app.addMonthsToDate("2027-01-31", 1, "months") === "2027-02-28", "the frontend duration preview clamps month-end dates correctly");
+}
+
+// --- Duty catalogue and approval workflow ----------------------------------
+// The duties view is built entirely from GET /org/duties, which loads lazily, so
+// the render pass above only ever sees its loading placeholder. Seed the same
+// payload here to exercise the real markup: every department, every role, every
+// duty, and the whole approval rail.
+console.log("\n=== duties view renders the catalogue and the approval path ===");
+{
+  const { WORKFLOW_STAGES, WORKFLOW_EXCEPTIONS } = await import("./backend/src/contracts/workflow.js");
+  const { departmentDutyTree, CONTRACT_OWNERSHIP } = await import("./backend/src/org/duties.js");
+  const dutyCatalogue = () => departmentDutyTree(new Map()).flatMap((department) => department.roles);
+
+  const dutiesFixture = (held) => ({
+    departments: departmentDutyTree(new Map()).map((department) => ({
+      ...department,
+      roles: department.roles.map((role) => ({
+        ...role,
+        duties: role.duties.map((duty) => ({ ...duty, yours: duty.permissions.every((key) => held.includes(key)) })),
+      })),
+    })),
+    workflow: {
+      stages: WORKFLOW_STAGES.map((stage) => ({ ...stage, yours: held.includes(stage.permission) })),
+      exceptions: WORKFLOW_EXCEPTIONS,
+      ownership: CONTRACT_OWNERSHIP,
+    },
+    totals: { departments: 6, roles: 16, duties: 78 },
+    yourApprovals: held.filter((key) => key in CONTRACT_OWNERSHIP),
+  });
+
+  const viewFor = (name, held) => {
+    const profile = scenario[name];
+    const payload = workspacePayload(profile);
+    app.currentUser = { role: profile.role, display_name: `${name} user`, email: `${name}@mkuyu.local` };
+    app.state.organization.me = payload.me;
+    app.applyWorkspace(payload);
+    app.state.duties = dutiesFixture(held);
+    app.state.dutiesRequested = true;
+    app.setView("duties");
+    app.updateNavigation();
+    app.render();
+    return getElement("content").innerHTML;
+  };
+
+  // The MD sits at the management approval step, so the rail marks exactly one
+  // stage as theirs and nothing in between.
+  const mdHtml = viewFor("director", ["view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "approve_management", "request_changes", "access_contracts", "access_clients", "access_projects", "access_properties", "access_documents", "access_appointments", "access_debts", "access_payments", "access_reminders", "access_reports", "access_leads", "access_follow_ups"]);
+
+  check(mdHtml.includes("Approval workflow"), "the view shows the approval workflow");
+  check(mdHtml.includes("Duties by department"), "the view shows the duty breakdown");
+  for (const department of ["MANAGEMENT", "FINANCE &amp; ACCOUNTS", "SALES, MARKETING &amp; OPERATIONS", "LEGAL", "CUSTOMER SERVICE", "ICT &amp; ADMINISTRATION"]) {
+    check(mdHtml.includes(department), `the view lists ${department.replace(/&amp;/g, "&")}`);
+  }
+  for (const role of ["Managing Director", "Legal Manager", "Legal Officer", "Finance Manager", "Finance Officer", "ICTO", "Sales Officer", "Marketing Officer", "Property Officer", "Customer Service Officer"]) {
+    check(mdHtml.includes(role), `the view lists the ${role} role`);
+  }
+  // Every stage of the rail must appear, in order, or the diagram is incomplete.
+  const stageOrder = WORKFLOW_STAGES.map((stage) => mdHtml.indexOf(stage.label));
+  check(stageOrder.every((index) => index > -1), "every approval stage is rendered");
+  check(stageOrder.every((index, i) => i === 0 || index > stageOrder[i - 1]), "the stages render in pipeline order");
+  for (const exception of WORKFLOW_EXCEPTIONS) {
+    check(mdHtml.includes(exception.label), `the off-pipeline state "${exception.label}" is rendered`);
+  }
+  check(mdHtml.includes("Approve contracts legally"), "the legal approval duty is listed with its description");
+  check(mdHtml.includes("duty-tag-yours"), "duties the caller holds are marked as theirs");
+  check(mdHtml.includes("Your decision"), "a stage the caller decides is marked");
+
+  // Sales must not be shown a stage only Legal or Management may act on. The
+  // server decides this; the view must not contradict it by marking them.
+  const salesHeld = ["view", "create", "edit", "view_reports", "submit_contract", "request_changes", "access_leads", "access_clients", "access_properties", "access_projects", "access_contracts", "access_appointments", "access_documents", "access_reports"];
+  const salesHtml = viewFor("sales", salesHeld);
+  const yoursCount = (salesHtml.match(/is-yours/g) || []).length;
+  check(yoursCount > 0, "a sales officer is shown at least one step that is theirs");
+  // Only the draft and submitted stages are Sales' to move; the rest belong to
+  // Legal, Finance and Management and must carry no "yours" marker.
+  const stageBlock = (html, stage) => {
+    const start = html.indexOf(`>${stage.stage}<`);
+    return start === -1 ? "" : html.slice(start, start + 700);
+  };
+  for (const stage of WORKFLOW_STAGES.filter((entry) => ["approve_legal", "approve_management", "review_legal"].includes(entry.permission))) {
+    check(!stageBlock(salesHtml, stage).includes("Your decision"), `a sales officer is NOT marked as deciding "${stage.label}"`);
+  }
+  // Sales may SEE the whole path - it is reference data - but must be offered no
+  // decision on it, and no duty that needs a permission they lack.
+  check(salesHtml.includes("Management approval"), "a sales officer can still read the management approval step");
+  const mdYourStages = WORKFLOW_STAGES.filter((entry) => entry.permission === "approve_management");
+  check(mdYourStages.length === 1 && stageBlock(mdHtml, mdYourStages[0]).includes("Your decision"), "the MD IS marked as deciding the management approval step");
+  // No duty may be marked "yours" unless the caller holds every permission that
+  // duty needs. Checked against the rendered markup, not a re-derived flag.
+  const overMarked = [];
+  for (const role of dutyCatalogue()) {
+    const start = salesHtml.indexOf(`>${role.role}<`);
+    if (start === -1) continue;
+    const block = salesHtml.slice(start);
+    for (const duty of role.duties) {
+      const shouldBeYours = duty.permissions.every((key) => salesHeld.includes(key));
+      const at = block.indexOf(duty.label);
+      if (at === -1) continue;
+      const isMarked = block.slice(at, at + 400).includes("duty-tag-yours");
+      if (shouldBeYours && !isMarked) overMarked.push(`missing: ${role.role}/${duty.key}`);
+      if (!shouldBeYours && isMarked) overMarked.push(`over-claimed: ${role.role}/${duty.key}`);
+    }
+  }
+  check(overMarked.length === 0, `a duty is marked "yours" exactly when the caller holds every permission it needs${overMarked.length ? ` (${overMarked.join(", ")})` : ""}`);
+  app.state.duties = null;
+  app.state.dutiesRequested = false;
+}
+
 check(!(rendered["finance:organization"] || "").includes('data-action="reset-password"'), "a finance officer is not offered Reset password");
 
 // --- Navigation audit: unauthorized items must be ABSENT from the DOM ---------
@@ -264,11 +428,13 @@ console.log("\n=== navigation contains only the authorized workspace ===");
 
 // role -> views that MUST be absent / MUST be present.
 const NAV_EXPECTATIONS = {
-  administrator: { absent: [], present: ["dashboard", "admin-dashboard", "projects", "properties", "clients", "contracts", "debts", "appointments", "documents", "reports", "organization"] },
-  director: { absent: ["admin-dashboard", "organization"], present: ["dashboard", "projects", "properties", "clients", "contracts", "debts", "appointments", "documents", "reports"] },
-  finance: { absent: ["admin-dashboard", "organization", "properties", "appointments"], present: ["dashboard", "clients", "contracts", "debts", "reports"] },
-  sales: { absent: ["admin-dashboard", "organization", "debts"], present: ["dashboard", "projects", "properties", "clients", "contracts", "appointments", "documents", "reports"] },
-  property: { absent: ["admin-dashboard", "organization", "contracts", "debts", "reports"], present: ["dashboard", "projects", "properties", "clients", "appointments", "documents"] },
+  administrator: { absent: [], present: ["dashboard", "admin-dashboard", "projects", "properties", "clients", "contracts", "debts", "appointments", "documents", "reports", "duties", "organization"] },
+  // "duties" is the duty catalogue and the approval path. It is reference data,
+  // not a module, so every role may read it - unlike the administration screens.
+  director: { absent: ["admin-dashboard", "organization"], present: ["dashboard", "projects", "properties", "clients", "contracts", "debts", "appointments", "documents", "reports", "duties"] },
+  finance: { absent: ["admin-dashboard", "organization", "properties", "appointments"], present: ["dashboard", "clients", "contracts", "debts", "reports", "duties"] },
+  sales: { absent: ["admin-dashboard", "organization", "debts"], present: ["dashboard", "projects", "properties", "clients", "contracts", "appointments", "documents", "reports", "duties"] },
+  property: { absent: ["admin-dashboard", "organization", "contracts", "debts", "reports"], present: ["dashboard", "projects", "properties", "clients", "appointments", "documents", "duties"] },
 };
 
 for (const [name, expected] of Object.entries(NAV_EXPECTATIONS)) {
@@ -309,7 +475,149 @@ for (const [name, expected] of Object.entries(NAV_EXPECTATIONS)) {
   check(!scenario.director.me.permissions.some((key) => key.startsWith("manage_")), "the MD holds no manage_* permission that would justify administration");
 }
 
-// --- View contract from a Finance installment row ---------------------------
+// --- Assignments: the workspace and the attention badge ----------------------
+// The badge count must come from the server, and the action buttons must come
+// from each task's server-computed available_actions. A UI that hardcodes
+// "Approve" or "Submit" for everybody is exactly what must not happen.
+console.log("\n=== assignments view renders the server-authorized workspace ===");
+{
+  const taskFixture = (overrides = {}) => ({
+    id: 501,
+    title: "Prepare Monthly Sales Report",
+    description: "New clients, renewals and completed contracts.",
+    assigned_by_name: "Daniel Kibe",
+    assigned_to_name: "Amina Sanga",
+    reviewer_name: "Daniel Kibe",
+    priority: "high",
+    due_date: "2026-10-05",
+    status: "in_progress",
+    linked_entity: null,
+    linked_record_id: null,
+    available_actions: ["submit"],
+    ...overrides,
+  });
+
+  const viewFor = (name, held, tasks, attention) => {
+    const profile = { ...scenario[name], me: { ...scenario[name].me, permissions: [...scenario[name].me.permissions, ...held] } };
+    const payload = workspacePayload(profile);
+    payload.me = { ...payload.me, permissions: profile.me.permissions, attention };
+    app.currentUser = { role: profile.role, display_name: `${name} user`, email: `${name}@mkuyu.local` };
+    app.state.organization.me = payload.me;
+    app.state.organization.admin = payload.admin;
+    app.state.tasks = tasks;
+    app.state.tasksRequested = true;
+    app.setView("assignments");
+    app.applyWorkspace(payload);
+    app.updateNavigation();
+    app.render();
+    return { html: getElement("content").innerHTML, nav: getElement("primary-nav").innerHTML };
+  };
+
+  const staff = viewFor("sales", [], [taskFixture()], { total: 1, mine: 1, review: 0 });
+  check(staff.html.includes("Assignments"), "the assignments view renders");
+  check(staff.html.includes("Prepare Monthly Sales Report"), "it shows the task title");
+  check(staff.html.includes("High"), "priority is shown as a WORD, not as colour alone");
+  check(staff.html.includes("05 Oct 2026"), "the due date is shown");
+  check(staff.html.includes("Daniel Kibe") && staff.html.includes("Amina Sanga"), "it shows who assigned the work and who received it");
+  check(staff.html.includes('data-task-action="submit"'), "the assignee is offered Submit");
+  check(!staff.html.includes('data-task-action="approve"'), "the assignee is NOT offered Approve");
+  check(!staff.html.includes('data-action="new-task"'), "a holder of no assignment authority is not offered the Assign work control");
+  check(staff.nav.includes("Assignments") && /nav-count">1</.test(staff.nav), "the navigation shows Assignments with the server's attention count");
+
+  const manager = viewFor("director", ["assign_tasks", "review_tasks"], [taskFixture({ status: "under_review", available_actions: ["approve", "request_changes", "cancel"] })], { total: 2, mine: 0, review: 2 });
+  check(manager.html.includes('data-task-action="approve"') && manager.html.includes('data-task-action="request_changes"'), "the reviewer is offered Approve and Request changes");
+  check(!manager.html.includes('data-task-action="submit"'), "the reviewer is NOT offered Submit");
+  check(manager.html.includes('data-action="new-task"'), "a holder of assign_tasks is offered the Assign work control");
+
+  // An empty section says so plainly rather than inventing content.
+  const empty = viewFor("sales", [], [], { total: 0, mine: 0, review: 0 });
+  check(empty.html.includes("No tasks in this section"), "an empty section says so instead of inventing content");
+  check(!/nav-count">0</.test(empty.nav), "a zero attention count renders no badge");
+
+  // The priority and status filters exist and are labelled.
+  check(staff.html.includes('data-action="task-priority-filter"') && staff.html.includes('data-action="task-status-filter"'), "priority and status are filterable from the workspace");
+}
+
+// --- The New Task entry point actually opens a working form -------------------
+// Markup alone is not enough: the earlier check only proved a button existed in
+// the HTML. This drives the real function the button calls and asserts the form
+// it produces, including that the assignee list comes from the backend.
+console.log("\n=== the New Task button opens an authorized form ===");
+{
+  const ASSIGNEES = [{ id: 41, display_name: "Amina Sanga" }, { id: 42, display_name: "Peter Ndosi" }];
+  const REVIEWERS = [{ id: 43, display_name: "Daniel Kibe" }];
+  const errorResponse = (message) => ({ ok: false, status: 403, json: async () => ({ error: message }), text: async () => "", blob: async () => ({}) });
+
+  const run = async (name, held, routes) => {
+    const profile = { ...scenario[name], me: { ...scenario[name].me, permissions: [...scenario[name].me.permissions, ...held] } };
+    const payload = workspacePayload(profile);
+    payload.me = { ...payload.me, permissions: profile.me.permissions, attention: { total: 0, mine: 0, review: 0 } };
+    app.currentUser = { role: profile.role, display_name: `${name} user`, email: `${name}@mkuyu.local` };
+    app.state.organization.me = payload.me;
+    app.state.tasks = [];
+    app.state.tasksRequested = true;
+    app.setView("assignments");
+    app.applyWorkspace(payload);
+    app.updateNavigation();
+    app.render();
+    // Each case starts from a closed modal, so "the modal stayed closed" means
+    // this call did not open it rather than that a previous case left it open.
+    getElement("modal-backdrop").hidden = true;
+    getElement("modal").innerHTML = "";
+    context.fetch = async (url) => routes(String(url).replace("/api/v1", ""));
+    sandbox.fetch = context.fetch;
+    const hasButton = getElement("content").innerHTML.includes('data-action="new-task"');
+    await app.openTaskModal();
+    return { hasButton, html: app.taskModalHtml(), open: app.modalOpen() };
+  };
+
+  // 1. The MD sees the entry point and the form opens with authorized people.
+  const mdResult = await run("director", ["assign_tasks", "review_tasks"], (p) => {
+    if (p === "/org/tasks/assignees") return okResponse(ASSIGNEES);
+    if (p === "/org/tasks/reviewers") return okResponse(REVIEWERS);
+    return okResponse({});
+  });
+  check(mdResult.hasButton, "1. the Managing Director is offered the New Task button");
+  check(mdResult.open, "2. clicking it opens the modal");
+  check(mdResult.html.includes("New Task") && mdResult.html.includes('id="task-form"'), "3. the modal is a task form titled 'New Task'");
+  for (const field of ["task-title", "task-description", "task-assignee", "task-priority-input", "task-due"]) {
+    check(mdResult.html.includes(`id="${field}"`), `the form has the ${field.replace("task-", "")} field`);
+  }
+  check(mdResult.html.includes('name="linked_entity"') && mdResult.html.includes('name="linked_record_id"'), "4. the form offers the optional linked record");
+  for (const label of ["Urgent", "High", "Medium", "Low"]) {
+    check(mdResult.html.includes(`>${label}</option>`), `the priority field offers ${label}`);
+  }
+  check(ASSIGNEES.every((person) => mdResult.html.includes(person.display_name)), "5. the assignee options are exactly the people the backend authorized");
+  check(mdResult.html.includes("Daniel Kibe"), "6. the reviewer list is offered");
+  check(!mdResult.html.includes('name="assigned_by"'), "7. the form never sends an assigned_by field");
+
+  // 2. An authorized department manager gets the same entry point.
+  const mgrResult = await run("director", ["assign_tasks", "review_tasks"], (p) => {
+    if (p === "/org/tasks/assignees") return okResponse([ASSIGNEES[0]]);
+    if (p === "/org/tasks/reviewers") return okResponse(REVIEWERS);
+    return okResponse({});
+  });
+  check(mgrResult.hasButton && mgrResult.open, "8. an authorized Department Manager is offered the New Task button");
+  check(mgrResult.html.includes("Amina Sanga") && !mgrResult.html.includes("Peter Ndosi"), "9. the manager is only offered the people in their own scope");
+
+  // 3. Unauthorized staff never see the button.
+  const staffResult = await run("sales", [], (p) => (p.startsWith("/org/tasks") ? errorResponse("permission denied") : okResponse({})));
+  check(!staffResult.hasButton, "10. a staff member without assign_tasks is NOT offered the New Task button");
+  check(!staffResult.open, "11. and the modal stays closed for them");
+  check(!getElement("topbar-actions").innerHTML.includes('data-action="new-task"'), "12. the topbar shows no New Task button for them either");
+
+  // 4. Holding assign_tasks without review_tasks must still be able to create.
+  //    The reviewer list failing may not take the whole entry point down with it.
+  const partialResult = await run("director", ["assign_tasks"], (p) => {
+    if (p === "/org/tasks/assignees") return okResponse(ASSIGNEES);
+    if (p === "/org/tasks/reviewers") return errorResponse("permission denied");
+    return okResponse({});
+  });
+  check(partialResult.open, "13. a caller who can assign but not review still gets a working form");
+  check(partialResult.html.includes('name="assigned_to"') && partialResult.html.includes('name="title"'), "14. that form is still submittable");
+  check(!partialResult.html.includes('id="task-reviewer"'), "15. it simply offers no reviewer field rather than a broken one");
+}
+
 console.log("\n=== finance can open the contract behind an installment ===");
 {
   const profile = scenario.finance;

@@ -2,15 +2,25 @@ const API_ROOT = "/api/v1";
 const ADMIN_PATH = "/admin";
 const STAFF_PATH = "/staff";
 const TOKEN_STORAGE_KEY = "mkuyu_token";
+// When "Remember me" is unticked the session lives in sessionStorage, so closing
+// the tab signs the user out. The token is read from both, in this order.
+const SESSION_TOKEN_KEY = "mkuyu_session_token";
 
-function getToken() {
-  try { return localStorage.getItem(TOKEN_STORAGE_KEY); } catch (_) { return null; }
+function readStoredToken() {
+  try { return localStorage.getItem(TOKEN_STORAGE_KEY) || sessionStorage.getItem(SESSION_TOKEN_KEY); } catch (_) { return null; }
 }
 
-function setToken(token) {
+function getToken() {
+  return readStoredToken();
+}
+
+function setToken(token, remember = true) {
   try {
-    if (token) localStorage.setItem(TOKEN_STORAGE_KEY, token);
-    else localStorage.removeItem(TOKEN_STORAGE_KEY);
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    sessionStorage.removeItem(SESSION_TOKEN_KEY);
+    if (!token) return;
+    if (remember) localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    else sessionStorage.setItem(SESSION_TOKEN_KEY, token);
   } catch (_) { /* storage unavailable (e.g. private mode) */ }
 }
 
@@ -34,13 +44,47 @@ const state = {
   reportHistory: [],
   reportPreview: null,
   organization: { departments: [], roles: [], permissions: [], users: [], leads: [], followUps: [], approvals: [], audit: [], me: null, dashboard: null, collections: null },
+  // Duty catalogue + approval workflow from GET /org/duties. Reference data, not
+  // a module, so it is loaded on demand when the view is first opened.
+  duties: null,
+  dutiesRequested: false,
   allocation: null,
   allocationEntity: "client",
   allocationUnassigned: true,
   shares: null,
   reportFilters: { source: "", reportType: "", projectId: "", search: "", from: "", to: "" },
   filters: { project: "", type: "", status: "", debtStatus: "", propertyStatus: "", clientStatus: "", appointmentStatus: "", documentStatus: "", documentSearch: "", sort: "" },
+  // ---- paginated list state -----------------------------------------------
+  // The workspace returns the FIRST PAGE of each list, not the whole table, so
+  // the dashboard must never derive a total from `state.X.length` - that is now
+  // a page size. `counts` holds the server-computed, SCOPED totals;
+  // `pages` holds the page descriptors so a pager needs no extra request.
+  counts: {},
+  pages: {},
+  // Per-list request bookkeeping: which page is loaded, whether a fetch is in
+  // flight (so a re-render cannot stack requests), and the last server search
+  // term actually applied.
+  listState: {},
   loading: true,
+  // ---- task assignment workspace --------------------------------------------
+  // Loaded on demand for the Assignments view. `attention` is the server's own
+  // count (from /org/me and refreshed after every task action) - the badge is
+  // never computed here from local rows, so it cannot drift from the backend.
+  tasks: null,
+  taskBox: "mine",
+  taskPriority: "",
+  taskStatus: "",
+  tasksRequested: false,
+  taskAssignees: [],
+  taskReviewers: [],
+  attention: { total: 0, mine: 0, review: 0 },
+  // ---- contract generation ---------------------------------------------------
+  // The Generate Contract overlay collects everything, then the SERVER decides
+  // the price, writes the contract, renders the template and returns the created
+  // document. `step` drives form -> review -> success inside one modal, so the
+  // flow never becomes a separate page or a second module.
+  contractTemplates: null,
+  contractGen: { step: "form", result: null, error: null },
   // Small-screen navigation drawer state, driven by the mobile menu button.
   navOpen: false,
   // Set once /org/me resolved; the workspace stays hidden until then.
@@ -66,12 +110,23 @@ const authSubtitle = document.getElementById("auth-subtitle");
 const displayNameField = document.getElementById("display-name-field");
 const authSwitchLabel = document.getElementById("auth-switch-label");
 const authToggle = document.getElementById("auth-toggle");
+const authRemember = document.getElementById("auth-remember");
+const authForgot = document.getElementById("auth-forgot");
+const portalTabs = document.getElementById("portal-tabs");
+const brandSub = document.getElementById("brand-sub");
+const globalSearch = document.getElementById("global-search");
+const bellDot = document.getElementById("bell-dot");
 
 let authMode = "login";
 let currentUser = null;
+// Which portal the user asked for on the sign-in screen. It is sent to the
+// server with the credential, which refuses an account that does not belong to
+// it; `enterWorkspace` still routes on the role the server reports.
+let authPortal = "staff";
 
-function showAuthMessage(message) {
+function showAuthMessage(message, tone = "error") {
   authMessage.textContent = message;
+  authMessage.classList.toggle("info", tone === "info");
   authMessage.hidden = false;
 }
 
@@ -84,12 +139,28 @@ function setAuthMode(mode) {
   const isSetup = authMode === "setup";
   displayNameField.hidden = !isSetup;
   document.getElementById("auth-name").required = isSetup;
-  authTitle.textContent = isSetup ? "Create workspace" : "Sign in";
-  authSubtitle.textContent = isSetup ? "Set up the first private office account." : "Use your private workspace credentials.";
-  authSubmit.innerHTML = isSetup ? 'Create workspace <span>↗</span>' : 'Enter workspace <span>↗</span>';
+  authTitle.textContent = isSetup ? "Create workspace" : "Welcome back";
+  authSubtitle.textContent = isSetup
+    ? "Set up the first private office account."
+    : "Sign in to your MKUYU workspace";
+  authSubmit.textContent = isSetup ? "Create workspace" : "Sign in to workspace";
   authSwitchLabel.textContent = isSetup ? "Already have access?" : "New private workspace?";
   authToggle.textContent = isSetup ? "Sign in" : "Create an account";
+  // First-run setup creates the one administrator, so the portal switch is
+  // meaningless there and would only invite the wrong expectation.
+  if (portalTabs) portalTabs.hidden = isSetup;
   hideAuthMessage();
+}
+
+/** Highlights the chosen portal tab. The server enforces the pairing. */
+function setAuthPortal(portal) {
+  authPortal = portal === "admin" ? "admin" : "staff";
+  if (!portalTabs) return;
+  for (const tab of portalTabs.querySelectorAll(".portal-tab")) {
+    const active = tab.dataset.portal === authPortal;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+  }
 }
 
 function endSession(message = "") {
@@ -122,6 +193,9 @@ function enterWorkspace(user) {
   document.getElementById("user-name").textContent = name;
   document.getElementById("user-email").textContent = user.email || "Private workspace";
   document.getElementById("user-avatar").textContent = name.charAt(0).toUpperCase();
+  // The rail names the portal the caller actually landed in, which is the role
+  // the server reported rather than the tab they happened to click.
+  if (brandSub) brandSub.textContent = isAdmin ? "Admin Portal" : "Staff Portal";
   bootstrap();
 }
 
@@ -153,6 +227,8 @@ const viewMeta = {
   documents: ["Documents", "Agreements, titles, invoices, reports, and permits"],
   reports: ["Reports", "Turn project activity into clear management records"],
   "admin-dashboard": ["Admin overview", "Control staff access, privileges, and organization performance"],
+  duties: ["Duties & approvals", "The approval path, and every duty on every department"],
+  assignments: ["Assignments", "Work assigned to you, and the decisions waiting on you"],
   organization: ["Administration", "Staff, roles, departments, approvals, and organization activity"],
 };
 
@@ -480,6 +556,168 @@ async function api(path, options = {}) {
   return payload;
 }
 
+/* --------------------------------------------------------------------------
+   Paginated list loading.
+
+   The workspace ships the first page of each list. Everything after that -
+   further pages, and SEARCH - is fetched here from the endpoints the API
+   already exposes.
+
+   Why search moved to the server: with only one page resident, filtering
+   client-side would quietly search 50 of 12,000 rows and report the rest as
+   "not found". That is worse than no search, because it looks like an answer.
+   The term is therefore sent to the API, which applies it inside the same
+   scoped, ordered query that produced the page - so a search can never reach a
+   record the caller may not read, and can never miss one off the first page.
+   -------------------------------------------------------------------------- */
+const LIST_ENDPOINTS = {
+  contracts: "/contracts",
+  clients: "/clients",
+  properties: "/properties",
+  debts: "/debts",
+  payments: "/payments",
+  documents: "/documents",
+  appointments: "/appointments",
+  projects: "/projects",
+  leads: "/org/leads",
+  followUps: "/org/follow-ups",
+};
+
+const PAGE_SIZE = 50;
+
+/** The filters that belong to a list, so a search request carries the view's own narrowing. */
+function listQuery(kind, { page = 1, search = "" } = {}) {
+  const query = new URLSearchParams();
+  query.set("page", String(page));
+  query.set("page_size", String(PAGE_SIZE));
+  if (search) query.set("search", search);
+  const filters = state.filters || {};
+  // Only parameters the endpoint for this list actually understands. An
+  // unsupported filter is a 400, which would render the register empty.
+  if (kind === "contracts") {
+    if (filters.project) query.set("project_id", filters.project);
+    if (filters.type) query.set("type", filters.type);
+    if (filters.status) query.set("status", filters.status);
+  }
+  if (kind === "clients") { if (filters.project) query.set("project_id", filters.project); if (filters.clientStatus) query.set("status", filters.clientStatus); }
+  if (kind === "properties") { if (filters.project) query.set("project_id", filters.project); if (filters.propertyStatus) query.set("status", filters.propertyStatus); }
+  if (kind === "debts" || kind === "payments") { if (filters.project) query.set("project_id", filters.project); }
+  if (kind === "documents") { if (filters.project) query.set("project_id", filters.project); if (filters.documentStatus) query.set("status", filters.documentStatus); }
+  if (kind === "appointments") { if (filters.project) query.set("project_id", filters.project); if (filters.appointmentStatus) query.set("status", filters.appointmentStatus); }
+  for (const [key, value] of [...query.entries()]) if (value === "") query.delete(key);
+  return query;
+}
+
+/** Where a loaded page is written, and which array it replaces. */
+function listTarget(kind) {
+  if (kind === "leads") return { set: (rows) => { state.organization.leads = rows; } };
+  if (kind === "followUps") return { set: (rows) => { state.organization.followUps = rows; } };
+  return { set: (rows) => { state[kind] = rows; } };
+}
+
+/**
+ * Resolves a record for an edit modal, fetching it by id when it is not on the
+ * current page.
+ *
+ * With whole collections in memory, `state.contracts.find(...)` always found the
+ * row. Now that only one page is resident, `.find()` alone would return
+ * undefined for a perfectly valid record on page 9, and the user would be told
+ * the record does not exist. So a miss triggers a fetch from the SAME
+ * authorized GET endpoint the detail view uses - never a second, wider query -
+ * which means the server still decides whether this caller may open it. A 403 or
+ * 404 is reported honestly instead of being masked as "missing".
+ */
+const recordCache = new Map();
+
+async function findRecord(kind, id) {
+  const rows = kind === "leads" ? state.organization.leads
+    : kind === "followUps" ? state.organization.followUps
+      : (state[kind] || []);
+  const hit = (rows || []).find((item) => String(item.id) === String(id));
+  if (hit) return hit;
+  if (id === undefined || id === null || id === "") return null;
+  const key = `${kind}:${id}`;
+  if (recordCache.has(key)) return recordCache.get(key);
+  const endpoint = LIST_ENDPOINTS[kind];
+  if (!endpoint) return null;
+  try {
+    const record = await api(`${endpoint}/${id}`);
+    recordCache.set(key, record);
+    return record;
+  } catch (error) {
+    if (error?.sessionExpired) return null;
+    // Not found, or not this caller's to open. Either way the modal must not
+    // open an empty shell pretending the record is editable.
+    showToast(error.message || `Could not open that ${kind.replace(/s$/, "")}`);
+    return null;
+  }
+}
+
+/** Opens a modal for a record that may not be on the current page. */
+async function openModalFor(kind, id, modalName) {
+  const record = await findRecord(kind, id);
+  if (!record) return;
+  openModal(modalName, record);
+}
+
+/** Drops a cached record after a write, so the next read reflects the change. */
+function invalidateRecord(kind, id) {
+  recordCache.delete(`${kind}:${id}`);
+}
+
+/**
+ * Fetches one page of a list and installs it.
+ *
+ * `force` re-requests even when the page is already resident, which is what a
+ * write (a new record, a filter change) needs. A request already in flight is
+ * never duplicated, so a re-render mid-load cannot stack calls.
+ */
+async function loadList(kind, { page = 1, search = "", force = false } = {}) {
+  const endpoint = LIST_ENDPOINTS[kind];
+  if (!endpoint) return;
+  const book = state.listState[kind] || (state.listState[kind] = { page: 1, loading: false, search: "", loaded: false });
+  if (book.loading) return;
+  if (!force && book.loaded && book.page === page && book.search === search) return;
+  book.loading = true;
+  book.search = search;
+  try {
+    const result = await api(`${endpoint}?${listQuery(kind, { page, search })}`);
+    listTarget(kind).set(result.data || []);
+    state.pages[kind] = result.pagination || null;
+    book.page = page;
+    book.loaded = true;
+  } catch (error) {
+    // A failed page must not blank the register. The previously loaded rows stay
+    // on screen and the failure is reported, so the user is never left looking at
+    // an empty table that actually has records.
+    if (!error?.sessionExpired) showToast(`Could not load ${kind}: ${error.message}`);
+  } finally {
+    book.loading = false;
+    render();
+  }
+}
+
+/** Page controls for a register, or a plain record count when one page holds everything. */
+function pager(kind) {
+  const page = state.pages[kind];
+  const book = state.listState[kind] || {};
+  if (!page) return "";
+  const total = Number(page.total || 0);
+  const totalPages = Number(page.total_pages || 0);
+  const size = Number(page.page_size || PAGE_SIZE);
+  if (totalPages <= 1) return `<div class="section-note">${total} ${total === 1 ? "record" : "records"}</div>`;
+  const current = Number(page.page || 1);
+  return `<div class="pager" data-list="${kind}">
+    <span class="pager-note">Showing ${((current - 1) * size) + 1}-${Math.min(current * size, total)} of ${total}</span>
+    <div class="row-actions">
+      <button class="btn btn-small" data-action="page-prev" data-list="${kind}" ${current <= 1 || book.loading ? "disabled" : ""}>Previous</button>
+      <span class="pager-note">Page ${current} of ${totalPages}</span>
+      <button class="btn btn-small" data-action="page-next" data-list="${kind}" ${current >= totalPages || book.loading ? "disabled" : ""}>Next</button>
+    </div>
+  </div>`;
+}
+
+
 async function refresh() {
   if (!state.authorized) return;
   state.loading = true;
@@ -499,8 +737,14 @@ async function refresh() {
   }
   applyWorkspace(payload);
   state.loading = false;
+  // The attention badge is real backend state, so it is read from the server on
+  // every workspace load rather than remembered. `applyWorkspace` has already
+  // copied `me.attention`, which is authoritative, so the navigation is correct
+  // even before this request returns.
+  if (payload?.me?.attention) state.attention = payload.me.attention;
   updateNavigation();
   render();
+  refreshAttention();
 }
 
 function applyWorkspace(payload) {
@@ -520,6 +764,8 @@ function applyWorkspace(payload) {
   state.reportTypes = payload.reportTypes?.types || [];
   state.reportPaymentMethods = payload.reportTypes?.payment_methods || [];
   if (payload.me) state.organization.me = payload.me;
+  // The navigation attention badge. Server-computed; never derived locally.
+  if (payload.me?.attention) state.attention = payload.me.attention;
   state.organization.leads = payload.leads || [];
   state.organization.followUps = payload.followUps || [];
   state.organization.departments = admin.departments || [];
@@ -529,6 +775,18 @@ function applyWorkspace(payload) {
   state.organization.approvals = admin.approvals || [];
   state.organization.dashboard = admin.dashboard || null;
   state.organization.collections = admin.collections || null;
+  // Scoped totals and page descriptors. `counts` is what the dashboard counts
+  // from; `pages` tells each register how many pages exist. A workspace with
+  // neither (an older server, or a caller holding no modules) leaves them empty
+  // and the counts fall back to the loaded rows.
+  state.counts = payload.counts || {};
+  state.pages = payload.pages || {};
+  // The workspace just delivered page 1 of every list, so record that as the
+  // loaded page. Without this the first render would immediately re-request the
+  // page the bootstrap already paid for.
+  for (const [key, page] of Object.entries(state.pages)) {
+    state.listState[key] = { page: page?.page || 1, loading: false, search: "", loaded: true };
+  }
 }
 
 // The Administration screen needs two heavier aggregates (organization counters
@@ -575,17 +833,24 @@ function canSeeFinancial() {
 // why the Managing Director never sees Admin overview or Administration even
 // though the MD holds plenty of business modules.
 const NAV_ITEMS = [
-  { view: "dashboard", label: "Dashboard", icon: "◆" },
-  { view: "admin-dashboard", label: "Admin overview", icon: "⚙", adminOnly: true },
-  { view: "projects", label: "Projects", icon: "▦", module: "projects", permission: "view" },
-  { view: "properties", label: "Properties", icon: "⌂", module: "properties", permission: "view" },
-  { view: "clients", label: "Clients", icon: "◌", module: "clients", permission: "view" },
-  { view: "contracts", label: "Contracts", icon: "▤", module: "contracts", permission: "view" },
-  { view: "debts", label: "Payments", icon: "◷", module: "debts", permission: "view_financial" },
-  { view: "appointments", label: "Appointments", icon: "◫", module: "appointments", permission: "view" },
-  { view: "documents", label: "Documents", icon: "▱", module: "documents", permission: "view" },
-  { view: "reports", label: "Reports", icon: "↗", module: "reports", permission: "view_reports" },
-  { view: "organization", label: "Administration", icon: "◎", adminOnly: true },
+  { view: "dashboard", label: "Dashboard", icon: "◆", group: "Overview" },
+  { view: "admin-dashboard", label: "Admin overview", icon: "⚙", adminOnly: true, group: "Overview" },
+  { view: "projects", label: "Projects", icon: "▦", module: "projects", permission: "view", group: "Portfolio" },
+  { view: "properties", label: "Properties", icon: "⌂", module: "properties", permission: "view", group: "Portfolio" },
+  { view: "clients", label: "Clients", icon: "◌", module: "clients", permission: "view", group: "Portfolio" },
+  { view: "contracts", label: "Contracts", icon: "▤", module: "contracts", permission: "view", group: "Operations" },
+  { view: "debts", label: "Payments", icon: "◷", module: "debts", permission: "view_financial", group: "Operations" },
+  { view: "appointments", label: "Appointments", icon: "◫", module: "appointments", permission: "view", group: "Operations" },
+  { view: "documents", label: "Documents", icon: "▱", module: "documents", permission: "view", group: "Information" },
+  { view: "reports", label: "Reports", icon: "↗", module: "reports", permission: "view_reports", group: "Information" },
+  // Reference view, not a module: every signed-in member may read the duty
+  // catalogue and the approval path. It exposes no record and no way to act.
+  { view: "duties", label: "Duties & approvals", icon: "⚖", group: "My work" },
+  // Task assignments. Open to every signed-in member - a member may always
+  // RECEIVE work - but the actions inside come from the server per task, so a
+  // staff member sees Submit without ever seeing Approve.
+  { view: "assignments", label: "Assignments", icon: "☑", group: "My work" },
+  { view: "organization", label: "Administration", icon: "◎", adminOnly: true, group: "Administration" },
 ];
 
 /** Whether the caller is entitled to a navigation entry at all. */
@@ -603,7 +868,27 @@ function updateNavigation() {
   if (nav) {
     const allowed = NAV_ITEMS.filter(canSeeNavItem);
     const activeView = state.view;
-    nav.innerHTML = allowed.map((item) => `<button class="nav-item${item.view === activeView ? " active" : ""}" data-view="${item.view}"><span class="nav-ic">${item.icon}</span><span>${escapeHtml(item.label)}</span></button>`).join("");
+    // The count is a hint drawn from records the caller can already open. It is
+    // only ever attached to an item they are entitled to, so it cannot disclose
+    // the existence of anything hidden from them.
+    const counts = {
+      contracts: canModule("contracts") ? (state.contracts || []).filter((contract) => !["completed", "cancelled", "rejected"].includes(contract.status)).length : 0,
+      debts: canModule("debts") && canSeeFinancial() ? (state.debts || []).filter((debt) => debtState(debt) === "overdue").length : 0,
+      documents: canModule("documents") ? (state.documents || []).filter((doc) => doc.status === "pending").length : 0,
+      organization: isAdmin() ? (state.organization.users || []).filter((user) => user.active).length : 0,
+      // The attention badge is the SERVER's count of items that need this user
+      // to act (new or returned work they own, plus work awaiting their review).
+      // It is never derived from a list the browser happens to hold, so it is
+      // correct after a refresh and cannot include another department's work.
+      assignments: Number((state.attention || {}).total || 0),
+    };
+    let lastGroup = null;
+    nav.innerHTML = allowed.map((item) => {
+      const count = counts[item.view] || 0;
+      const heading = item.group && item.group !== lastGroup ? `<div class="nav-group-label">${escapeHtml(item.group)}</div>` : "";
+      lastGroup = item.group || null;
+      return `${heading}<button class="nav-item${item.view === activeView ? " active" : ""}" data-view="${item.view}"><span class="nav-ic">${item.icon}</span><span>${escapeHtml(item.label)}</span>${count > 0 ? `<span class="nav-count">${count > 99 ? "99+" : count}</span>` : ""}</button>`;
+    }).join("");
   }
   // Administrator-only controls outside the nav are hidden for anyone else, but
   // the element is RESTORED rather than deleted. Removing it permanently meant a
@@ -712,6 +997,545 @@ async function openShares(entity, recordId) {
   modalBackdrop.hidden = false;
 }
 
+// ---------------------------------------------------------------------------
+// Task assignments
+//
+// Every button below is rendered from the task's server-computed
+// `available_actions`. Nothing here decides what a person may do: a staff
+// member is shown Submit and never Approve, and a reviewer is shown neither
+// Submit nor the ability to approve their own work. Hiding a control is
+// presentation only - the endpoint re-checks everything.
+// ---------------------------------------------------------------------------
+
+const TASK_PRIORITIES = ["urgent", "high", "medium", "low"];
+const TASK_STATUSES = ["assigned", "in_progress", "submitted", "under_review", "approved", "changes_requested", "completed", "cancelled"];
+// Priority carries a WORD as well as a colour, so rank is never colour alone.
+const TASK_PRIORITY_LABELS = { urgent: "Urgent", high: "High", medium: "Medium", low: "Low" };
+const TASK_STATUS_LABELS = {
+  assigned: "Assigned", in_progress: "In Progress", submitted: "Submitted",
+  under_review: "Under Review", approved: "Approved", changes_requested: "Changes Requested",
+  completed: "Completed", cancelled: "Cancelled",
+};
+const TASK_BOXES = [
+  { key: "mine", label: "My tasks" },
+  { key: "assigned_by_me", label: "Tasks I assigned" },
+  { key: "needs_review", label: "Needs my review" },
+];
+const TASK_ACTION_LABELS = {
+  start: "Start work", submit: "Submit", begin_review: "Begin review",
+  approve: "Approve", request_changes: "Request changes", complete: "Mark complete", cancel: "Cancel",
+};
+
+function priorityBadge(value) {
+  const key = String(value || "low");
+  return `<span class="task-priority task-priority-${key}">${escapeHtml(TASK_PRIORITY_LABELS[key] || key)}</span>`;
+}
+
+function taskStatusBadge(value) {
+  return badge(TASK_STATUS_LABELS[value] || value || "assigned", value === "approved" || value === "completed" ? "approved" : value === "changes_requested" || value === "cancelled" ? "archived" : "neutral");
+}
+
+function shortDate(value) {
+  if (!value) return "—";
+  const parsed = new Date(String(value));
+  if (Number.isNaN(parsed.getTime())) return "—";
+  return parsed.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+function taskActionButtons(task) {
+  return (task.available_actions || []).map((action) => `<button class="btn btn-${action === "request_changes" ? "soft" : "primary"} btn-small" data-action="task-action" data-id="${task.id}" data-task-action="${action}">${escapeHtml(TASK_ACTION_LABELS[action] || action)}</button>`).join("");
+}
+
+function taskRow(task) {
+  const link = task.linked_entity ? `<div class="table-sub">Linked: ${escapeHtml(task.linked_entity)} #${task.linked_record_id}</div>` : "";
+  return `<tr>
+    <td><strong>${escapeHtml(task.title)}</strong>${task.description ? `<div class="table-sub">${escapeHtml(String(task.description).slice(0, 140))}</div>` : ""}${link}</td>
+    <td>${escapeHtml(task.assigned_by_name || "—")}</td>
+    <td>${escapeHtml(task.assigned_to_name || "—")}</td>
+    <td>${priorityBadge(task.priority)}</td>
+    <td>${shortDate(task.due_date)}</td>
+    <td>${taskStatusBadge(task.status)}</td>
+    <td class="align-right">${taskActionButtons(task) || `<button class="btn btn-soft btn-small" data-action="open-task" data-id="${task.id}">Open</button>`}</td>
+  </tr>`;
+}
+
+function renderAssignments() {
+  const mayAssign = can("assign_tasks");
+  const attention = state.attention || { total: 0, mine: 0, review: 0 };
+  const tabs = TASK_BOXES.map((box) => `<button class="btn btn-${state.taskBox === box.key ? "primary" : "soft"} btn-small" data-action="task-box" data-box="${box.key}">${escapeHtml(box.label)}</button>`).join("");
+  const priorityFilter = `<select id="task-priority" data-action="task-priority-filter" aria-label="Filter by priority"><option value="">All priorities</option>${TASK_PRIORITIES.map((value) => `<option value="${value}" ${state.taskPriority === value ? "selected" : ""}>${escapeHtml(TASK_PRIORITY_LABELS[value])}</option>`).join("")}</select>`;
+  const statusFilter = `<select id="task-status" data-action="task-status-filter" aria-label="Filter by status"><option value="">All statuses</option>${TASK_STATUSES.map((value) => `<option value="${value}" ${state.taskStatus === value ? "selected" : ""}>${escapeHtml(TASK_STATUS_LABELS[value])}</option>`).join("")}</select>`;
+  const tasks = state.tasks || [];
+  const rows = tasks.map(taskRow).join("");
+  const table = rows
+    ? `<div class="table-wrap"><table><thead><tr><th>Task</th><th>Assigned by</th><th>Assigned to</th><th>Priority</th><th>Due</th><th>Status</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    // An empty section says so plainly rather than inventing filler content.
+    : `<div class="empty"><strong>No tasks in this section</strong>Nothing is waiting on you here right now.</div>`;
+  return `<div class="metric-grid">
+      <div class="metric"><span>Needs your attention</span><strong>${attention.total}</strong></div>
+      <div class="metric"><span>Assigned to you</span><strong>${attention.mine}</strong></div>
+      <div class="metric"><span>Awaiting your review</span><strong>${attention.review}</strong></div>
+    </div>
+    <section class="card glass" style="margin-top:18px">
+      <div class="section-head"><div><h2 class="section-title">Assignments</h2><div class="section-note">Work assigned to you, work you have assigned, and work waiting on your decision</div></div>${mayAssign ? `<button class="btn btn-primary btn-small" data-action="new-task">+ New Task</button>` : ""}</div>
+      <div class="row-actions" style="margin-bottom:12px">${tabs}</div>
+      <div class="row-actions" style="margin-bottom:12px">${priorityFilter}${statusFilter}</div>
+      ${table}
+    </section>`;
+}
+
+async function loadTasks() {
+  state.tasksRequested = true;
+  const params = new URLSearchParams();
+  if (state.taskBox) params.set("box", state.taskBox);
+  if (state.taskPriority) params.set("priority", state.taskPriority);
+  if (state.taskStatus) params.set("status", state.taskStatus);
+  try {
+    state.tasks = await api(`/org/tasks?${params.toString()}`);
+  } catch (error) {
+    state.tasks = [];
+    showToast(error.message || "Unable to load assignments.");
+  }
+}
+
+/**
+ * Refreshes the backend attention count and repaints the navigation. Called on
+ * bootstrap and after every task action, so the badge always matches real state.
+ */
+async function refreshAttention() {
+  try {
+    state.attention = await api("/org/tasks/attention");
+  } catch (error) {
+    state.attention = { total: 0, mine: 0, review: 0 };
+  }
+  if (state.organization.me) state.organization.me.attention = state.attention;
+  updateNavigation();
+}
+
+async function openTask(id) {
+  let task;
+  try {
+    task = await api(`/org/tasks/${id}`);
+  } catch (error) {
+    showToast(error.message || "Unable to open this task.");
+    return;
+  }
+  const history = (task.history || []).map((entry) => `<tr><td>${formatDateTime(entry.created_at, true)}</td><td>${escapeHtml(entry.actor_name || "System")}</td><td>${escapeHtml(String(entry.action || "").replace(/^task_/, "").replace(/_/g, " "))}</td><td>${escapeHtml(entry.details_json?.from || "—")} → ${escapeHtml(entry.details_json?.to || "—")}</td></tr>`).join("");
+  const comments = (task.comments || []).map((comment) => `<tr><td>${escapeHtml(comment.author_name || "—")}</td><td>${escapeHtml(comment.body)}</td><td>${formatDateTime(comment.created_at, true)}</td></tr>`).join("");
+  modal.dataset.type = "task";
+  modal.innerHTML = `<div class="modal-head"><div><h2>${escapeHtml(task.title)}</h2><p>${escapeHtml(TASK_STATUS_LABELS[task.status] || task.status)} · ${escapeHtml(TASK_PRIORITY_LABELS[task.priority] || task.priority)}</p></div><button class="icon-btn" data-action="close-modal">×</button></div>
+    <div class="task-detail">
+      <div><span>Assigned by</span><strong>${escapeHtml(task.assigned_by_name || "—")}</strong></div>
+      <div><span>Assigned to</span><strong>${escapeHtml(task.assigned_to_name || "—")}</strong></div>
+      <div><span>Reviewer</span><strong>${escapeHtml(task.reviewer_name || "Unassigned")}</strong></div>
+      <div><span>Due</span><strong>${shortDate(task.due_date)}</strong></div>
+      ${task.linked_entity ? `<div><span>Linked record</span><strong>${escapeHtml(task.linked_entity)} #${task.linked_record_id}</strong></div>` : ""}
+    </div>
+    ${task.description ? `<p class="task-instructions">${escapeHtml(task.description)}</p>` : ""}
+    <div class="row-actions" style="margin:14px 0">${taskActionButtons(task)}</div>
+    ${(task.available_actions || []).includes("request_changes") ? `<div class="field"><label for="task-review-comment">Review comment (required to request changes)</label><textarea id="task-review-comment" name="comment" rows="2" placeholder="What must change?"></textarea></div>` : ""}
+    ${comments ? `<div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>Author</th><th>Comment</th><th>When</th></tr></thead><tbody>${comments}</tbody></table></div>` : ""}
+    ${history ? `<div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>When</th><th>Who</th><th>Event</th><th>State change</th></tr></thead><tbody>${history}</tbody></table></div>` : ""}`;
+  modalBackdrop.hidden = false;
+}
+
+// The linked-record field is a POINTER, not a copy. The list is the same set the
+// backend accepts; the server verifies the target exists and refuses anything
+// else, so an invalid choice is reported rather than silently dropped.
+const TASK_LINK_CHOICES = [
+  ["", "None"], ["client", "Client"], ["property", "Property"], ["contract", "Contract"],
+  ["payment", "Payment"], ["debt", "Debt / installment"], ["project", "Project"],
+  ["report", "Report"], ["document", "Document"], ["appointment", "Appointment"],
+];
+
+/**
+ * Builds the "Assign work" modal.
+ *
+ * The assignee list and the reviewer list are fetched INDEPENDENTLY. They used to
+ * share one `Promise.all`, which meant a failure in either one left an authorized
+ * caller with no way to create a task at all - a real defect, because holding
+ * `assign_tasks` is what authorizes the entry point, and a caller may legitimately
+ * hold it without `review_tasks`. A reviewer list that cannot be read now simply
+ * means no reviewer is offered; the assignee list is the one that must succeed.
+ */
+async function openTaskModal() {
+  // Only people the SERVER considers assignable may be offered. A failed or
+  // malformed list is treated as "nobody", never as "everybody".
+  const loadList = async (path) => {
+    try {
+      const result = await api(path);
+      return Array.isArray(result) ? result : [];
+    } catch {
+      return null; // null means "not readable for this caller"
+    }
+  };
+  const [assignees, reviewers] = await Promise.all([loadList("/org/tasks/assignees"), loadList("/org/tasks/reviewers")]);
+  if (assignees === null) {
+    showToast("You are not allowed to assign work.");
+    return;
+  }
+  if (!assignees.length) {
+    showToast("No staff member is inside your assignment scope.");
+    return;
+  }
+  state.taskAssignees = assignees;
+  state.taskReviewers = reviewers || [];
+  const people = assignees.map((person) => `<option value="${person.id}">${escapeHtml(person.display_name)}</option>`).join("");
+  // A caller who may not read the reviewer list gets no reviewer field at all,
+  // rather than a field the server would reject.
+  const reviewerField = reviewers === null ? "" : `<div class="field"><label for="task-reviewer">Reviewer / approver</label><select id="task-reviewer" name="reviewer_id"><option value="">None</option>${reviewers.map((person) => `<option value="${person.id}">${escapeHtml(person.display_name)}</option>`).join("")}</select></div>`;
+  const priorities = TASK_PRIORITIES.map((value) => `<option value="${value}" ${value === "medium" ? "selected" : ""}>${escapeHtml(TASK_PRIORITY_LABELS[value])}</option>`).join("");
+  const links = TASK_LINK_CHOICES.map(([value, label]) => `<option value="${value}">${escapeHtml(label)}</option>`).join("");
+  modal.dataset.type = "task";
+  modal.innerHTML = `<div class="modal-head"><div><h2>New Task</h2><p>Assigning as yourself · only people inside your authorized scope are listed</p></div><button class="icon-btn" data-action="close-modal">×</button></div>
+    <form id="task-form" class="form-grid">
+      <div class="field"><label for="task-title">Task title <span class="req">*</span></label><input id="task-title" name="title" required maxlength="160" placeholder="Prepare Monthly Sales Report"></div>
+      <div class="field"><label for="task-description">Description / instructions</label><textarea id="task-description" name="description" rows="3" placeholder="What exactly must be produced?"></textarea></div>
+      <div class="field"><label for="task-assignee">Assign to <span class="req">*</span></label><select id="task-assignee" name="assigned_to" required><option value="">Select authorized staff</option>${people}</select></div>
+      ${reviewerField}
+      <div class="field"><label for="task-priority-input">Priority</label><select id="task-priority-input" name="priority">${priorities}</select></div>
+      <div class="field"><label for="task-due">Due date</label><input id="task-due" name="due_date" type="date"></div>
+      <div class="field"><label for="task-link-entity">Linked record (optional)</label><select id="task-link-entity" name="linked_entity">${links}</select></div>
+      <div class="field"><label for="task-link-id">Linked record id</label><input id="task-link-id" name="linked_record_id" type="number" min="1" step="1" placeholder="e.g. 21"></div>
+      <button class="btn btn-primary" type="submit">Assign work</button>
+    </form>`;
+  modalBackdrop.hidden = false;
+}
+
+async function submitTaskAction(taskId, action) {
+  const body = { action };
+  if (action === "request_changes") {
+    const field = document.getElementById("task-review-comment");
+    const comment = field ? field.value.trim() : "";
+    if (!comment) { showToast("A review comment is required to request changes."); return; }
+    body.comment = comment;
+  }
+  try {
+    await api(`/org/tasks/${taskId}/actions`, { method: "POST", body });
+    modalBackdrop.hidden = true;
+    showToast(`Task ${action.replace(/_/g, " ")}.`);
+  } catch (error) {
+    showToast(error.message || "That action is not allowed.");
+    return;
+  }
+  // State changed, so the badge, the lists and the open task are all re-read.
+  await refreshAttention();
+  await loadTasks();
+  if (state.view === "assignments") render();
+}
+
+// ---------------------------------------------------------------------------
+// Generate Contract overlay.
+//
+// The first click OPENS this; nothing is generated until the operator confirms
+// on the review step. It reuses the existing modal component, form fields and
+// buttons - only the width changes, so the complete form has room without
+// introducing a new UI system.
+//
+// Everything typed here is INPUT. The discount amount, the final price, the
+// contract number and the assigner are decided by the server; the two derived
+// amounts are shown read-only for convenience only.
+// ---------------------------------------------------------------------------
+
+const CONTRACT_FREQUENCIES = ["monthly", "quarterly", "semi-annual", "annual"];
+const CONTRACT_DURATION_UNITS = ["months", "years", "weeks", "days"];
+
+/** Properties belonging to the chosen project, from records already loaded. */
+function propertyOptionsForProject(projectId, selected = "") {
+  const pool = (state.properties || []).filter((property) => !projectId || String(property.project_id) === String(projectId));
+  if (!pool.length) return `<option value="">No property in this project</option>`;
+  return pool.map((property) => `<option value="${property.id}" ${String(property.id) === String(selected) ? "selected" : ""}>${escapeHtml(property.name)} · ${escapeHtml(property.location || "")}</option>`).join("");
+}
+
+function contractTemplateOptions(selected = "") {
+  const built = `<option value="" ${!selected ? "selected" : ""}>Built-in Sale Agreement</option>`;
+  return built + (state.contractTemplates || []).map((template) => `<option value="${template.id}" ${String(template.id) === String(selected) ? "selected" : ""}>${escapeHtml(template.title)}</option>`).join("");
+}
+
+/** Reads the overlay's own inputs. The form is the only thing that changes. */
+function generateContractFormData() {
+  const saved = state.contractGen?.data || {};
+  const value = (id, key, fallback = "") => document.getElementById(id)?.value ?? saved[key] ?? fallback;
+  return {
+    client_id: value("gc-client", "client_id") || null,
+    client_name: value("gc-client-name", "client_name").trim(),
+    client_phone: value("gc-client-phone", "client_phone").trim(),
+    client_email: value("gc-client-email", "client_email").trim(),
+    project_id: value("gc-project", "project_id"),
+    property_id: value("gc-property", "property_id") || null,
+    start_date: value("gc-start", "start_date") || null,
+    end_date: value("gc-end", "end_date") || null,
+    agreement_duration: value("gc-duration", "agreement_duration") || null,
+    agreement_duration_unit: value("gc-duration-unit", "agreement_duration_unit", "months") || null,
+    contract_date: value("gc-date", "contract_date") || null,
+    contract_type: value("gc-type", "contract_type", "new"),
+    original_price: value("gc-original", "original_price"),
+    discount_pct: value("gc-discount", "discount_pct", "0") || "0",
+    deposit: value("gc-deposit", "deposit"),
+    installments: value("gc-installments", "installments"),
+    frequency: value("gc-frequency", "frequency", "monthly"),
+    first_due_date: value("gc-first-due", "first_due_date") || null,
+    template_document_id: value("gc-template", "template_document_id") || null,
+    notes: value("gc-notes", "notes").trim(),
+  };
+}
+
+/** YYYY-MM-DD, adding whole months (the mirror of the server's own helper). */
+function addMonthsToDate(dateString, months, unit) {
+  const match = String(dateString).slice(0, 10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match || !Number.isFinite(months)) return dateString;
+  const [, year, month, day] = match.map(Number);
+  if (unit === "days" || unit === "weeks") {
+    const days = unit === "weeks" ? months * 7 : months;
+    const target = new Date(Date.UTC(year, month - 1, day + days));
+    return `${target.getUTCFullYear()}-${String(target.getUTCMonth() + 1).padStart(2, "0")}-${String(target.getUTCDate()).padStart(2, "0")}`;
+  }
+  const targetMonth = month - 1 + (unit === "years" ? months * 12 : months);
+  const anchor = new Date(Date.UTC(year, targetMonth, 1));
+  const last = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth() + 1, 0)).getUTCDate();
+  return `${anchor.getUTCFullYear()}-${String(anchor.getUTCMonth() + 1).padStart(2, "0")}-${String(Math.min(day, last)).padStart(2, "0")}`;
+}
+
+/**
+ * Repaints the derived, read-only figures as the operator types.
+ *
+ * CONVENIENCE ONLY. The identical arithmetic runs on the server in
+ * contracts/pricing.js and the server's numbers are what gets stored - neither
+ * derived amount is ever sent, so a tampered field cannot change a price.
+ */
+function updateGenerateContractPreview() {
+  const data = generateContractFormData();
+  const priced = pricingPreview(null, data.original_price, data.discount_pct);
+  const discount = document.getElementById("gc-discount-amount");
+  const final = document.getElementById("gc-final-price");
+  if (discount) discount.value = money(priced.discount_amount);
+  if (final) final.value = money(priced.final_price);
+
+  // Property number and location are READ from the selected property rather
+  // than retyped, so the document can never disagree with the register.
+  const property = (state.properties || []).find((entry) => String(entry.id) === String(data.property_id));
+  const number = document.getElementById("gc-property-number");
+  const location = document.getElementById("gc-property-location");
+  if (number) number.value = property ? `P-${String(property.id).padStart(4, "0")}` : "";
+  if (location) location.value = property?.location || "";
+  // The property's own list price is offered as a starting point only, and
+  // never overwrites something the operator has already typed.
+  const original = document.getElementById("gc-original");
+  if (original && property && !original.dataset.touched && data.original_price === "") original.value = property.price ?? "";
+
+  // Duration -> end date, using the same month arithmetic as the server.
+  const end = document.getElementById("gc-end");
+  if (end && data.start_date && data.agreement_duration) {
+    end.value = addMonthsToDate(data.start_date, Number(data.agreement_duration), data.agreement_duration_unit || "months");
+  }
+}
+
+/** A labelled field in the overlay. Keeps the two forms readable. */
+function genField(id, label, control) {
+  return `<div class="field"><label for="${id}">${label}</label>${control}</div>`;
+}
+
+function generateContractFormBody() {
+  const data = generateContractFormData();
+  const priced = pricingPreview(null, data.original_price, data.discount_pct);
+  const property = (state.properties || []).find((entry) => String(entry.id) === String(data.property_id));
+  const clients = (state.clients || []).map((client) => `<option value="${client.id}" data-name="${escapeHtml(client.name)}" data-phone="${escapeHtml(client.phone || "")}" data-email="${escapeHtml(client.email || "")}" ${String(client.id) === String(data.client_id) ? "selected" : ""}>${escapeHtml(client.name)}</option>`).join("");
+  const units = CONTRACT_DURATION_UNITS.map((unit) => `<option value="${unit}" ${data.agreement_duration_unit === unit ? "selected" : ""}>${unit[0].toUpperCase()}${unit.slice(1)}</option>`).join("");
+  const frequencies = CONTRACT_FREQUENCIES.map((value) => `<option value="${value}" ${data.frequency === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("");
+  const text = (id, name, value, extra = "") => genField(id, name.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase()), `<input id="${id}" name="${name}" value="${escapeHtml(value)}" ${extra}>`);
+  const number = (id, name, value, extra = "") => genField(id, name, `<input id="${id}" name="${name}" type="number" step="0.01" min="0" value="${escapeHtml(value)}" ${extra}>`);
+  return `<form id="contract-generate-form" class="form-grid">
+    <fieldset class="gen-section"><legend>Client information</legend>
+      <div class="field full"><label for="gc-client">Client from register (optional)</label><select id="gc-client" name="client_id"><option value="">Type a new name below</option>${clients}</select></div>
+      ${text("gc-client-name", "Client / buyer name", data.client_name, 'required maxlength="120" placeholder="Client full name"')}
+      ${text("gc-client-phone", "Client phone", data.client_phone, 'maxlength="40" placeholder="+255 ..."')}
+      ${text("gc-client-email", "Client email", data.client_email, 'type="email" maxlength="120" placeholder="client@example.com"')}
+      <div class="field full"><label for="gc-company">Company</label><input id="gc-company" type="text" value="${escapeHtml(state.organization?.me?.organization_name || "MKUYU")}" readonly aria-readonly="true" tabindex="-1" title="Taken from the organization record"></div>
+    </fieldset>
+
+    <fieldset class="gen-section"><legend>Property information</legend>
+      <div class="field"><label for="gc-project">Project <span class="req">*</span></label><select id="gc-project" name="project_id" required><option value="">Select project</option>${projectOptions(data.project_id)}</select></div>
+      <div class="field"><label for="gc-property">Property <span class="req">*</span></label><select id="gc-property" name="property_id" required><option value="">Select property</option>${propertyOptionsForProject(data.project_id, data.property_id)}</select></div>
+      <div class="field"><label for="gc-property-number">Property number</label><input id="gc-property-number" type="text" readonly aria-readonly="true" tabindex="-1" value="${property ? escapeHtml(`P-${String(property.id).padStart(4, "0")}`) : ""}" title="Read from the property record"></div>
+      <div class="field"><label for="gc-property-location">Location</label><input id="gc-property-location" type="text" readonly aria-readonly="true" tabindex="-1" value="${escapeHtml(property?.location || "")}" title="Read from the property record"></div>
+    </fieldset>
+
+    <fieldset class="gen-section"><legend>Agreement</legend>
+      ${text("gc-start", "Agreement start date", data.start_date, 'type="date" required')}
+      ${genField("gc-duration", "Agreement duration", `<input id="gc-duration" name="agreement_duration" type="number" min="1" max="1200" step="1" value="${escapeHtml(data.agreement_duration || "")}" placeholder="24" required>`)}
+      <div class="field"><label for="gc-duration-unit">Duration unit</label><select id="gc-duration-unit" name="agreement_duration_unit">${units}</select></div>
+      ${text("gc-end", "Agreement end date", data.end_date, 'type="date"')}
+      ${text("gc-date", "Contract date", data.contract_date || today(), 'type="date"')}
+      <div class="field"><label for="gc-type">Contract type</label><select id="gc-type" name="contract_type"><option value="new" ${data.contract_type !== "terminal" ? "selected" : ""}>New</option><option value="terminal" ${data.contract_type === "terminal" ? "selected" : ""}>Terminal</option></select></div>
+      <div class="field full"><div class="field-help">The end date is derived from the duration; the server refuses a stated end date that disagrees with it.</div></div>
+    </fieldset>
+
+    <fieldset class="gen-section"><legend>Pricing</legend>
+      ${number("gc-original", "Original price", data.original_price, 'required placeholder="0"')}
+      ${number("gc-discount", "Discount %", data.discount_pct, 'max="100" placeholder="0"')}
+      <div class="field"><label for="gc-discount-amount">Discount amount</label><input id="gc-discount-amount" type="text" value="${escapeHtml(money(priced.discount_amount))}" readonly aria-readonly="true" tabindex="-1" title="Calculated by the server"></div>
+      <div class="field"><label for="gc-final-price">Final price</label><input id="gc-final-price" type="text" value="${escapeHtml(money(priced.final_price))}" readonly aria-readonly="true" tabindex="-1" title="Calculated by the server. The payment plan is built from this amount."></div>
+    </fieldset>
+
+    <fieldset class="gen-section"><legend>Payment plan</legend>
+      ${number("gc-deposit", "Deposit", data.deposit, 'placeholder="0"')}
+      ${number("gc-installments", "Number of installments", data.installments, 'step="1" min="1" max="120" placeholder="6"')}
+      <div class="field"><label for="gc-frequency">Payment frequency</label><select id="gc-frequency" name="frequency">${frequencies}</select></div>
+      ${text("gc-first-due", "First due date", data.first_due_date, 'type="date"')}
+      <div class="field full"><div class="field-help">Leave the plan blank to skip it. If you enter any plan details, provide the deposit, installment count and first due date. Installments split the FINAL PRICE above. ${canSeeFinancial() ? "Your account can create the payment plan." : "The plan is recorded on the contract; Finance creates its installments."}</div></div>
+    </fieldset>
+
+    <fieldset class="gen-section"><legend>Contract</legend>
+      <div class="field full"><label for="gc-template">Contract template</label><select id="gc-template" name="template_document_id">${contractTemplateOptions(data.template_document_id)}</select></div>
+      <div class="field full"><label for="gc-contract-number">Contract number</label><input id="gc-contract-number" value="${escapeHtml(data.contract_number || "")}" placeholder="Issued automatically when generated" readonly aria-readonly="true" tabindex="-1"></div>
+      ${genField("gc-notes", "Notes", `<textarea id="gc-notes" name="notes" maxlength="2000" placeholder="Internal notes">${escapeHtml(data.notes)}</textarea>`)}
+      <div class="field full"><div class="field-help">The contract number is issued by the system when the contract is created.</div></div>
+    </fieldset>
+
+    <div class="row-actions full">
+      <button class="btn btn-primary" type="button" data-action="contract-preview">Preview contract</button>
+      <button class="btn" type="button" data-action="close-modal">Cancel</button>
+    </div>
+  </form>`;
+}
+
+/**
+ * The review step. It renders the SAME values the form holds and the server
+ * will use - it is a second view of one source of truth, not a copy, and
+ * nothing is stored until Generate is pressed.
+ */
+function generateContractReviewBody(data) {
+  const priced = pricingPreview(null, data.original_price, data.discount_pct);
+  const project = (state.projects || []).find((entry) => String(entry.id) === String(data.project_id));
+  const property = (state.properties || []).find((entry) => String(entry.id) === String(data.property_id));
+  const template = (state.contractTemplates || []).find((entry) => String(entry.id) === String(data.template_document_id));
+  const row = (label, value) => `<div class="task-detail"><div><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value ?? "") || "—")}</strong></div></div>`;
+  return `<div class="gen-review">
+      <p class="field-help">Check these details. The server recalculates the price, issues the contract number and creates the document when you generate.</p>
+      ${row("Client", data.client_name)}
+      ${row("Client phone", data.client_phone)}
+      ${row("Client email", data.client_email)}
+      ${row("Project", project?.name)}
+      ${row("Property", property ? `${property.name} · ${property.location || ""}` : "—")}
+      ${row("Agreement", `${data.start_date || "—"} → ${data.end_date || "—"}`)}
+      ${row("Duration", data.agreement_duration ? `${data.agreement_duration} ${data.agreement_duration_unit || "months"}` : "—")}
+      ${row("Contract date", data.contract_date || today())}
+      ${row("Original price", money(priced.original_price))}
+      ${row("Discount", `${money(priced.discount_pct)}% = ${money(priced.discount_amount)}`)}
+      ${row("Final price", money(priced.final_price))}
+      ${row("Deposit", data.deposit ? money(data.deposit) : "—")}
+      ${row("Installments", data.installments || "—")}
+      ${row("Frequency", data.frequency || "—")}
+      ${row("First due date", data.first_due_date || "—")}
+      ${row("Template", template?.title || "Built-in Sale Agreement")}
+      ${row("Contract number", "Issued automatically when generated")}
+    </div>
+    <div class="row-actions">
+      <button class="btn btn-primary" type="button" data-action="contract-confirm">Generate contract</button>
+      <button class="btn" type="button" data-action="contract-back">Back to edit</button>
+    </div>`;
+}
+
+/** The success state: the real contract and the real generated document. */
+function generateContractSuccessBody(result) {
+  const contract = result.contract || {};
+  const file = result.document || {};
+  // A contract with no stored file gets NO Open button. A dead link is worse
+  // than an honest absence - this mirrors the document system's own rule.
+  const actions = file.has_file && canModule("documents")
+     ? `<button class="btn btn-soft" type="button" data-action="view-generated-contract" data-id="${contract.id}">View / Edit</button>
+       <button class="btn btn-primary" type="button" data-action="download-generated-document" data-id="${file.id}" data-filename="${escapeHtml(file.original_filename || file.file_name || "contract.docx")}">Download DOCX</button>`
+    : `<div class="field-help">${file.has_file ? "The document is saved; your account does not have Documents access." : "The contract was created but no document file was stored."}</div>`;
+  return `<div class="gen-success">
+      <div class="gen-success-mark">✓</div>
+      <h2>Contract generated successfully</h2>
+      <div class="task-detail">
+        <div><span>Contract #</span><strong>${escapeHtml(contract.contract_number || "—")}</strong></div>
+        <div><span>Client</span><strong>${escapeHtml(contract.client_name || "—")}</strong></div>
+        <div><span>Final price</span><strong>${escapeHtml(money(result.pricing?.final_price))}</strong></div>
+        <div><span>Generated document</span><strong>${escapeHtml(file.original_filename || file.file_name || "—")}</strong></div>
+      </div>
+      ${result.schedule?.created ? `<div class="field-help">${result.schedule.created} installment(s) created from the final price.</div>` : ""}
+      ${result.schedule?.skipped ? `<div class="field-help">${escapeHtml(result.schedule.skipped)}</div>` : ""}
+      <div class="row-actions">${actions}
+        <button class="btn" type="button" data-action="close-modal">Done</button>
+      </div>
+    </div>`;
+}
+
+function renderGenerateContractModal() {
+  const step = state.contractGen.step;
+  if (step === "success") {
+    modal.innerHTML = `<div class="modal-head"><div><h2>Done</h2><p>The contract and its document are saved.</p></div><button class="icon-btn" data-action="close-modal">×</button></div>${generateContractSuccessBody(state.contractGen.result || {})}`;
+    return;
+  }
+  const data = generateContractFormData();
+  const body = step === "review" ? generateContractReviewBody(data) : generateContractFormBody();
+  modal.innerHTML = `<div class="modal-head"><div><h2>${step === "review" ? "Review contract" : "Generate contract"}</h2><p>${step === "review" ? "Check everything before the document is created." : "Collect the agreement, the price and the payment plan."}</p></div><button class="icon-btn" data-action="close-modal">×</button></div>${body}`;
+  modal.dataset.type = "contract-generate";
+}
+
+/** Opens the overlay. Loading the template list is all that happens here. */
+async function openGenerateContractModal() {
+  state.contractGen = { step: "form", result: null, error: null, data: {} };
+  if (!state.contractTemplates) {
+    // A caller without document access still gets the built-in template, so a
+    // refusal here must not block contract generation.
+    state.contractTemplates = await api("/contract-templates").catch(() => []);
+  }
+  modal.classList.add("modal-wide");
+  renderGenerateContractModal();
+  modalBackdrop.hidden = false;
+  updateGenerateContractPreview();
+}
+
+/**
+ * Hands the collected information to the server, which owns the whole flow:
+ * pricing, the contract row, the template render, the document, the link and
+ * the payment plan. `final_price` and `discount_amount` are deliberately NOT
+ * sent - this form cannot dictate a price.
+ */
+async function submitGenerateContract() {
+  const data = generateContractFormData();
+  const hasPaymentPlan = Boolean(data.deposit || data.installments || data.first_due_date);
+  const payload = {
+    client_id: data.client_id,
+    client_name: data.client_name,
+    project_id: data.project_id,
+    property_id: data.property_id,
+    contract_type: data.contract_type,
+    start_date: data.start_date,
+    end_date: data.end_date,
+    agreement_duration: data.agreement_duration,
+    agreement_duration_unit: data.agreement_duration_unit,
+    contract_date: data.contract_date,
+    original_price: data.original_price,
+    discount_pct: data.discount_pct,
+    client_phone: data.client_phone,
+    client_email: data.client_email,
+    template_document_id: data.template_document_id,
+    notes: data.notes,
+  };
+  if (hasPaymentPlan) {
+    payload.deposit = data.deposit;
+    payload.installments = data.installments;
+    payload.frequency = data.frequency;
+    payload.first_due_date = data.first_due_date;
+  }
+  try {
+    const result = await api("/contracts/generate", { method: "POST", body: JSON.stringify(payload) });
+    state.contractGen = { step: "success", result, error: null };
+    renderGenerateContractModal();
+    // The register must show the new contract without a manual refresh.
+    state.listState.contracts = null;
+    loadWorkspace();
+  } catch (error) {
+    showToast(error.message || "The contract could not be generated.");
+    state.contractGen.step = "form";
+    renderGenerateContractModal();
+  }
+}
+
 function renderOrganization() {
   const org = state.organization;
   const permissions = org.me?.permissions || [];
@@ -793,6 +1617,142 @@ function renderOrganization() {
     ${permissions.includes("approve") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Approvals</h2><div class="section-note">Contracts, documents, and financial decisions</div></div></div><div class="table-wrap"><table><thead><tr><th>Module</th><th>Record</th><th>Status</th><th>Decision</th><th>Action</th></tr></thead><tbody>${approvalRows || `<tr><td colspan="5" class="empty">No approval requests</td></tr>`}</tbody></table></div></section>` : ""}
     ${permissions.includes("manage_users") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Record allocation</h2><div class="section-note">Move records out of the office-wide pool into an owner and department</div></div><button class="btn btn-soft btn-small" data-action="reload-allocation">Refresh</button></div>${renderAllocation(state.allocationEntity || "client")}</section>` : ""}
   </div>`;
+}
+
+/** One card per department: its roles, and every duty declared against each. */
+function renderDepartmentCards(departments) {
+  return (departments || []).map((department) => {
+    const roles = department.roles.map((entry) => {
+      const duties = entry.duties.map((duty) => `
+        <li class="duty${duty.approvalDuty ? " duty-approval" : ""}">
+          <div class="duty-head">
+            <span class="duty-label">${escapeHtml(duty.label)}</span>
+            ${duty.approvalDuty ? `<span class="duty-tag">Approval</span>` : ""}
+            ${duty.yours ? `<span class="duty-tag duty-tag-yours">Yours</span>` : ""}
+          </div>
+          <p class="duty-note">${escapeHtml(duty.description || "")}</p>
+          <div class="duty-perms">${duty.permissionLabels.map((permission) => `<code>${escapeHtml(permission.label)}</code>`).join("")}</div>
+        </li>`).join("");
+      return `
+        <div class="role">
+          <div class="role-head">
+            <h3 class="role-name">${escapeHtml(entry.role)}</h3>
+            <span class="role-count">${entry.dutyCount} ${entry.dutyCount === 1 ? "duty" : "duties"}</span>
+          </div>
+          <ul class="duty-list">${duties || `<li class="duty-note">No duties recorded for this role.</li>`}</ul>
+        </div>`;
+    }).join("");
+    return `
+      <section class="card glass dept">
+        <div class="section-head">
+          <div>
+            <h2 class="section-title">${escapeHtml(department.name)}</h2>
+            <div class="section-note">${department.roles.length} ${department.roles.length === 1 ? "role" : "roles"} · ${department.dutyCount} duties</div>
+          </div>
+        </div>
+        <div class="role-list">${roles}</div>
+      </section>`;
+  }).join("");
+}
+
+/**
+ * The approval path and the duty catalogue.
+ *
+ * The stage rail shows the order a contract moves through and which department
+ * decides each step. A step the signed-in caller personally holds is marked
+ * "Your decision" - that highlight comes from the caller's own permissions, and
+ * the buttons to act still come from each contract's server-computed
+ * `available_actions`, so nothing here can be used to approve anything.
+ */
+function renderDuties() {
+  const data = state.duties;
+  if (!data) {
+    return `<div class="card glass empty"><strong>Loading the organization handbook…</strong>Fetching duties and the approval path.</div>`;
+  }
+  if (data.error) {
+    return `<div class="card glass empty"><strong>Duties could not be loaded</strong>${escapeHtml(data.error)}</div>`;
+  }
+
+  const { workflow, departments, totals } = data;
+  const yourStages = (workflow.stages || []).filter((stage) => stage.yours);
+  const approvalOwners = new Map(Object.entries(workflow.ownership || {}).map(([key, owners]) => [key, owners.join(" · ")]));
+
+  const stageRail = (workflow.stages || []).map((stage) => `
+    <li class="flow-step${stage.yours ? " is-yours" : ""}">
+      <div class="flow-step-head">
+        <span class="flow-step-index">${stage.stage}</span>
+        <span class="flow-step-title">${escapeHtml(stage.label)}</span>
+        ${stage.yours ? `<span class="flow-yours">Your decision</span>` : ""}
+      </div>
+      <p class="flow-step-note">${escapeHtml(stage.note)}</p>
+      <div class="flow-step-meta">
+        <span class="flow-owner" title="Owns this step">Held by ${escapeHtml(stage.owner || "")}</span>
+        ${stage.actor && stage.actor !== stage.owner ? `<span class="flow-actor">Moved by ${escapeHtml(stage.actor)}</span>` : ""}
+        <code class="flow-perm">${escapeHtml(stage.permission || "")}</code>
+      </div>
+    </li>`).join("");
+
+  const exceptionList = (workflow.exceptions || []).map((entry) => `
+    <li class="flow-exception">
+      <span class="flow-exception-name">${escapeHtml(entry.label)}</span>
+      <span class="flow-exception-note">${escapeHtml(entry.note)}</span>
+    </li>`).join("");
+
+  const yourApprovalCards = (data.yourApprovals || []).map((key) => `
+    <div class="chip-row-item">
+      <strong>${escapeHtml(key)}</strong>
+      <span>${escapeHtml(approvalOwners.get(key) || "")}</span>
+    </div>`).join("");
+
+  return `
+    <div class="hero-strip">
+      <div class="hero-copy">
+        <div class="eyebrow">Organization handbook</div>
+        <h2>Every duty, every department, one approval path.</h2>
+        <p>${totals.departments} departments · ${totals.roles} roles · ${totals.duties} duties. The steps below are the same state machine the server enforces on every contract.</p>
+      </div>
+      <div class="hero-actions"><button class="btn" data-action="reload-duties">Refresh</button></div>
+    </div>
+
+    <section class="card glass">
+      <div class="section-head">
+        <div>
+          <h2 class="section-title">Approval workflow</h2>
+          <div class="section-note">Sales initiates, Legal owns the record, Finance validates the money, Management approves. Nobody approves their own step.</div>
+        </div>
+        ${yourStages.length ? `<span class="chip chip-gold">${yourStages.length} ${yourStages.length === 1 ? "step is" : "steps are"} yours to decide</span>` : `<span class="chip">You do not hold an approval step</span>`}
+      </div>
+      <ol class="flow-rail">${stageRail}</ol>
+      <div class="section-head" style="margin-top:22px">
+        <div>
+          <h2 class="section-title">Off-pipeline states</h2>
+          <div class="section-note">Rework and terminal states, reachable from several steps.</div>
+        </div>
+      </div>
+      <ul class="flow-exceptions">${exceptionList}</ul>
+      ${yourApprovalCards ? `<div class="section-head" style="margin-top:22px"><div><h2 class="section-title">Your approval authority</h2><div class="section-note">Lifecycle permissions you personally hold, and the department that owns each.</div></div></div><div class="chip-row">${yourApprovalCards}</div>` : ""}
+    </section>
+
+    <div class="section-head" style="margin-top:22px">
+      <div>
+        <h2 class="section-title">Duties by department</h2>
+        <div class="section-note">The declared responsibilities behind each role, and the permissions each one is granted.</div>
+      </div>
+    </div>
+    <div class="dept-grid">${renderDepartmentCards(departments)}</div>`;
+}
+
+/** Loads the duty catalogue once per session, like the other on-demand extras. */
+async function loadDuties() {
+  state.dutiesRequested = true;
+  try {
+    state.duties = await api("/org/duties");
+  } catch (error) {
+    // Stored as state so the view can explain itself and the render guard stops
+    // retrying on every repaint.
+    state.duties = { error: error.message || "Unable to load duties." };
+    showToast(state.duties.error);
+  }
 }
 
 // Reloads report history from the server using the history filter bar.
@@ -911,7 +1871,11 @@ async function hydrateImages(root = document) {
     } catch (_) {
       // Pictures are optional: a missing image never breaks the view.
       if (img.closest(".photo-chip")) img.closest(".photo-chip").remove();
-      else img.remove();
+      else {
+        const fallback = img.closest(".property-cover")?.querySelector(".property-cover-fallback");
+        if (fallback) fallback.hidden = false;
+        else img.remove();
+      }
     }
   }));
   releaseDetachedImageBlobs(root);
@@ -973,6 +1937,13 @@ function renderDashboard() {
   const recent = [...state.contracts].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))).slice(0, 5);
   const leads = state.organization.leads || [];
   const followUps = state.organization.followUps || [];
+  const attentionCount = Number(state.attention?.total || 0);
+  const visibleRecordCount = [state.projects, state.properties, state.clients, state.contracts, state.debts, state.appointments, state.documents, state.payments, state.reports, leads, followUps].reduce((total, rows) => total + (rows || []).length, 0);
+  const quickActions = [];
+  if (canModule("projects") && can("create")) quickActions.push(`<button class="btn" data-action="new-project">Create project</button>`);
+  if (canModule("properties") && can("create")) quickActions.push(`<button class="btn btn-primary" data-action="new-property">Create property</button>`);
+  if (canModule("contracts") && can("create")) quickActions.push(`<button class="btn btn-primary" data-action="generate-contract">Generate contract</button>`);
+  if (canModule("clients") && can("create")) quickActions.push(`<button class="btn" data-action="new-client">Add client</button>`);
 
   const cards = [];
   if (canModule("projects")) cards.push(card("Active projects", summary.active_projects || 0, "Developments in progress", "▥", "teal"));
@@ -995,11 +1966,13 @@ function renderDashboard() {
   }).join("") : `<div class="empty">Add a project to begin building your portfolio.</div>`;
 
   const panels = [];
+  panels.push(`<article class="card glass dashboard-attention"><div class="section-head"><div><h2 class="section-title">Pending tasks</h2><div class="section-note">Work that needs your attention</div></div><span class="attention-count${attentionCount ? " has-items" : ""}">${attentionCount}</span></div>${attentionCount ? `<p class="dashboard-panel-copy">${attentionCount} task${attentionCount === 1 ? "" : "s"} need${attentionCount === 1 ? "s" : ""} your attention.</p><button class="btn btn-soft btn-small" data-action="open-alert-view" data-view="assignments">Review assignments</button>` : `<div class="dashboard-empty-state"><strong>No pending tasks</strong><span>New assignments and reviews will appear here.</span></div>`}</article>`);
   if (canModule("projects") || canModule("contracts")) {
     panels.push(`<article class="card glass"><div class="section-head"><div><h2 class="section-title">Portfolio value</h2><div class="section-note">Contract value by project</div></div><span class="badge badge-active">Live records</span></div><div class="chart">${chart}</div></article>`);
   }
   if (canModule("contracts")) {
-    panels.push(`<article class="card glass"><div class="section-head"><div><h2 class="section-title">Contract mix</h2><div class="section-note">New versus terminal records</div></div></div><div class="grid grid-2"><div><div class="card-label">New contracts</div><div class="card-value positive">${newContracts.count || 0}</div><div class="card-foot">${money(newContracts.total || 0)}</div></div><div><div class="card-label">Terminal contracts</div><div class="card-value warning-text">${terminal.count || 0}</div><div class="card-foot">${money(terminal.total || 0)}</div></div></div><div class="trend">Use Reports for a detailed breakdown.</div></article>`);
+    const hasContracts = Number(newContracts.count || 0) + Number(terminal.count || 0) > 0;
+    panels.push(`<article class="card glass"><div class="section-head"><div><h2 class="section-title">Contracts</h2><div class="section-note">New and terminal agreements</div></div></div>${hasContracts ? `<div class="grid grid-2"><div><div class="card-label">New</div><div class="card-value positive">${newContracts.count || 0}</div><div class="card-foot">${money(newContracts.total || 0)}</div></div><div><div class="card-label">Terminal</div><div class="card-value warning-text">${terminal.count || 0}</div><div class="card-foot">${money(terminal.total || 0)}</div></div></div><div class="trend">Use Reports for a detailed breakdown.</div>` : `<div class="dashboard-empty-state"><strong>No active contracts</strong><span>Contracts will appear here once created.</span>${can("create") ? `<button class="btn btn-soft btn-small" data-action="generate-contract">Generate contract</button>` : ""}</div>`}</article>`);
   }
   if (canModule("leads")) {
     const rows = leads.slice(0, 6).map((lead) => `<tr><td><span class="cell-main">${escapeHtml(lead.name)}</span><span class="cell-sub">${escapeHtml(lead.source || "—")}</span></td><td>${badge(lead.status, "neutral")}</td><td class="align-right">${formatDate(lead.created_at)}</td></tr>`).join("");
@@ -1023,7 +1996,7 @@ function renderDashboard() {
   // gated on `reminders` rather than on `debts`. Anything the panel links to is
   // gated separately, so a caller without the debts module still gets the list.
   if (financial && canModule("reminders")) {
-    panels.push(`<article class="card glass"><div class="section-head"><div><h2 class="section-title">Payment reminders</h2><div class="section-note">Due now or within the next 7 days</div></div>${canModule("debts") ? `<button class="btn btn-soft btn-small" data-action="view-debts">View debts</button>` : ""}</div><div class="reminder-list">${upcoming.length ? upcoming.map((debt) => `<div class="reminder"><div class="reminder-icon">◷</div><div class="reminder-copy"><div class="reminder-title">${escapeHtml(debt.client_name)}</div><div class="reminder-meta">${escapeHtml(debt.project_name)} · ${money(debt.amount)} · due ${formatDate(debt.due_date)}</div></div>${debt.remind_at ? `<button class="btn btn-small" data-action="dismiss-reminder" data-id="${debt.id}" title="Mark reminder as handled">Dismiss</button>` : ""}<button class="btn btn-small" data-action="edit-debt" data-id="${debt.debt_id || debt.id}">Review</button></div>`).join("") : `<div class="empty"><strong>All clear</strong>No payments are due in the next 7 days.</div>`}</div></article>`);
+    panels.push(`<article class="card glass"><div class="section-head"><div><h2 class="section-title">Payment reminders</h2><div class="section-note">Due now or within the next 7 days</div></div>${canModule("debts") ? `<button class="btn btn-soft btn-small" data-action="view-debts">View debts</button>` : ""}</div><div class="reminder-list">${upcoming.length ? upcoming.map((debt) => `<div class="reminder" data-searchable><div class="reminder-icon">◷</div><div class="reminder-copy"><div class="reminder-title">${escapeHtml(debt.client_name)}</div><div class="reminder-meta">${escapeHtml(debt.project_name)} · ${money(debt.amount)} · due ${formatDate(debt.due_date)}</div></div>${debt.remind_at ? `<button class="btn btn-small" data-action="dismiss-reminder" data-id="${debt.id}" title="Mark reminder as handled">Dismiss</button>` : ""}<button class="btn btn-small" data-action="edit-debt" data-id="${debt.debt_id || debt.id}">Review</button></div>`).join("") : `<div class="empty"><strong>All clear</strong>No payments are due in the next 7 days.</div>`}</div></article>`);
   }
   if (canModule("follow_ups")) {
     const rows = followUps.slice(0, 6).map((entry) => `<tr><td><span class="cell-main">${escapeHtml(entry.follow_up_type)}</span></td><td>${badge(entry.status, "neutral")}</td><td class="align-right">${formatDateTime(entry.due_at)}</td></tr>`).join("");
@@ -1036,17 +2009,26 @@ function renderDashboard() {
     organization: "You are seeing every record in the organization.",
   }[scope];
   content.innerHTML = `
-    <div class="hero-strip"><div class="hero-copy"><div class="eyebrow">${escapeHtml(state.organization.me?.user?.roles?.[0]?.name || "Workspace")}</div><h2>${escapeHtml(currentUser?.display_name || "Your workspace")}</h2><p>${escapeHtml(scopeNote || "")}</p></div></div>
-    ${cards.length ? `<div class="grid grid-5">${cards.join("")}</div>` : `<div class="card glass empty"><strong>No workspace modules assigned</strong>Ask an administrator to grant module access.</div>`}
+    <div class="hero-strip dashboard-hero"><div class="hero-copy"><div class="eyebrow">${escapeHtml(state.organization.me?.user?.roles?.[0]?.name || "Workspace")} · ${escapeHtml(scopeNote || "")}</div><h2>${visibleRecordCount ? `Welcome back, ${escapeHtml(currentUser?.display_name || "team")}` : "Your workspace is ready"}</h2><p>${visibleRecordCount ? "Here is the latest activity in your authorized workspace." : "No records are visible in your workspace yet. Start with a property, client or agreement."}</p></div>${quickActions.length ? `<div class="hero-actions dashboard-quick-actions">${quickActions.join("")}</div>` : ""}</div>
+    ${cards.length ? `<div class="grid grid-5 dashboard-metrics">${cards.join("")}</div>` : `<div class="card glass empty"><strong>No workspace modules assigned</strong>Ask an administrator to grant module access.</div>`}
     ${panels.length ? `<div class="section grid grid-2">${panels.join("")}</div>` : ""}`;
 }
 
 function renderProjects() {
+  // The contract count and value per project come from `projectReports`, the
+  // server's per-project rollup. They used to be derived by filtering the whole
+  // `state.contracts` array, which is now only one page - so a filter would have
+  // reported "2 contracts, TZS 0" for a project that actually holds 40. The
+  // rollup is computed with the same scope predicate as everything else, so the
+  // figures are the caller's own and are correct for the whole set.
+  const rollup = new Map((state.projectReports || []).map((entry) => [String(entry.id), entry]));
   const rows = state.projects.map((project) => {
-    const contracts = state.contracts.filter((contract) => contract.project_id === project.id);
-    const value = contracts.reduce((sum, contract) => sum + numberValue(contract.value), 0);
-    return `<tr><td><span class="cell-main">${escapeHtml(project.name)}</span><span class="cell-sub">${formatDate(project.created_at)}</span></td><td>${badge(project.status)}</td><td class="amount">${contracts.length}</td><td class="amount">${money(value)}</td><td><div class="row-actions">${can("edit") ? `<button class="btn btn-small" data-action="edit-project" data-id="${project.id}">Edit</button>` : ""}${can("delete") ? `<button class="btn btn-danger btn-small icon-btn" data-action="delete-project" data-id="${project.id}" title="Delete project">×</button>` : ""}</div></td></tr>`;
+    const report = rollup.get(String(project.id));
+    const contracts = report ? Number(report.new_contracts || 0) + Number(report.terminal_contracts || 0) : 0;
+    const value = report ? numberValue(report.contract_value) : 0;
+    return `<tr data-searchable><td><span class="cell-main">${escapeHtml(project.name)}</span><span class="cell-sub">${formatDate(project.created_at)}</span></td><td>${badge(project.status)}</td><td class="amount">${contracts}</td><td class="amount">${money(value)}</td><td><div class="row-actions">${can("edit") ? `<button class="btn btn-small" data-action="edit-project" data-id="${project.id}">Edit</button>` : ""}${can("delete") ? `<button class="btn btn-danger btn-small icon-btn" data-action="delete-project" data-id="${project.id}" title="Delete project">×</button>` : ""}</div></td></tr>`;
   }).join("");
+  // `projects` is still delivered complete, so `.length` is a true count here.
   content.innerHTML = `<div class="section-head"><div><h2 class="section-title">Project register</h2><div class="section-note">${state.projects.length} projects in the workspace</div></div></div>${state.projects.length ? `<div class="table-wrap"><table><thead><tr><th>Project</th><th>Status</th><th>Contracts</th><th>Value</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="card glass empty"><strong>No projects yet</strong>Create a project before adding contracts.</div>`}`;
 }
 
@@ -1061,16 +2043,19 @@ function renderContracts() {
   const workflowButtons = (contract) => (contract.available_actions || []).slice(0, 3)
     .map((entry) => `<button class="btn btn-soft btn-small" data-action="contract-transition" data-id="${contract.id}" data-transition="${escapeHtml(entry.action)}" title="${escapeHtml(entry.label)}">${escapeHtml(entry.label)}</button>`)
     .join("");
-  const rows = state.contracts.filter((contract) => (!filters.project || String(contract.project_id) === filters.project) && (!filters.type || contract.contract_type === filters.type) && (!filters.status || contract.status === filters.status)).map((contract) => `<tr><td><span class="cell-main">${escapeHtml(contract.client_name)}</span><span class="cell-sub">${escapeHtml(contract.contract_number || contract.project_name || "")}</span></td><td>${badge(contract.contract_type)}</td><td>${contractStatusBadge(contract.status)}</td><td>${formatDate(contract.start_date)}</td><td>${formatDate(contract.end_date)}</td><td class="amount">${money(contract.value)}</td><td><div class="row-actions">${workflowButtons(contract)}<button class="btn btn-small" data-action="contract-history" data-id="${contract.id}">History</button>${can("edit") ? `<button class="btn btn-small" data-action="edit-contract" data-id="${contract.id}">Edit</button>` : ""}${scheduleAction(contract.id)}${can("delete") ? `<button class="btn btn-danger btn-small icon-btn" data-action="delete-contract" data-id="${contract.id}" title="Delete contract">×</button>` : ""}</div></td></tr>`).join("");
+  const generatedDocumentAction = (contract) => contract.generated_document_id && canModule("documents")
+    ? `<button class="btn btn-soft btn-small" data-action="view-generated-contract" data-id="${contract.id}">View</button>` : "";
+  const rows = state.contracts.filter((contract) => (!filters.project || String(contract.project_id) === filters.project) && (!filters.type || contract.contract_type === filters.type) && (!filters.status || contract.status === filters.status)).map((contract) => `<tr data-searchable><td><span class="cell-main">${escapeHtml(contract.client_name)}</span><span class="cell-sub">${escapeHtml(contract.contract_number || contract.project_name || "")}</span></td><td>${badge(contract.contract_type)}</td><td>${contractStatusBadge(contract.status)}</td><td>${formatDate(contract.start_date)}</td><td>${formatDate(contract.end_date)}</td><td class="amount">${money(contract.value)}</td><td><div class="row-actions">${workflowButtons(contract)}${generatedDocumentAction(contract)}<button class="btn btn-small" data-action="contract-history" data-id="${contract.id}">History</button>${can("edit") ? `<button class="btn btn-small" data-action="edit-contract" data-id="${contract.id}">Edit</button>` : ""}${scheduleAction(contract.id)}${can("delete") ? `<button class="btn btn-danger btn-small icon-btn" data-action="delete-contract" data-id="${contract.id}" title="Delete contract">×</button>` : ""}</div></td></tr>`).join("");
   const statusOptions = Object.entries(CONTRACT_STATUS_LABELS)
     .map(([value, label]) => `<option value="${value}" ${filters.status === value ? "selected" : ""}>${escapeHtml(label)}</option>`)
     .join("");
-  // The visible count is derived from the filtered list, not by counting `<tr>`
-  // fragments in the rendered HTML: that regex counted every row marker in the
-  // markup and reported a number that had nothing to do with the records shown.
-  const visibleCount = state.contracts.filter((contract) => (!filters.project || String(contract.project_id) === filters.project) && (!filters.type || contract.contract_type === filters.type) && (!filters.status || contract.status === filters.status)).length;
-  const visibleLabel = `${visibleCount} ${visibleCount === 1 ? "contract" : "contracts"}`;
-  content.innerHTML = `<div class="filters"><label class="muted">Filters</label>${projectSelect(filters.project)}<select class="filter-input" data-filter="type" aria-label="Filter by contract type"><option value="">All types</option><option value="new" ${filters.type === "new" ? "selected" : ""}>New</option><option value="terminal" ${filters.type === "terminal" ? "selected" : ""}>Terminal</option></select><select class="filter-input" data-filter="status" aria-label="Filter by contract status"><option value="">All statuses</option>${statusOptions}</select></div><div class="section-head"><div><h2 class="section-title">Contract register</h2><div class="section-note">${visibleLabel}</div></div>${can("create") ? `<button class="btn btn-primary" data-action="new-contract">+ New contract</button>` : ""}</div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Client / project</th><th>Type</th><th>Status</th><th>Start</th><th>End</th><th>Value</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="card glass empty"><strong>No contracts found</strong>Try another filter or create a new contract.</div>`}`;
+  // The visible count is the SERVER's total for the current filter and search,
+  // not a count of the loaded rows. The filters above are applied server-side
+  // when a page is fetched, so re-filtering the resident page here would both
+  // duplicate the work and understate the result.
+  const total = Number(state.pages?.contracts?.total ?? state.contracts.length);
+  const visibleLabel = `${total} ${total === 1 ? "contract" : "contracts"}`;
+  content.innerHTML = `<div class="filters"><label class="muted">Filters</label>${projectSelect(filters.project)}<select class="filter-input" data-filter="type" aria-label="Filter by contract type"><option value="">All types</option><option value="new" ${filters.type === "new" ? "selected" : ""}>New</option><option value="terminal" ${filters.type === "terminal" ? "selected" : ""}>Terminal</option></select><select class="filter-input" data-filter="status" aria-label="Filter by contract status"><option value="">All statuses</option>${statusOptions}</select></div><div class="section-head"><div><h2 class="section-title">Contract register</h2><div class="section-note">${visibleLabel}</div></div>${can("create") ? `<button class="btn btn-primary" data-action="generate-contract">Generate Contract</button>` : ""}</div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Client / project</th><th>Type</th><th>Status</th><th>Start</th><th>End</th><th>Value</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>${pager("contracts")}` : `<div class="card glass empty"><strong>No contracts found</strong>Try another filter or create a new contract.</div>`}`;
 }
 
 function renderDebts() {
@@ -1096,9 +2081,9 @@ function renderDebts() {
       : "";
     const edit = mayEdit ? `<button class="btn btn-small" data-action="edit-debt" data-id="${debt.id}">Edit</button>` : "";
     const remove = mayDelete ? `<button class="btn btn-danger btn-small icon-btn" data-action="delete-debt" data-id="${debt.id}" title="Delete debt">×</button>` : "";
-    return `<tr><td><span class="cell-main">${escapeHtml(debt.client_name)}</span><span class="cell-sub">${escapeHtml(debt.project_name)}</span></td><td>${badge(debt.contract_type)}</td><td>${badgeVariant(debtStateLabel(debtStateValue), debtStateValue)}</td><td>${formatDate(debt.due_date)}</td><td class="amount ${debtStateValue === "overdue" ? "danger-text" : ""}">${money(debt.amount)}</td><td>${debt.status === "paid" ? "—" : escapeHtml(debt.notes || "")}</td><td><div class="row-actions">${settle}${viewContract}${edit}${remove}</div></td></tr>`;
+    return `<tr data-searchable><td><span class="cell-main">${escapeHtml(debt.client_name)}</span><span class="cell-sub">${escapeHtml(debt.project_name)}</span></td><td>${badge(debt.contract_type)}</td><td>${badgeVariant(debtStateLabel(debtStateValue), debtStateValue)}</td><td>${formatDate(debt.due_date)}</td><td class="amount ${debtStateValue === "overdue" ? "danger-text" : ""}">${money(debt.amount)}</td><td>${debt.status === "paid" ? "—" : escapeHtml(debt.notes || "")}</td><td><div class="row-actions">${settle}${viewContract}${edit}${remove}</div></td></tr>`;
   }).join("");
-  content.innerHTML = `<div class="filters"><label class="muted">Filters</label>${projectSelect(filters.project)}<select class="filter-input" data-filter="debtStatus" aria-label="Filter by debt state"><option value="">All debt states</option><option value="pending" ${filters.debtStatus === "pending" ? "selected" : ""}>Pending</option><option value="partial" ${filters.debtStatus === "partial" ? "selected" : ""}>Part paid</option><option value="upcoming" ${filters.debtStatus === "upcoming" ? "selected" : ""}>Upcoming</option><option value="overdue" ${filters.debtStatus === "overdue" ? "selected" : ""}>Overdue</option><option value="paid" ${filters.debtStatus === "paid" ? "selected" : ""}>Paid</option></select></div><div class="section-head"><div><h2 class="section-title">Debt register</h2><div class="section-note">Client balances linked to contracts</div></div>${mayCreate ? `<button class="btn btn-primary" data-action="new-debt">+ New debt</button>` : ""}</div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Client / project</th><th>Contract</th><th>State</th><th>Due date</th><th>Amount</th><th>Note</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="card glass empty"><strong>No debts found</strong>Add a debt to a contract or change the filters.</div>`}
+  content.innerHTML = `<div class="filters"><label class="muted">Filters</label>${projectSelect(filters.project)}<select class="filter-input" data-filter="debtStatus" aria-label="Filter by debt state"><option value="">All debt states</option><option value="pending" ${filters.debtStatus === "pending" ? "selected" : ""}>Pending</option><option value="partial" ${filters.debtStatus === "partial" ? "selected" : ""}>Part paid</option><option value="upcoming" ${filters.debtStatus === "upcoming" ? "selected" : ""}>Upcoming</option><option value="overdue" ${filters.debtStatus === "overdue" ? "selected" : ""}>Overdue</option><option value="paid" ${filters.debtStatus === "paid" ? "selected" : ""}>Paid</option></select></div><div class="section-head"><div><h2 class="section-title">Debt register</h2><div class="section-note">Client balances linked to contracts</div></div>${mayCreate ? `<button class="btn btn-primary" data-action="new-debt">+ New debt</button>` : ""}</div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Client / project</th><th>Contract</th><th>State</th><th>Due date</th><th>Amount</th><th>Note</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>${pager("debts")}` : `<div class="card glass empty"><strong>No debts found</strong>Add a debt to a contract or change the filters.</div>`}
     <div class="section">
       <div class="section-head"><div><h2 class="section-title">Recorded payments</h2><div class="section-note">Money actually received, with receipts</div></div>${mayCreate ? `<button class="btn btn-soft btn-small" data-action="new-payment">+ Record payment</button>` : ""}</div>
       ${renderPaymentsTable(mayEdit, mayDelete)}
@@ -1117,7 +2102,7 @@ function renderRemindersTable() {
   // Acknowledging a reminder and opening the debt are both writes the API gates,
   // so both buttons follow the caller's own edit permission.
   const mayEdit = can("edit");
-  const rows = reminders.map((reminder) => `<tr>
+  const rows = reminders.map((reminder) => `<tr data-searchable>
     <td><span class="cell-main">${escapeHtml(reminder.client_name)}</span><span class="cell-sub">${escapeHtml(reminder.project_name || "")}</span></td>
     <td>${formatDate(reminder.due_date)}</td>
     <td class="amount">${money(reminder.amount)}</td>
@@ -1135,9 +2120,9 @@ function renderPaymentsTable(mayEdit = can("edit"), mayDelete = can("delete")) {
   if (!payments.length) return `<div class="card glass empty"><strong>No payments recorded</strong>Use “Record payment” on a debt to log income with an optional receipt.</div>`;
   const rows = payments.map((payment) => {
     const remove = mayDelete ? `<button class="btn btn-danger btn-small icon-btn" data-action="delete-payment" data-id="${payment.id}" title="Delete payment">×</button>` : "";
-    return `<tr><td><span class="cell-main">${escapeHtml(payment.client_name)}</span><span class="cell-sub">${escapeHtml(payment.project_name || "")}</span></td><td>${formatDate(payment.paid_at, String(payment.paid_at).length > 10)}</td><td>${badge(payment.method, "neutral")}</td><td class="amount">${money(payment.amount)}</td><td>${escapeHtml(payment.reference || "—")}</td><td><div class="row-actions">${payment.has_receipt ? `<button class="btn btn-small" data-action="open-receipt" data-id="${payment.id}">View receipt</button>` : `<span class="muted">None</span>`}${remove}</div></td></tr>`;
+    return `<tr data-searchable><td><span class="cell-main">${escapeHtml(payment.client_name)}</span><span class="cell-sub">${escapeHtml(payment.project_name || "")}</span></td><td>${formatDate(payment.paid_at, String(payment.paid_at).length > 10)}</td><td>${badge(payment.method, "neutral")}</td><td class="amount">${money(payment.amount)}</td><td>${escapeHtml(payment.reference || "—")}</td><td><div class="row-actions">${payment.has_receipt ? `<button class="btn btn-small" data-action="open-receipt" data-id="${payment.id}">View receipt</button>` : `<span class="muted">None</span>`}${remove}</div></td></tr>`;
   }).join("");
-  return `<div class="table-wrap"><table><thead><tr><th>Client / project</th><th>Paid at</th><th>Method</th><th>Amount</th><th>Reference</th><th class="align-right">Receipt & actions</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>Client / project</th><th>Paid at</th><th>Method</th><th>Amount</th><th>Reference</th><th class="align-right">Receipt & actions</th></tr></thead><tbody>${rows}</tbody></table></div>${pager("payments")}`;
 }
 
 function renderReports() {
@@ -1196,9 +2181,9 @@ function renderProperties() {
     // `cover_image_id` is only set by the server when the file really exists, so
     // no cover markup is emitted for a picture that would 404.
     const cover = property.cover_image_id
-      ? `<div class="property-cover"><img data-src="${API_ROOT}/properties/${property.id}/images/${property.cover_image_id}/file" alt="${escapeHtml(property.name)}" loading="lazy"></div>`
-      : "";
-    return `<div class="property-card">
+      ? `<div class="property-cover"><img data-src="${API_ROOT}/properties/${property.id}/images/${property.cover_image_id}/file" alt="${escapeHtml(property.name)}" loading="lazy"><div class="property-cover-fallback" aria-hidden="true" hidden>⌂ <span>Photo unavailable</span></div></div>`
+      : `<div class="property-cover property-cover-empty"><span aria-hidden="true">⌂</span><span>Photo unavailable</span></div>`;
+    return `<div class="property-card" data-searchable>
       ${cover}
       <div class="property-head">
         <div class="property-name">${escapeHtml(property.name)}</div>
@@ -1206,6 +2191,7 @@ function renderProperties() {
       </div>
       <div class="property-meta">
         <div><span class="muted">Status</span>${badge(property.status)}</div>
+        <div><span class="muted">Property number</span><span class="cell-sub">P-${String(property.id).padStart(4, "0")}</span></div>
         <div><span class="muted">Price</span><span class="amount">${price}</span></div>
         ${property.location ? `<div><span class="muted">Location</span>${escapeHtml(property.location)}</div>` : ""}
         ${property.area ? `<div><span class="muted">Area</span>${numberValue(property.area)} units</div>` : ""}
@@ -1252,7 +2238,7 @@ function renderProperties() {
       <button class="btn btn-primary" data-action="new-property">+ New property</button>
     </div>
     ${rows.length
-      ? `<div class="property-grid">${list}</div>`
+      ? `<div class="property-grid">${list}</div>${pager("properties")}`
       : `<div class="card glass empty"><strong>No properties found</strong>Add the first property to start building your portfolio.</div>`}`;
 }
 
@@ -1263,7 +2249,7 @@ function renderClients() {
     (!filters.clientStatus || client.status === filters.clientStatus)
   );
   const list = rows.map((client) => {
-    return `<div class="client-card">
+    return `<div class="client-card" data-searchable>
       <div class="client-head">
         <div class="client-name">${escapeHtml(client.name)}</div>
         <div class="client-type">${badge(client.client_type, "neutral")}</div>
@@ -1303,7 +2289,7 @@ function renderClients() {
       <button class="btn btn-primary" data-action="new-client">+ New client</button>
     </div>
     ${rows.length
-      ? `<div class="client-grid">${list}</div>`
+      ? `<div class="client-grid">${list}</div>${pager("clients")}`
       : `<div class="card glass empty"><strong>No clients found</strong>Add the first contact to begin tracking people.</div>`}`;
 }
 
@@ -1315,7 +2301,7 @@ function renderAppointments() {
     (!filters.type || apt.appointment_type === filters.type)
   ).sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)));
   const list = rows.map((apt) => {
-    return `<div class="apt-row">
+    return `<div class="apt-row" data-searchable>
       <div class="apt-time">
         <div class="apt-datetime">${formatDateTime(apt.starts_at, true)}</div>
         ${apt.ends_at ? `<div class="apt-datetime muted">${formatDateTime(apt.ends_at, true)}</div>` : ""}
@@ -1363,7 +2349,7 @@ function renderAppointments() {
       <button class="btn btn-primary" data-action="new-appointment">+ New appointment</button>
     </div>
     ${rows.length
-      ? `<div class="apt-list">${list}</div>`
+      ? `<div class="apt-list">${list}</div>${pager("appointments")}`
       : `<div class="card glass empty"><strong>No appointments found</strong>Schedule a viewing, call, meeting, or inspection.</div>`}`;
 }
 
@@ -1378,7 +2364,7 @@ function renderDocuments() {
   const list = rows.map((doc) => {
     const hasFile = doc.has_file;
     const openPath = hasFile ? `/documents/${doc.id}/file?download=1` : null;
-    return `<div class="doc-row">
+    return `<div class="doc-row" data-searchable>
       <div class="doc-icon">${documentIcon(doc.category)}</div>
       <div class="doc-body">
         <div class="doc-title">${escapeHtml(doc.title)}</div>
@@ -1395,6 +2381,7 @@ function renderDocuments() {
         </div>
       </div>
       <div class="doc-actions">
+        ${doc.category === "agreement" && doc.contract_id && canModule("contracts") ? `<button class="btn btn-small" data-action="view-generated-contract" data-id="${doc.contract_id}">View</button>` : ""}
         ${hasFile ? `<button class="btn btn-small" data-action="open-document" data-id="${doc.id}">Open</button>` : ""}
         <button class="btn btn-small" data-action="edit-document" data-id="${doc.id}"${can("edit") ? "" : " hidden"}>Edit</button>
         <button class="btn btn-danger btn-small icon-btn" data-action="delete-document" data-id="${doc.id}" title="Delete document"${can("delete") ? "" : " hidden"}>×</button>
@@ -1431,7 +2418,7 @@ function renderDocuments() {
       <button class="btn btn-primary" data-action="new-document">+ New document</button>
     </div>
     ${rows.length
-      ? `<div class="document-list">${list}</div>`
+      ? `<div class="document-list">${list}</div>${pager("documents")}`
       : `<div class="card glass empty"><strong>No documents found</strong>Upload or register the first document.</div>`}`;
 }
 
@@ -1444,11 +2431,12 @@ function render() {
     view("projects", "create") ? `<button class="btn btn-primary" data-action="new-project">+ New project</button>` :
     view("properties", "create") ? `<button class="btn btn-primary" data-action="new-property">+ New property</button>` :
     view("clients", "create") ? `<button class="btn btn-primary" data-action="new-client">+ New client</button>` :
-    view("contracts", "create") ? `<button class="btn btn-primary" data-action="new-contract">+ New contract</button>` :
+    view("contracts", "create") ? `<button class="btn btn-primary" data-action="generate-contract">Generate contract</button>` :
     state.view === "debts" && canModule("debts") && can("create") ? `<button class="btn btn-primary" data-action="new-debt">+ New debt</button>${can("create") ? `<button class="btn" data-action="new-payment">+ Record payment</button>` : ""}` :
     view("appointments", "create") ? `<button class="btn btn-primary" data-action="new-appointment">+ New appointment</button>` :
     view("documents", "create") ? `<button class="btn btn-primary" data-action="new-document">+ New document</button>` :
     state.view === "reports" && canModule("reports") && can("view_reports") ? `<button class="btn btn-primary" data-action="open-report-generate">+ Generate report</button>${can("export") ? `<button class="btn" data-action="open-report-upload">+ Upload report</button>` : ""}` :
+    state.view === "assignments" && can("assign_tasks") ? `<button class="btn btn-primary" data-action="new-task">+ New Task</button>` :
     "";
   if (state.loading) { renderLoading(); return; }
   // The admin overview needs the organization counters, which load lazily.
@@ -1466,12 +2454,159 @@ function render() {
   if (state.view === "documents") renderDocuments();
   if (state.view === "reports") renderReports();
   if (state.view === "organization") content.innerHTML = renderOrganization();
+  if (state.view === "assignments") {
+    content.innerHTML = renderAssignments();
+    // Loaded on demand, like the duty catalogue. The guard stops a failed
+    // request from retrying on every repaint.
+    if (!state.tasks && !state.tasksRequested) loadTasks().then(() => { if (state.view === "assignments") render(); });
+  }
+  if (state.view === "duties") {
+    content.innerHTML = renderDuties();
+    // Reference data, fetched the first time this view is opened rather than on
+    // every workspace load. The guard stops a failed request retrying forever.
+    if (!state.duties && !state.dutiesRequested) loadDuties().then(() => { if (state.view === "duties") render(); });
+  }
   // The record-allocation panel is administrator-only and loads on demand. The
   // `allocationRequested` guard means a failed load is not retried on every
   // render, which previously produced an unbounded request loop.
   if (state.view === "organization" && can("manage_users") && !state.allocation && !state.allocationRequested) loadAllocation().then(() => { if (state.view === "organization") render(); });
   // Authenticated image blobs for property covers, etc.
   hydrateImages(content);
+  applySearch();
+  updateNotificationDot();
+}
+
+/* --------------------------------------------------------------------------
+   Topbar search
+
+   Searching moved to the SERVER. Only one page of each list is resident in the
+   browser, so filtering the loaded rows would search 50 of 12,000 and report the
+   rest as "not found" - which is worse than no search, because it looks like an
+   answer. The term now goes to the API, which applies it inside the same scoped,
+   ordered query that produced the page.
+
+   Two views have no server-side search: the dashboard and the Administration
+   screen, which are built from aggregates rather than a single list. For those
+   the previous in-page behaviour is kept - and it is still correct, because
+   both views render rows the workspace loaded in full.
+   -------------------------------------------------------------------------- */
+const SEARCHABLE_VIEWS = {
+  contracts: "contracts",
+  clients: "clients",
+  properties: "properties",
+  debts: "debts",
+  documents: "documents",
+  appointments: "appointments",
+  projects: "projects",
+};
+
+let searchTimer = null;
+// The term the server was last asked to apply, per list. Without this the
+// render -> applySearch -> loadList -> render cycle never settles: every render
+// re-issues the same search, and with a synchronous timer (as in the test
+// sandbox) that recurses until the stack is exhausted. In a browser it is merely
+// a request storm, re-fetching on every unrelated repaint.
+const appliedSearch = new Map();
+
+function applySearch() {
+  const raw = (globalSearch?.value || "").trim();
+  const term = raw.toLowerCase();
+  const kind = SEARCHABLE_VIEWS[state.view];
+  if (kind) {
+    // A register: ask the server, but only when the term has actually changed.
+    if ((appliedSearch.get(kind) || "") === raw) return;
+    appliedSearch.set(kind, raw);
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      searchTimer = null;
+      loadList(kind, { page: 1, search: raw, force: true });
+    }, 250);
+    return;
+  }
+  // Dashboard / Administration: hide non-matching rows in place. Everything on
+  // screen here came from a scoped aggregate, so this still only ever narrows.
+  for (const node of content.querySelectorAll("[data-searchable]")) {
+    // `hidden` is authoritative over any component display rule, so a filtered
+    // row cannot be resurrected by a `display: flex` rule further down the sheet.
+    node.hidden = Boolean(term) && !node.textContent.toLowerCase().includes(term);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Notifications
+   The dot summarises work the caller can already open. Every count is derived
+   from the same workspace payload the screens render, so nothing extra is
+   fetched and nothing the caller cannot open is implied.
+   -------------------------------------------------------------------------- */
+function alertSummary() {
+  const alerts = [];
+  // Counts come from the server's SCOPED rollup, never from `state.X.length`.
+  // With only one page resident, a `.length` here would report "12 overdue" when
+  // the caller may actually have 400 - confidently wrong rather than obviously
+  // broken, which is the worst failure mode for an alert. `summary` already
+  // computes the overdue and pending figures with the same scope predicate.
+  const summary = state.summary || {};
+  if (canModule("debts") && canSeeFinancial()) {
+    const overdue = Number(summary.debts_overdue?.count || 0);
+    if (overdue) alerts.push({ label: `${overdue} overdue installment${overdue === 1 ? "" : "s"}`, view: "debts" });
+    const due = (state.reminders || []).length;
+    if (due) alerts.push({ label: `${due} payment reminder${due === 1 ? "" : "s"} due`, view: "debts" });
+  }
+  if (canModule("appointments")) {
+    const booked = Number(summary.appointments_scheduled || 0);
+    if (booked) alerts.push({ label: `${booked} scheduled appointment${booked === 1 ? "" : "s"}`, view: "appointments" });
+  }
+  if (canModule("documents")) {
+    const pending = Number(summary.documents_pending || 0);
+    if (pending) alerts.push({ label: `${pending} document${pending === 1 ? "" : "s"} awaiting approval`, view: "documents" });
+  }
+  if (canModule("follow_ups")) {
+    const open = Number(state.counts?.follow_ups || 0);
+    if (open) alerts.push({ label: `${open} follow-up${open === 1 ? "" : "s"} on record`, view: "dashboard" });
+  }
+  return alerts;
+}
+
+function updateNotificationDot() {
+  const count = alertSummary().length;
+  if (bellDot) bellDot.hidden = count === 0;
+  const sideCount = document.getElementById("side-alert-count");
+  if (sideCount) {
+    sideCount.hidden = count === 0;
+    sideCount.textContent = String(count);
+  }
+}
+
+/**
+ * The caller's own details, as the server reported them. Read-only: role,
+ * department and scope come from /org/me and are not editable here, because a
+ * user must not be able to promote themselves from the profile screen.
+ */
+function showProfile() {
+  const me = state.organization.me || {};
+  const user = me.user || {};
+  const roles = (user.roles || []).map((role) => role.name).join(", ") || "No role";
+  const departments = (user.departments || []).map((department) => department.name).join(", ") || "No department";
+  const rows = [
+    ["Name", user.display_name || "—"],
+    ["Work email", user.email || "—"],
+    ["Role", roles],
+    ["Department", departments],
+    ["Data scope", me.scope || "own"],
+    ["Modules", (me.modules || []).length ? me.modules.join(", ") : "None"],
+  ].map(([label, value]) => `<tr><td><span class="muted">${escapeHtml(label)}</span></td><td>${escapeHtml(String(value))}</td></tr>`).join("");
+  openModal("profile", {});
+  const table = modal.querySelector("table tbody");
+  if (table) table.innerHTML = rows;
+}
+
+function showAlertsPanel() {
+  const alerts = alertSummary();
+  if (!alerts.length) {
+    showToast("Nothing needs your attention right now.");
+    return;
+  }
+  openModal("alerts", { alerts });
 }
 
 /**
@@ -1701,14 +2836,34 @@ function openModal(type, record = null) {
     subtitle = "Generated on the fly from the current filters.";
     body = renderReportPreview();
   }
-  const isPreview = type === "report-preview";
+  if (type === "profile") {
+    // Rows are filled in by showProfile() straight after the dialog opens, so the
+    // markup here only supplies the frame.
+    title = "My profile";
+    subtitle = "Your account, role and data scope as the server reports them.";
+    body = `<div class="table-wrap"><table><tbody></tbody></table></div>
+      <p class="field-help" style="margin-top:14px">Role, department and permissions are managed by an administrator in Administration → Users.</p>`;
+  }
+  if (type === "alerts") {
+    // Read-only summary. Each row is derived from records the caller is already
+    // authorized to see, so this reveals nothing the screens do not.
+    title = "Notifications";
+    subtitle = "Work waiting on you across the workspace.";
+    const rows = (record?.alerts || []).map((alert) =>
+      `<tr><td>${escapeHtml(alert.label)}</td><td class="align-right"><button class="btn btn-small" data-action="open-alert-view" data-view="${escapeHtml(alert.view)}">Open</button></td></tr>`
+    ).join("");
+    body = `<div class="table-wrap"><table><thead><tr><th>Item</th><th class="align-right">Action</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+  // Read-only dialogs render outside a <form>: there is nothing to submit, and a
+  // stray submit button inside a form would post an empty record on Enter.
+  const isReadOnly = type === "report-preview" || type === "alerts" || type === "profile";
   const actions = `<div class="form-actions">
-    <button type="button" class="btn" data-action="close-modal">${isPreview ? "Close" : "Cancel"}</button>
+    <button type="button" class="btn" data-action="close-modal">${isReadOnly ? "Close" : "Cancel"}</button>
     ${type === "report-generate" ? `<button type="button" class="btn btn-soft" data-action="preview-report">Preview</button>` : ""}
-    ${isPreview ? "" : `<button type="submit" class="btn btn-primary">${submitLabel}</button>`}
+    ${isReadOnly ? "" : `<button type="submit" class="btn btn-primary">${submitLabel}</button>`}
   </div>`;
   const head = `<div class="modal-head"><div><h2 class="modal-title">${title}</h2><p class="modal-sub">${subtitle}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">×</button></div>`;
-  modal.innerHTML = isPreview
+  modal.innerHTML = isReadOnly
     ? `${head}${body}${actions}`
     : `${head}<form id="record-form" data-id="${escapeHtml(record?.id || "")}">${body}${actions}</form>`;
   modalBackdrop.hidden = false;
@@ -1779,6 +2934,7 @@ function closeModal() {
   }
   modalBackdrop.hidden = true;
   modal.innerHTML = "";
+  modal.classList.remove("modal-wide");
 }
 
 /**
@@ -1822,6 +2978,42 @@ async function handleFormSubmit(event) {
   const data = Object.fromEntries(new FormData(form));
   const type = modal.dataset.type;
   const id = form.dataset.id;
+  if (type === "task" && form.id === "task-form") {
+    // The server decides who may be assigned, who may review, and it stamps
+    // assigned_by, priority, due date and the initial status itself. Only the
+    // authorized person list the server returned is submittable, and no
+    // `assigned_by` is ever sent - the session decides who assigned it.
+    const payload = {
+      title: data.title,
+      description: data.description || null,
+      assigned_to: Number(data.assigned_to),
+      reviewer_id: data.reviewer_id ? Number(data.reviewer_id) : null,
+      priority: data.priority,
+      due_date: data.due_date || null,
+    };
+    // The linked record is optional. A half-filled link (entity without an id, or
+    // an id without an entity) is not sent: the server refuses it, and sending a
+    // broken pointer would be worse than sending none.
+    if (data.linked_entity && data.linked_record_id) {
+      payload.linked_entity = data.linked_entity;
+      payload.linked_record_id = Number(data.linked_record_id);
+    }
+    try {
+      await api("/org/tasks", { method: "POST", body: JSON.stringify(payload) });
+      modalBackdrop.hidden = true;
+      showToast("Work assigned.");
+    } catch (error) {
+      showToast(error.message || "Unable to assign that work.");
+      return;
+    }
+    await refreshAttention();
+    state.taskBox = "assigned_by_me";
+    state.tasks = null;
+    state.tasksRequested = false;
+    await loadTasks();
+    if (state.view === "assignments") render();
+    return;
+  }
   const button = form.querySelector('button[type="submit"]');
   const originalLabel = button.textContent;
   button.disabled = true;
@@ -2169,6 +3361,39 @@ async function openDocumentFile(id) {
   }
 }
 
+async function openContractDocumentEditor(contractId) {
+  if (!canModule("documents")) { showToast("You do not have Documents access."); return; }
+  try {
+    const document = await api(`/contracts/${contractId}/document-content`);
+    const canEditDocument = document.can_edit && can("edit");
+    modal.dataset.type = "contract-document-editor";
+    modal.dataset.contractId = String(contractId);
+    modal.classList.add("modal-wide");
+    modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(document.title || "Contract document")}</h2><p class="modal-sub">${escapeHtml(document.original_filename || "Generated contract")}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">×</button></div>
+      <div class="field"><label for="contract-document-body">Contract contents</label><textarea id="contract-document-body" class="contract-document-editor"${canEditDocument ? "" : " readonly aria-readonly=\"true\""}>${escapeHtml(document.body_text || "")}</textarea></div>
+      <div class="row-actions"><button type="button" class="btn" data-action="close-modal">Close</button><button type="button" class="btn btn-soft" data-action="download-generated-document" data-id="${document.document_id}" data-filename="${escapeHtml(document.original_filename || "contract.docx")}">Download</button>${canEditDocument ? `<button type="button" class="btn btn-primary" data-action="save-contract-document" data-id="${contractId}">Save and close</button>` : ""}</div>`;
+    modalBackdrop.hidden = false;
+    modal.querySelector("#contract-document-body")?.focus();
+  } catch (error) {
+    showToast(error.message || "Unable to open the contract document.");
+  }
+}
+
+async function saveContractDocument(contractId) {
+  const bodyText = document.getElementById("contract-document-body")?.value || "";
+  const button = modal.querySelector('[data-action="save-contract-document"]');
+  if (button) button.disabled = true;
+  try {
+    await api(`/contracts/${contractId}/document-content`, { method: "PUT", body: JSON.stringify({ body_text: bodyText }) });
+    closeModal();
+    showToast("Contract document updated and replaced.");
+    loadWorkspace();
+  } catch (error) {
+    if (button) button.disabled = false;
+    showToast(error.message || "Unable to save contract changes.");
+  }
+}
+
 // Navigation is delegated because the items are generated per caller: a static
 // listener list would bind to elements that no longer exist after a sign-in.
 document.getElementById("primary-nav").addEventListener("click", (event) => {
@@ -2219,6 +3444,7 @@ function viewContract(contractId) {
     ${installmentRows ? `<div class="section"><div class="section-head"><div><h2 class="section-title">Installments</h2><div class="section-note">Payment plan attached to this contract</div></div></div><div class="table-wrap"><table><thead><tr><th>Installment</th><th>Due</th><th>State</th><th class="align-right">Amount</th></tr></thead><tbody>${installmentRows}</tbody></table></div></div>` : ""}
     <div class="form-actions">
       <button type="button" class="btn" data-action="close-modal">Close</button>
+      ${contract.generated_document_id && canModule("documents") ? `<button type="button" class="btn btn-soft" data-action="view-generated-contract" data-id="${contract.id}">View / Edit</button><button type="button" class="btn" data-action="download-generated-document" data-id="${contract.generated_document_id}" data-filename="${escapeHtml(`${contract.contract_number || "contract"}.docx`)}">Download DOCX</button>` : ""}
       ${can("edit") ? `<button type="button" class="btn btn-primary" data-action="edit-contract-from-view" data-id="${contract.id}">Edit contract</button>` : ""}
       <button type="button" class="btn btn-soft" data-action="contract-history" data-id="${contract.id}">History</button>
     </div>`;
@@ -2231,33 +3457,61 @@ document.addEventListener("click", async (event) => {
   const action = target.dataset.action;
   const id = target.dataset.id;
   if (action === "new-project") openModal("project");
-  if (action === "edit-project") openModal("project", state.projects.find((item) => String(item.id) === id));
+  if (action === "edit-project") openModalFor("projects", id, "project");
   if (action === "delete-project") deleteRecord("project", id);
   if (action === "new-property") openModal("property");
-  if (action === "edit-property") openModal("property", state.properties.find((item) => String(item.id) === id));
+  if (action === "edit-property") openModalFor("properties", id, "property");
   if (action === "delete-property") deleteRecord("property", id);
-  if (action === "new-contract") openModal("contract");
-  if (action === "edit-contract") openModal("contract", state.contracts.find((item) => String(item.id) === id));
+  if (action === "new-contract") await openGenerateContractModal();
+  if (action === "generate-contract") await openGenerateContractModal();
+  if (action === "contract-preview") {
+    const form = document.getElementById("contract-generate-form");
+    if (form?.reportValidity()) {
+      state.contractGen.data = generateContractFormData();
+      state.contractGen.step = "review";
+      renderGenerateContractModal();
+    }
+  }
+  if (action === "contract-confirm") await submitGenerateContract();
+  if (action === "contract-back") {
+    state.contractGen.data = generateContractFormData();
+    state.contractGen.step = "form";
+    renderGenerateContractModal();
+  }
+  if (action === "view-generated-contract") openContractDocumentEditor(id);
+  if (action === "save-contract-document") await saveContractDocument(id);
+  if (action === "open-generated-document") openDocumentFile(id);
+  if (action === "download-generated-document") downloadFile(`/documents/${id}/file?download=1`, target.dataset.filename || "contract.pdf").catch((error) => showToast(error.message || "Unable to download the contract."));
+  if (action === "edit-contract") openModalFor("contracts", id, "contract");
   if (action === "delete-contract") deleteRecord("contract", id);
   if (action === "new-debt") openModal("debt");
-  if (action === "edit-debt") openModal("debt", state.debts.find((item) => String(item.id) === id));
+  if (action === "edit-debt") openModalFor("debts", id, "debt");
   if (action === "delete-debt") deleteRecord("debt", id);
   if (action === "pay-debt") markPaid(id);
-  if (action === "generate-schedule") openModal("schedule", state.contracts.find((item) => String(item.id) === id));
+  if (action === "generate-schedule") openModalFor("contracts", id, "schedule");
   if (action === "contract-transition") runContractTransition(id, target.dataset.transition);
   if (action === "contract-history") showContractHistory(id);
   if (action === "view-contract") viewContract(id);
   if (action === "edit-contract-from-view") {
-    const record = state.contracts.find((item) => String(item.id) === String(id));
+    // Resolved by id: the contract being viewed may not be on the current page.
     closeModal();
-    if (record) openModal("contract", record);
+    openModalFor("contracts", id, "contract");
   }
   if (action === "new-payment") openModal("payment");
   if (action === "record-payment") {
-    const debt = state.debts.find((item) => String(item.id) === id);
-    if (debt) openModal("payment", { contract_id: debt.contract_id, debt_id: debt.id, amount: debt.amount });
+    // The installment may be on a later page of the debt register, so it is
+    // fetched by id rather than assumed present in the loaded rows.
+    findRecord("debts", id).then((debt) => {
+      if (debt) openModal("payment", { contract_id: debt.contract_id, debt_id: debt.id, amount: debt.amount });
+    });
   }
   if (action === "delete-payment") deleteRecord("payment", id);
+  // Pager. `data-list` names the register, so one handler serves every table.
+  if (action === "page-prev" || action === "page-next") {
+    const kind = target.dataset.list;
+    const current = Number(state.pages[kind]?.page || 1);
+    loadList(kind, { page: action === "page-next" ? current + 1 : Math.max(1, current - 1) });
+  }
   if (action === "open-receipt") openFileInTab(`/payments/${id}/receipt`).catch((error) => showToast(error.message));
   if (action === "dismiss-reminder") dismissReminder(id);
   if (action === "remove-photo") removePropertyPhoto(target.dataset.property, target.dataset.image);
@@ -2267,6 +3521,18 @@ document.addEventListener("click", async (event) => {
     state.navOpen = !state.navOpen;
     document.getElementById("primary-nav")?.classList.toggle("nav-open", state.navOpen);
     target.setAttribute("aria-expanded", String(state.navOpen));
+  }
+  if (action === "show-alerts") showAlertsPanel();
+  if (action === "show-profile") showProfile();
+  if (action === "open-alert-view") {
+    // Route through the normal view switch, which re-applies the navigation
+    // permission filter, so a stale link can never open a forbidden screen.
+    closeModal();
+    if (allowedViewFor(target.dataset.view) !== false) {
+      state.view = target.dataset.view;
+      updateNavigation();
+      render();
+    }
   }
   // Tapping a destination closes the drawer, otherwise it stays over the content.
   if (target.closest("#primary-nav .nav-item")) {
@@ -2284,6 +3550,13 @@ document.addEventListener("click", async (event) => {
   if (action === "reload-allocation") {
     state.allocationUnassigned = state.allocationUnassigned === false ? true : false;
     loadAllocation().then(render);
+  }
+  if (action === "reload-duties") {
+    // Clear the request flag as well as the payload, so the button genuinely
+    // re-fetches rather than short-circuiting on the once-per-session guard.
+    state.duties = null;
+    state.dutiesRequested = false;
+    loadDuties().then(render);
   }
   if (action === "select-allocation") {
     state.allocationEntity = target.dataset.entity;
@@ -2323,17 +3596,28 @@ document.addEventListener("click", async (event) => {
     } catch (error) { showToast(error.message || "Unable to revoke the share."); }
   }
   if (action === "new-client") openModal("client");
-  if (action === "edit-client") openModal("client", state.clients.find((item) => String(item.id) === id));
+  if (action === "edit-client") openModalFor("clients", id, "client");
   if (action === "delete-client") deleteRecord("client", id);
   if (action === "new-appointment") openModal("appointment");
-  if (action === "edit-appointment") openModal("appointment", state.appointments.find((item) => String(item.id) === id));
+  if (action === "edit-appointment") openModalFor("appointments", id, "appointment");
   if (action === "delete-appointment") deleteRecord("appointment", id);
   if (action === "new-document") openModal("document");
-  if (action === "edit-document") openModal("document", state.documents.find((item) => String(item.id) === id));
+  if (action === "edit-document") openModalFor("documents", id, "document");
   if (action === "delete-document") deleteRecord("document", id);
   if (action === "open-document") openDocumentFile(id);
   if (action === "open-report-generate") openModal("report-generate");
   if (action === "open-report-upload") openModal("report-upload");
+  // Task assignment. Every action is offered by the server for that specific
+  // task and person; a rejected call simply reports the refusal.
+  if (action === "new-task") openTaskModal();
+  if (action === "open-task") openTask(id);
+  if (action === "task-action") submitTaskAction(id, target.dataset.taskAction);
+  if (action === "task-box") {
+    state.taskBox = target.dataset.box;
+    state.tasks = null;
+    state.tasksRequested = false;
+    loadTasks().then(() => { if (state.view === "assignments") render(); });
+  }
   if (action === "preview-report") previewReport();
   if (action === "download-report") downloadReportById(id);
   if (action === "reexport-report") openModal("report-generate", state.reportHistory.find((item) => String(item.id) === id));
@@ -2397,6 +3681,19 @@ content.addEventListener("change", (event) => {
     document.querySelectorAll('.check-grid input[name="permissions"]').forEach((input) => { input.checked = selected.includes(input.value); });
     return;
   }
+  // Priority and status filters on the assignments workspace. Both are re-read
+  // from the server rather than filtering the rows in the browser, so the counts
+  // and the badge stay consistent with the whole table, not one page of it.
+  if (event.target.dataset.action === "task-priority-filter") {
+    state.taskPriority = event.target.value;
+    loadTasks().then(() => { if (state.view === "assignments") render(); });
+    return;
+  }
+  if (event.target.dataset.action === "task-status-filter") {
+    state.taskStatus = event.target.value;
+    loadTasks().then(() => { if (state.view === "assignments") render(); });
+    return;
+  }
   const filter = event.target.dataset.filter;
   if (!filter) return;
   if (Object.prototype.hasOwnProperty.call(state.reportFilters, filter)) {
@@ -2445,18 +3742,70 @@ content.addEventListener("input", (event) => {
 });
 
 modal.addEventListener("submit", handleFormSubmit);
+modal.addEventListener("input", (event) => {
+  if (!event.target.closest("#contract-generate-form")) return;
+  if (event.target.id === "gc-original") event.target.dataset.touched = "1";
+  state.contractGen.data = generateContractFormData();
+  updateGenerateContractPreview();
+});
+modal.addEventListener("change", (event) => {
+  if (event.target.id === "gc-project") {
+    const data = generateContractFormData();
+    state.contractGen.data = { ...data, property_id: null };
+    renderGenerateContractModal();
+    updateGenerateContractPreview();
+    return;
+  }
+  if (event.target.id === "gc-client") {
+    const selected = event.target.selectedOptions?.[0];
+    const name = document.getElementById("gc-client-name");
+    const phone = document.getElementById("gc-client-phone");
+    const email = document.getElementById("gc-client-email");
+    if (name && selected?.dataset.name) name.value = selected.dataset.name;
+    if (phone && selected) phone.value = selected.dataset.phone || "";
+    if (email && selected) email.value = selected.dataset.email || "";
+  }
+  if (event.target.closest("#contract-generate-form")) {
+    state.contractGen.data = generateContractFormData();
+    updateGenerateContractPreview();
+  }
+});
 modalBackdrop.addEventListener("click", (event) => { if (event.target === modalBackdrop) closeModal(); });
 document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !modalBackdrop.hidden) closeModal(); });
+
+// Topbar search filters the rows already on screen. It re-applies after every
+// render so a filter survives navigation within the same term.
+if (globalSearch) {
+  globalSearch.addEventListener("input", applySearch);
+  globalSearch.addEventListener("search", applySearch);
+  // Cmd/Ctrl+K focuses the box, matching the shortcut shown beside it.
+  document.addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      globalSearch.focus();
+      globalSearch.select();
+    }
+    if (event.key === "Escape" && document.activeElement === globalSearch) {
+      globalSearch.value = "";
+      applySearch();
+      globalSearch.blur();
+    }
+  });
+}
 
 authForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const body = Object.fromEntries(new FormData(authForm));
+  // The chosen portal travels with the credential so the server can refuse the
+  // wrong pairing. It is a request, never a grant: `enterWorkspace` still routes
+  // on the role the server reports, never on this value.
+  body.portal = authMode === "setup" ? "admin" : authPortal;
   authSubmit.disabled = true;
   try {
     const path = authMode === "setup" ? "/auth/setup" : "/auth/login";
     const user = await api(path, { method: "POST", body: JSON.stringify(body) });
     if (!user.token) throw new Error("No session token returned");
-    setToken(user.token);
+    setToken(user.token, authRemember ? authRemember.checked : true);
     enterWorkspace(user);
   } catch (error) {
     showAuthMessage(error.message || "Unable to sign in.");
@@ -2467,12 +3816,33 @@ authForm.addEventListener("submit", async (event) => {
 
 authToggle.addEventListener("click", () => setAuthMode(authMode === "setup" ? "login" : "setup"));
 
-document.querySelector('[data-action="logout"]').addEventListener("click", async () => {
+if (portalTabs) {
+  portalTabs.addEventListener("click", (event) => {
+    const tab = event.target.closest(".portal-tab");
+    if (tab) setAuthPortal(tab.dataset.portal);
+  });
+}
+
+// There is no self-service reset endpoint, and inventing one would be a
+// security hole. Say plainly who can help instead of showing a dead form.
+if (authForgot) {
+  authForgot.addEventListener("click", () => {
+    showAuthMessage(
+      authPortal === "admin"
+        ? "A system administrator resets passwords from Administration → Users."
+        : "Ask your administrator or department head to reset your password.",
+      "info",
+    );
+  });
+}
+
+document.querySelector('[data-action="logout"]')?.addEventListener("click", async () => {
   try {
     if (getToken()) await api("/auth/logout", { method: "POST", body: "{}" });
   } catch (_) { /* sign out locally even if the request fails */ }
   endSession();
   setAuthMode("login");
+  setAuthPortal("staff");
 });
 
 async function boot() {

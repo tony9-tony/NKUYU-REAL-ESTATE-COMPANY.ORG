@@ -25,6 +25,29 @@ export const Contract = {
     if (type) { values.push(type); conditions.push(`c.contract_type=$${values.length}`); }
     return (await query(`${select} WHERE ${conditions.join(" AND ")} ORDER BY c.created_at DESC`, values)).rows;
   },
+  // Paginated twin. The count is built from the same `conditions` array the data
+  // query uses, so a filtered or scope-limited total can never exceed what the
+  // caller can actually page through.
+  async paged(projectId = null, type = null, search = null) {
+    const values = [await organizationId()];
+    const access = await currentAccess();
+    const conditions = ["c.organization_id=$1", scopeCondition("c", ENTITY, access, values)];
+    if (projectId) { values.push(projectId); conditions.push(`c.project_id=$${values.length}`); }
+    if (type) { values.push(type); conditions.push(`c.contract_type=$${values.length}`); }
+    // Server-side search, ANDed with the scope predicate so it can only narrow
+    // what this caller may already read.
+    if (search) {
+      values.push(`%${search}%`);
+      const placeholder = `$${values.length}`;
+      conditions.push(`(COALESCE(c.client_name,'') ILIKE ${placeholder} OR COALESCE(c.contract_number,'') ILIKE ${placeholder})`);
+    }
+    const where = ` WHERE ${conditions.join(" AND ")}`;
+    return {
+      sql: `${select}${where} ORDER BY c.created_at DESC, c.id DESC`,
+      countSql: `SELECT COUNT(*)::int AS total FROM contracts c${where}`,
+      values,
+    };
+  },
   async get(id) {
     const values = [id, await organizationId()];
     const access = await currentAccess();
@@ -50,9 +73,22 @@ export const Contract = {
       data.contract_number || await Contract.nextNumber(),
     ];
     ownershipValues(values, access);
+    values.push(
+      data.contract_date || null,
+      data.agreement_duration ?? null,
+      data.agreement_duration_unit || null,
+      data.client_phone || null,
+      data.client_email || null,
+      data.payment_frequency || null,
+      data.deposit_amount ?? null,
+      data.installment_count ?? null,
+      data.first_due_date || null,
+      data.template_document_id || null,
+      data.generated_document_id || null,
+    );
     const row = await queryOne(
-      `INSERT INTO contracts(organization_id,project_id,property_id,client_id,client_name,contract_type,status,value,original_price,discount_pct,discount_amount,start_date,end_date,terms,notes,requires_management_approval,contract_number,${OWNERSHIP_COLUMNS})
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING id`,
+      `INSERT INTO contracts(organization_id,project_id,property_id,client_id,client_name,contract_type,status,value,original_price,discount_pct,discount_amount,start_date,end_date,terms,notes,requires_management_approval,contract_number,${OWNERSHIP_COLUMNS},contract_date,agreement_duration,agreement_duration_unit,client_phone,client_email,payment_frequency,deposit_amount,installment_count,first_due_date,template_document_id,generated_document_id)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32) RETURNING id`,
       values,
     );
     await Contract.recordRevision(row.id, { status: data.status || "draft", action: "created", actorId: access?.userId });

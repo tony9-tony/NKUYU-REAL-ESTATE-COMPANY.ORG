@@ -5,8 +5,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { prepareTestDatabase, reapOrphanServers } from "./test_support/harness.mjs";
-import { closeDatabase } from "./backend/src/db.js";
+import { prepareTestDatabase, reapOrphanServers, connectedDatabase } from "./test_support/harness.mjs";
+import { closeDatabase, query } from "./backend/src/db.js";
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.E2E_PORT || 3177);
@@ -89,7 +89,10 @@ async function call(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (!options.form) headers["Content-Type"] = "application/json";
   if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetch(`${BASE}${path}`, { ...options, headers });
+  const body = !options.form && options.body && typeof options.body === "object"
+    ? JSON.stringify(options.body)
+    : options.body;
+  const response = await fetch(`${BASE}${path}`, { ...options, body, headers });
   const payload = await response.json().catch(() => ({}));
   return { status: response.status, payload };
 }
@@ -192,10 +195,10 @@ async function main() {
   res = await call("/reports/summary");
   assert(Number(res.payload.income_all?.total) >= 30000, `income total includes surviving payments (got ${res.payload.income_all?.total})`);
 
-  await runPropertyAndBackupTests(projectId);
+  await runPropertyAndBackupTests(projectId, clientId);
 }
 
-async function runPropertyAndBackupTests(projectId) {
+async function runPropertyAndBackupTests(projectId, clientId) {
   let res = await call("/properties", { method: "POST", body: JSON.stringify({ project_id: projectId, name: "E2E Villa", property_type: "villa", status: "available", price: 500000, location: "Dar", area: 400, bedrooms: 4, bathrooms: 3, featured: false }) });
   assert(res.status === 201, "create property without pictures (must succeed)");
   const propertyId = res.payload.id;
@@ -216,6 +219,8 @@ async function runPropertyAndBackupTests(projectId) {
 
   res = await call(`/properties/${propertyId}`);
   assert(res.payload.image_count === 1 && res.payload.cover_image_id === imageId, "property reports cover + count");
+
+  await runContractGenerationTests(projectId, propertyId, clientId);
 
   const badForm = new FormData();
   badForm.append("file", new Blob([Buffer.from("MZ.not-an-image")], { type: "application/x-msdownload" }), "evil.exe");
@@ -251,10 +256,159 @@ async function runPropertyAndBackupTests(projectId) {
   assert(res.payload.income_all && res.payload.income_30d, "summary exposes income totals");
 }
 
+async function runContractGenerationTests(projectId, propertyId, clientId) {
+  console.log("\n=== contract generation, templates and protected documents ===");
+  const templateBody = `# FULL SALE AGREEMENT
+
+Agreement {{CONTRACT_NUMBER}} between {{COMPANY_NAME}} and {{CLIENT_NAME}}.
+Contact: {{CLIENT_PHONE}} / {{CLIENT_EMAIL}}.
+Project: {{PROJECT_NAME}}. Property: {{PROPERTY_NAME}} ({{PROPERTY_NUMBER}}), {{PROPERTY_LOCATION}}.
+Contract date: {{CONTRACT_DATE}}. Term: {{AGREEMENT_DURATION}} from {{AGREEMENT_START_DATE}} to {{AGREEMENT_END_DATE}}.
+Original: {{ORIGINAL_PRICE}}. Discount: {{DISCOUNT_PERCENT}} / {{DISCOUNT_AMOUNT}}. Final: {{FINAL_PRICE}}.
+Deposit: {{DEPOSIT}}. Installments: {{INSTALLMENT_COUNT}} at {{PAYMENT_FREQUENCY}}, first due {{FIRST_DUE_DATE}}.
+
+FULL TERMS: The seller shall convey the property described above to the buyer on the terms stated in this agreement. Both parties acknowledge the purchase price and payment obligations stated above.
+
+Signed for the Seller: ____________________
+Signed by the Buyer: ____________________`;
+  const template = await call("/contract-templates", { method: "POST", body: { title: "E2E Full Agreement", body_text: templateBody } });
+  assert(template.status === 201, `authorized administrator creates a shared Documents template (${template.status})`);
+  const templateId = template.payload.id;
+
+  const badTemplate = await call("/contract-templates", { method: "POST", body: { title: "E2E Invalid Template", body_text: "Unknown {{NOT_A_CONTRACT_FIELD}}" } });
+  assert(badTemplate.status === 400 && /unknown placeholder/i.test(badTemplate.payload.error || ""), "unknown template placeholder is rejected clearly");
+  const orgId = (await query("SELECT id FROM organizations WHERE slug='mkuyu'")).rows[0].id;
+  const malformed = await query(
+    "INSERT INTO documents (organization_id,title,category,status,body_text) VALUES ($1,$2,'template','approved',$3) RETURNING id",
+    [orgId, `E2E malformed template ${Date.now()}`, "Invalid {{NOT_A_CONTRACT_FIELD}}"],
+  );
+
+  const common = {
+    project_id: projectId,
+    property_id: propertyId,
+    client_id: clientId,
+    client_name: "E2E Client",
+    client_phone: "+255 700 123 456",
+    client_email: "e2e.client@example.com",
+    contract_type: "new",
+    contract_date: "2027-01-01",
+    start_date: "2027-01-31",
+    agreement_duration: 1,
+    agreement_duration_unit: "months",
+    end_date: "2027-02-28",
+    original_price: 120000000,
+    discount_pct: 10,
+    template_document_id: templateId,
+  };
+
+  const savedToken = token;
+  const financeLogin = await call("/auth/login", { method: "POST", body: { email: "finance@demo.mkuyu.local", password: (await import("./backend/src/org/demoCredentials.js")).legacyPasswordFor("finance@demo.mkuyu.local") } });
+  token = financeLogin.payload.token || "";
+  assert(Boolean(token), "Finance Officer signs in for template RBAC checks");
+  const templateListDenied = await call("/contract-templates");
+  assert(templateListDenied.status === 403, "Finance Officer without Documents access cannot list templates");
+  const templateUseDenied = await call("/contracts/generate", { method: "POST", body: common });
+  assert(templateUseDenied.status === 403, "Finance Officer with contract access cannot use a shared template without Documents access");
+  token = savedToken;
+
+  const unknownGeneration = await call("/contracts/generate", { method: "POST", body: { ...common, template_document_id: malformed.rows[0].id } });
+  assert(unknownGeneration.status === 400 && /unknown placeholder/i.test(unknownGeneration.payload.error || ""), `generation refuses an unknown placeholder before creating the contract (${unknownGeneration.status}: ${unknownGeneration.payload.error || "no error text"})`);
+
+  const generated = await call("/contracts/generate", {
+    method: "POST",
+    body: { ...common, deposit: 8000000, installments: 10, frequency: "monthly", first_due_date: "2027-02-28", final_price: 1, discount_amount: 0, value: 1 },
+  });
+  assert(generated.status === 201, `complete contract generation succeeds (${generated.status})`);
+  const contract = generated.payload.contract || {};
+  const document = generated.payload.document || {};
+  assert(Number(contract.original_price) === 120000000 && Number(contract.discount_pct) === 10, "generation persists the submitted original price and discount percentage");
+  assert(Number(contract.discount_amount) === 12000000 && Number(contract.value) === 108000000, "generation ignores forged amounts and stores authoritative pricing");
+  assert(contract.client_phone === common.client_phone && contract.client_email === common.client_email, "contract stores entered phone and email snapshots");
+  assert(contract.agreement_duration === 1 && contract.agreement_duration_unit === "months" && contract.end_date === "2027-02-28", "generation persists duration and derived end date");
+  assert(contract.generated_document_id === document.id && contract.template_document_id === templateId, "generated document and selected template are linked to the contract");
+  assert(document.contract_id === contract.id && document.has_file, "generated full document is stored and linked back to the contract");
+  assert(generated.payload.schedule.created === 11, "generation creates the deposit and ten installments");
+  const generationTotal = generated.payload.schedule.debts.reduce((sum, debt) => sum + Number(debt.amount), 0);
+  assert(generationTotal === 108000000, `generated payment plan reconciles to contracts.value (${generationTotal})`);
+
+  const templateDocument = await call(`/documents/${templateId}`);
+  const { buildContractValues, renderContractDocument, DEFAULT_CONTRACT_TEMPLATE } = await import("./backend/src/contracts/generation.js");
+  const rendered = renderContractDocument(templateDocument.payload.body_text, buildContractValues({
+    contract,
+    project: { name: "E2E Project" },
+    property: { id: propertyId, name: "E2E Villa", location: "Dar" },
+    client: {},
+    companyName: "MKUYU",
+  }));
+  assert(rendered.includes("E2E Client") && rendered.includes(common.client_phone) && rendered.includes(common.client_email), "rendered full contract contains actual client and contact details");
+  assert(rendered.includes("E2E Project") && rendered.includes("E2E Villa") && rendered.includes("Dar"), "rendered full contract contains project and property details");
+  assert(rendered.includes("108,000,000.00") && rendered.includes("12,000,000.00"), "rendered contract contains actual discount and final price");
+  assert(rendered.includes("FULL TERMS") && rendered.includes("Signed by the Buyer") && rendered.length > 500, "rendered document contains the complete terms and signature sections");
+  assert(!/\{\{[A-Z_]+\}\}/.test(rendered), "no known or unknown raw placeholder remains in the rendered contract");
+
+  const filePath = `/documents/${document.id}/file`;
+  const opened = await fetch(`${BASE}${filePath}`, { headers: { Authorization: `Bearer ${token}` } });
+  const docxBytes = Buffer.from(await opened.arrayBuffer());
+  assert(opened.status === 200 && opened.headers.get("content-type")?.includes("wordprocessingml.document"), "Open serves the generated DOCX through the protected document route");
+  assert(docxBytes.subarray(0, 2).toString() === "PK", "stored contract is a real DOCX package");
+
+  const editor = await call(`/contracts/${contract.id}/document-content`);
+  assert(editor.status === 200 && editor.payload.document_id === document.id, "View retrieves the exact document linked to the contract");
+  assert(editor.payload.body_text.includes("FULL TERMS") && editor.payload.body_text.includes("E2E Client"), "View returns the complete readable agreement text");
+  const revisedText = `${editor.payload.body_text}\n\nCUSTOMER REVISION: The buyer has reviewed this agreement.`;
+  const saved = await call(`/contracts/${contract.id}/document-content`, { method: "PUT", body: { body_text: revisedText } });
+  assert(saved.status === 200 && saved.payload.id === document.id, "Save replaces the generated file on the same document record");
+  assert(saved.payload.original_filename.endsWith(".docx") && saved.payload.has_file, "the saved revision remains a stored DOCX");
+  const reopened = await call(`/contracts/${contract.id}/document-content`);
+  assert(reopened.payload.body_text.includes("CUSTOMER REVISION"), "reopening the modal shows the saved revision");
+  const downloaded = await fetch(`${BASE}${filePath}?download=1`, { headers: { Authorization: `Bearer ${token}` } });
+  const downloadBytes = Buffer.from(await downloaded.arrayBuffer());
+  assert(downloaded.status === 200 && /attachment/i.test(downloaded.headers.get("content-disposition") || ""), "Download serves the revised DOCX as an attachment");
+  assert(downloadBytes.subarray(0, 2).toString() === "PK", "downloaded revised contract is a DOCX package");
+
+  token = financeLogin.payload.token;
+  const documentDenied = await call(filePath);
+  assert(documentDenied.status === 403, "Finance Officer without Documents access cannot open the generated document");
+  token = savedToken;
+
+  for (const [unit, duration, expected] of [
+    ["days", 1, "2027-02-01"],
+    ["weeks", 2, "2027-02-14"],
+    ["years", 1, "2028-01-31"],
+  ]) {
+    const result = await call("/contracts/generate", { method: "POST", body: { ...common, template_document_id: null, agreement_duration_unit: unit, agreement_duration: duration, end_date: expected } });
+    assert(result.status === 201 && result.payload.contract.end_date === expected, `${unit} duration persists the correct end date (${expected})`);
+    const noPlanValues = buildContractValues({
+      contract: result.payload.contract,
+      project: { name: "E2E Project" },
+      property: { id: propertyId, name: "E2E Villa", location: "Dar" },
+      client: {},
+      companyName: "MKUYU",
+    });
+    const builtIn = renderContractDocument(DEFAULT_CONTRACT_TEMPLATE, noPlanValues);
+    assert(!/\{\{[A-Z_]+\}\}/.test(builtIn) && builtIn.includes("Not specified"), `${unit} generated contract fills optional payment placeholders explicitly`);
+  }
+
+  const ictLogin = await call("/auth/login", { method: "POST", body: { email: "icto@demo.mkuyu.local", password: (await import("./backend/src/org/demoCredentials.js")).legacyPasswordFor("icto@demo.mkuyu.local") } });
+  token = ictLogin.payload.token || "";
+  const ictGeneration = await call("/contracts/generate", { method: "POST", body: {} });
+  assert(ictGeneration.status === 403, "ICTO receives no contract-generation business authority");
+  token = savedToken;
+}
+
 try {
   startServer();
   await waitForServer();
-  console.log(`E2E server ready on :${PORT} (database: mkuyu_org)`);
+  // Report the database the server is ACTUALLY connected to, read from the
+  // connection rather than assumed. A hardcoded name here once claimed the live
+  // database for a run that was in fact isolated, which is exactly the kind of
+  // message that hides a real isolation bug.
+  const connected = await connectedDatabase();
+  if (connected === process.env.MKUYU_LIVE_DATABASE) {
+    console.error(`\nREFUSING TO RUN: the E2E server is connected to the LIVE database "${connected}".\n`);
+    process.exit(1);
+  }
+  console.log(`E2E server ready on :${PORT} (database: ${connected}, live is ${process.env.MKUYU_LIVE_DATABASE})`);
   await main();
   if (process.exitCode) {
     if (serverLogs.trim()) console.error("---- server logs ----\n" + serverLogs);

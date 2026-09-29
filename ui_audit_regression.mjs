@@ -28,6 +28,34 @@ check(/action === "toggle-menu"/.test(appSource), "the mobile menu button has a 
 check(/\.nav\.nav-open/.test(cssSource), "the mobile navigation drawer has an open state");
 check(!/\.nav \{ grid-template-columns: repeat\(5/.test(cssSource), "the 5-column mobile grid that clipped items 6+ is gone");
 
+console.log("\n-- the stylesheet parses as written --");
+// A single unclosed rule does not break only itself: the browser keeps reading
+// to the next `}`, re-parenting every following rule. The result is a page that
+// looks half-styled (unstyled inputs, content sliding under the sidebar) while
+// any check that merely counts `{` vs `}` still reports a clean balance. This is
+// the check as tools/check_css_balance.mjs performs it, inlined so a stylesheet
+// edit that breaks nesting fails this suite rather than only the side tool.
+{
+  // Same check as tools/check_css_balance.mjs, inlined so a stylesheet edit that
+  // breaks nesting fails this suite rather than only the side tool.
+  let depth = 0;
+  let inComment = false;
+  const escaped = [];
+  cssSource.split(/\r?\n/).forEach((raw, i) => {
+    const line = raw.trim();
+    if (inComment) { if (raw.includes("*/")) inComment = false; return; }
+    if (line.startsWith("/*") && !raw.includes("*/")) inComment = true;
+    if (line.startsWith("/*") || line.endsWith("*/")) return;
+    const selectorish = /^[[\]*.\w#:>+~(-]/.test(line) || line.startsWith("@") || line.startsWith(":root") || line.startsWith("*");
+    if (depth === 0 && line && line !== "}" && line !== ";" && !line.endsWith(",") && !selectorish) {
+      escaped.push(i + 1);
+    }
+    depth += (raw.match(/{/g) || []).length - (raw.match(/}/g) || []).length;
+  });
+  check(depth === 0, `brace nesting is balanced (ends at depth ${depth})`);
+  check(escaped.length === 0, `no declaration escaped its rule${escaped.length ? ` (line ${escaped.join(", ")})` : ""}`);
+}
+
 console.log("\n-- picture blobs are released --");
 check(/URL\.revokeObjectURL/.test(appSource), "image blob URLs are revoked");
 check(/clearImageBlobCache\(\)/.test(appSource), "the cache is cleared on sign-out and after a photo is removed");

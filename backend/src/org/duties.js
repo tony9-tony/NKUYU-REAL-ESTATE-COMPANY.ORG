@@ -75,10 +75,12 @@ export const ROLE_DUTIES = {
     { key: "system_administration", label: "Administer the system", description: "Owns users, roles, permissions and organization settings.", permissions: ["manage_users", "manage_roles", "manage_permissions", "manage_settings", "view", "create", "edit", "delete"] },
     { key: "audit_accountability", label: "Maintain audit accountability", description: "Keeps the audit trail and backup discipline intact, and holds the only unrestricted view of it.", permissions: ["view", "view_reports", "view_audit", "export"] },
     { key: "business_oversight", label: "Unrestricted business oversight", description: "Break-glass access to every module when the system is misconfigured.", permissions: ["access_projects", "access_properties", "access_clients", "access_leads", "access_contracts", "access_documents", "access_appointments", "access_debts", "access_payments", "access_reminders", "access_reports", "access_follow_ups", "approve", "view_financial", "submit_contract", "review_legal", "request_changes", "approve_legal", "validate_finance", "approve_management"] },
+    { key: "task_assignment_administration", label: "Administer task assignment", description: "Break-glass: may assign and review organization-wide when the configured authority is unavailable.", permissions: ["assign_tasks", "review_tasks"] },
   ],
   "Managing Director": [
     { key: "business_direction", label: "Set business direction", description: "Owns strategy across every business module.", permissions: ["access_projects", "access_properties", "access_clients", "access_leads", "access_contracts", "access_documents", "access_appointments", "access_follow_ups", "view", "create", "edit", "delete", "approve", "view_reports", "export"] },
     { key: "management_approval", label: "Approve contracts on behalf of management", description: "The MD decision point. Does not review or rewrite legal terms.", permissions: ["approve_management", "request_changes", "access_reports"] },
+    { key: "work_assignment", label: "Assign organization work", description: "Directs work to any department and gives the final decision on work routed up to management.", permissions: ["assign_tasks", "review_tasks"] },
     { key: "financial_oversight", label: "Oversee financial performance", description: "Sees income, outstanding balances and financial reporting.", permissions: ["access_debts", "access_payments", "access_reminders", "view_financial", "view_reports", "export"] },
     { key: "management_reporting", label: "Receive management reporting", description: "Reviews organization-wide performance across departments.", permissions: ["view_reports", "export"] },
   ],
@@ -101,6 +103,7 @@ export const ROLE_DUTIES = {
     { key: "party_verification", label: "Verify the parties on a contract", description: "Confirms the client and project named before the contract is signed.", permissions: ["access_clients", "access_projects", "view"] },
     { key: "contract_lifecycle_control", label: "Control the contract lifecycle", description: "Releases the approved contract to the customer and records the signature.", permissions: ["approve_legal", "access_contracts"] },
     { key: "legal_team_leadership", label: "Supervise the legal desk", description: "Reviews legal work and escalates to management when required.", permissions: ["request_changes", "access_reports", "view_reports"] },
+    { key: "work_assignment", label: "Assign work within the legal desk", description: "Hands work to legal staff and reviews what they submit. Cannot assign outside the department.", permissions: ["assign_tasks", "review_tasks"] },
     { key: "legal_reporting", label: "Report on the legal register", description: "Exports the contract register and its history for management.", permissions: ["access_reports", "view_reports", "export"] },
   ],
   "Legal Officer": [
@@ -117,6 +120,7 @@ export const ROLE_DUTIES = {
     { key: "collections_management", label: "Manage collections", description: "Chases arrears, raises overdue balances and records payments.", permissions: ["access_debts", "access_payments", "access_follow_ups", "access_reminders", "view", "create", "edit", "view_financial"] },
     { key: "finance_reporting", label: "Produce finance reporting", description: "Publishes income, debt and collection reporting for management.", permissions: ["access_reports", "view_reports", "export", "view_financial"] },
     { key: "finance_team_leadership", label: "Supervise the finance desk", description: "Reviews and approves finance work within the department.", permissions: ["approve", "view", "edit", "access_reports"] },
+    { key: "work_assignment", label: "Assign work within the finance desk", description: "Hands work to finance staff and reviews what they submit. Cannot assign outside the department.", permissions: ["assign_tasks", "review_tasks"] },
   ],
   "Finance Officer": [
     { key: "payment_recording", label: "Record payments and receipts", description: "Logs money received and attaches receipts.", permissions: ["access_payments", "access_debts", "view", "create", "edit", "view_financial"] },
@@ -130,6 +134,7 @@ export const ROLE_DUTIES = {
     { key: "team_supervision", label: "Supervise the department team", description: "Reviews team output and removes records that are no longer valid.", permissions: ["delete", "view", "edit"] },
     { key: "department_reporting", label: "Report on department performance", description: "Turns departmental activity into management reporting.", permissions: ["access_reports", "view_reports", "export"] },
     { key: "deal_initiation_supervision", label: "Supervise deal initiation", description: "Ensures deals are raised correctly and submitted to Legal. Does not approve them.", permissions: ["submit_contract", "request_changes", "access_contracts"] },
+    { key: "work_assignment", label: "Assign work within the department", description: "Hands work to department staff and reviews what they submit. Cannot assign outside the department.", permissions: ["assign_tasks", "review_tasks"] },
   ],
   "Sales, Marketing & Operations Officer": [
     { key: "deal_initiation", label: "Initiate the deal", description: "Creates the customer, property and project detail a contract needs.", permissions: ["access_clients", "access_properties", "access_projects", "view", "create", "edit"] },
@@ -165,6 +170,7 @@ export const ROLE_DUTIES = {
   ],
   "Customer Service Manager": [
     { key: "customer_service_leadership", label: "Supervise the customer service desk", description: "Reviews service quality, workload and outstanding customer commitments.", permissions: ["access_clients", "access_appointments", "access_leads", "access_follow_ups", "view", "create", "edit", "approve"] },
+    { key: "work_assignment", label: "Assign work within the service desk", description: "Hands work to service staff and reviews what they submit. Cannot assign outside the department.", permissions: ["assign_tasks", "review_tasks"] },
     { key: "service_quality", label: "Own service quality", description: "Removes or corrects records that misrepresent a customer commitment.", permissions: ["delete", "view", "edit"] },
     { key: "escalation_management", label: "Manage escalations", description: "Routes contract questions to Legal and property questions to the property desk. Deliberately no contract module access.", permissions: ["access_properties", "view"] },
     { key: "customer_reporting", label: "Report on customer service", description: "Reports response times, follow-up completion and enquiry volume.", permissions: ["access_reports", "view_reports", "export"] },
@@ -182,6 +188,52 @@ export const ROLE_DUTIES = {
     { key: "appointment_coordination", label: "Coordinate appointments", description: "Books and confirms appointments on behalf of the office.", permissions: ["access_appointments", "view", "create", "edit"] },
   ],
 };
+/**
+ * The whole organization as a department -> role -> duty tree.
+ *
+ * Reads from ROLE_HOME_DEPARTMENT and ROLE_DUTIES (the same declarations the
+ * access-matrix audit uses) rather than re-deriving anything, so this view and
+ * the enforcement cannot disagree about who owns what.
+ *
+ * `permissionLabels` turns bare permission keys into the human wording stored in
+ * the permissions table, so the UI never has to show `approve_legal`.
+ */
+export function departmentDutyTree(permissionLabels = new Map()) {
+  const departments = new Map();
+  const add = (name) => {
+    if (!departments.has(name)) departments.set(name, { name, roles: [], dutyCount: 0 });
+    return departments.get(name);
+  };
+  for (const [role, department] of Object.entries(ROLE_HOME_DEPARTMENT)) {
+    add(department);
+  }
+  for (const [role, department] of Object.entries(ROLE_HOME_DEPARTMENT)) {
+    const duties = (ROLE_DUTIES[role] || []).map((duty) => ({
+      key: duty.key,
+      label: duty.label,
+      description: duty.description,
+      permissions: duty.permissions,
+      permissionLabels: duty.permissions.map((key) => ({ key, label: permissionLabels.get(key) || key })),
+      // A duty is an approval duty when it carries a contract-lifecycle
+      // permission - those are the ones that actually move a contract forward,
+      // so the UI can single them out from routine duties.
+      approvalDuty: duty.permissions.some((permission) => permission in CONTRACT_OWNERSHIP),
+    }));
+    const entry = add(department);
+    entry.roles.push({ role, duties, dutyCount: duties.length });
+    entry.dutyCount += duties.length;
+  }
+  // Highest authority first, so MANAGEMENT leads and ICT & ADMINISTRATION trails.
+  const order = ["MANAGEMENT", "FINANCE & ACCOUNTS", "SALES, MARKETING & OPERATIONS", "LEGAL", "CUSTOMER SERVICE", "ICT & ADMINISTRATION"];
+  return [...departments.values()]
+    .sort((a, b) => {
+      const left = order.indexOf(a.name);
+      const right = order.indexOf(b.name);
+      return (left === -1 ? order.length : left) - (right === -1 ? order.length : right) || a.name.localeCompare(b.name);
+    })
+    .map((entry) => ({ ...entry, roles: entry.roles.sort((a, b) => a.role.localeCompare(b.role)) }));
+}
+
 // ---------------------------------------------------------------------------
 // Consistency checks. These are the "both directions" audit the access matrix
 // needs, written as pure functions so the test can assert them directly and

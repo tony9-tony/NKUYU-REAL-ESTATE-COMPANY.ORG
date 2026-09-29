@@ -11,6 +11,24 @@ export const Project = {
     const scope = scopeCondition("p", ENTITY, access, values);
     return (await query(`SELECT p.* FROM projects p WHERE p.organization_id=$1 AND ${scope} ORDER BY p.created_at DESC`, values)).rows;
   },
+  // Paginated twin of `all`. The count reuses the same `scope` fragment, so it can
+  // never report projects the caller is not allowed to see.
+  async paged(search = null) {
+    const values = [await organizationId()];
+    const access = await currentAccess();
+    const scope = scopeCondition("p", ENTITY, access, values);
+    const conditions = ["p.organization_id=$1", scope];
+    if (search) {
+      values.push(`%${search}%`);
+      conditions.push(`COALESCE(p.name,'') ILIKE $${values.length}`);
+    }
+    const where = ` WHERE ${conditions.join(" AND ")}`;
+    return {
+      sql: `SELECT p.* FROM projects p${where} ORDER BY p.created_at DESC, p.id DESC`,
+      countSql: `SELECT COUNT(*)::int AS total FROM projects p${where}`,
+      values,
+    };
+  },
   async get(id) {
     const values = [id, await organizationId()];
     const access = await currentAccess();

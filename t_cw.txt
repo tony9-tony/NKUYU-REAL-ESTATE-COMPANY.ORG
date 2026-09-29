@@ -1,7 +1,3 @@
-
-> realestate-system@1.0.0 test:clientflow
-> node --import ./test_support/guard.mjs client_workflow_test.mjs
-
 [guard] using existing test database "mkuyu_org_test"
 [guard] live database    : mkuyu_org  (never written to)
 [guard] test database    : mkuyu_org_test
@@ -20,7 +16,7 @@ ok    the contract carries the discounted final price (90000000.00)
 ok    a client with a contract can be completed (200)
 ok    the completed client is active
 ok    a lead is created without a contract (201)
-ok    a lead can still be converted to a client record (201 {"id":13,"organization_id":1,"project_id":null,"name":"Workflow Lead 1790596837539","email":null,"phone":null,"client_type":"buyer","status":"lead","notes":null)
+ok    a lead can still be converted to a client record (201 {"id":51070,"organization_id":1,"project_id":null,"name":"Workflow Lead 1790668904371","email":null,"phone":null,"client_type":"buyer","status":"lead","notes":n)
 ok    a converted lead is a prospect, not a completed client (lead)
 ok    a contract_id that does not exist is refused (404)
 ok    a caller without the contracts module cannot create a completed client (400, clients=true)

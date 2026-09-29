@@ -24,6 +24,28 @@ const base = server.base;
 let failures = 0;
 const check = (ok, label) => { console.log(`${ok ? "ok  " : "FAIL"}  ${label}`); if (!ok) failures += 1; };
 
+console.log("=== isolated generation migration ===");
+const contractColumnRows = (await query(
+  "SELECT column_name, is_nullable, column_default FROM information_schema.columns WHERE table_schema='public' AND table_name='contracts'",
+)).rows;
+const contractColumns = new Set(contractColumnRows.map((row) => row.column_name));
+const contractColumnInfo = new Map(contractColumnRows.map((row) => [row.column_name, row]));
+for (const column of [
+  "client_phone", "client_email", "original_price", "discount_pct", "discount_amount", "value",
+  "start_date", "end_date", "agreement_duration", "agreement_duration_unit", "deposit_amount",
+  "installment_count", "payment_frequency", "first_due_date", "contract_number", "contract_date",
+  "template_document_id", "generated_document_id",
+]) {
+  check(contractColumns.has(column), `contracts.${column} exists after isolated migration`);
+}
+for (const column of ["client_phone", "client_email"]) {
+  const info = contractColumnInfo.get(column);
+  check(info?.is_nullable === "YES" && info.column_default === null, `contracts.${column} is nullable and has no default/backfill`);
+}
+for (const duplicate of ["final_price", "agreement_start_date", "agreement_end_date", "deposit"]) {
+  check(!contractColumns.has(duplicate), `contracts.${duplicate} was not added as a duplicate field`);
+}
+
 async function call(path, { token, method = "GET", body } = {}) {
   const response = await fetch(`${base}${path}`, {
     method,
@@ -188,15 +210,17 @@ try {
   // a Sales-owned contract is department-scoped, so Finance and Legal correctly
   // cannot see it. The 404 that taught us this is the record-scope rule working.
   const admin = await call("/auth/login", { method: "POST", body: { email: "admin@mkuyu.local", password: legacyPasswordFor("admin@mkuyu.local") } });
-  const adminContract = await call("/contracts", { token: admin.body.token, method: "POST", body: { ...baseBody, original_price: 100000, discount_pct: 10 } });
+  const adminContract = await call("/contracts", { token: admin.body.token, method: "POST", body: { ...baseBody, original_price: 120000000, discount_pct: 10 } });
   const adminContractId = adminContract.body.id;
-  check(Number(adminContract.body.final_price) === 90000, "an administrator-created contract is priced the same way (90,000)");
+  check(Number(adminContract.body.discount_amount) === 12000000, "the server calculates a 12,000,000 discount");
+  check(Number(adminContract.body.value) === 108000000, "contracts.value stores the 108,000,000 final price");
 
   const finance = await call("/auth/login", { method: "POST", body: { email: "finance.manager@demo.mkuyu.local", password: legacyPasswordFor("finance.manager@demo.mkuyu.local") } });
-  const schedule = await call(`/contracts/${adminContractId}/schedule`, { token: finance.body.token, method: "POST", body: { deposit: 0, installments: 3, first_due_date: "2027-01-05" } });
+  const schedule = await call(`/contracts/${adminContractId}/schedule`, { token: finance.body.token, method: "POST", body: { deposit: 8000000, installments: 10, first_due_date: "2027-01-05" } });
   check(schedule.status === 201, `a payment schedule is generated (${schedule.status})`);
   const planTotal = Number((schedule.body.debts || []).reduce((sum, debt) => sum + Number(debt.amount), 0));
-  check(planTotal === 90000, `the schedule totals the FINAL price 90000, not the original (got ${planTotal})`);
+  check((schedule.body.debts || []).length === 11, `the schedule contains one deposit and ten installments (got ${(schedule.body.debts || []).length})`);
+  check(planTotal === 108000000, `deposit plus installments reconcile to the FINAL value 108000000, not 120000000 (got ${planTotal})`);
 
   const afterRow = (await query("SELECT value, contract_number, client_name FROM contracts WHERE id=$1", [before.id])).rows[0];
   check(Number(afterRow.value) === Number(beforeRow.value), `an existing contract keeps its value (${beforeRow.value} -> ${afterRow.value})`);

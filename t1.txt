@@ -1,9 +1,0 @@
-
-UNIT_TESTS_PASSED
-> node data_integrity_check.mjs
-DATA_INTEGRITY_OK
-EXPORT_ALL_PASSED
-=== audit integrity (Task 6/7) ===
-DEMO_ACCOUNTS_ALL_PASSED
-
-

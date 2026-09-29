@@ -18,6 +18,63 @@ function verifyPassword(password, stored) {
   return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
 }
 
+// ---------------------------------------------------------------------------
+// PORTAL BOUNDARY
+//
+// The sign-in screen offers two portals. Which one an account may open is NOT a
+// new permission and NOT a new role: it is the account's own `users.role`, the
+// same column every existing admin gate already reads (`requireAdmin()`,
+// `accessForUser()`, the `/org` administration routes). Deriving the portal
+// from that column keeps one source of truth, so nothing here can drift away
+// from the authorization model or weaken it.
+//
+//     portal "staff" -> role 'staff'      portal "admin" -> role 'admin'
+//
+// A client that claims a portal its account does not belong to is refused, and
+// the refusal cannot be side-stepped by calling the API directly or by editing
+// the request: the check runs against the account the password authenticated.
+// ---------------------------------------------------------------------------
+const STAFF_PORTAL = "staff";
+const ADMIN_PORTAL = "admin";
+
+/** The portal an account is entitled to, straight from its role. */
+function portalForUser(user) {
+  return user?.role === "admin" ? ADMIN_PORTAL : STAFF_PORTAL;
+}
+
+function portalError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+/**
+ * Confirms the account may enter the portal it asked for, and returns the
+ * portal that was actually granted.
+ *
+ * `requested` is optional. A caller that sends nothing - which is every
+ * pre-existing script and test, none of which know about portals - is given its
+ * own portal, exactly the outcome it had before the portal existed. An explicit
+ * claim must match the account, or the login is refused.
+ *
+ * Call this only AFTER the password has been verified: the refusal names the
+ * account's portal, which must never be learnable without the credential.
+ */
+function resolvePortal(requested, user) {
+  const own = portalForUser(user);
+  if (requested === undefined || requested === null || requested === "") return own;
+  const asked = String(requested).trim().toLowerCase();
+  if (asked !== STAFF_PORTAL && asked !== ADMIN_PORTAL) {
+    throw portalError(400, 'portal must be either "staff" or "admin"');
+  }
+  if (asked !== own) {
+    throw portalError(403, own === ADMIN_PORTAL
+      ? "These credentials belong to an Admin account. Please use Admin Portal."
+      : "These credentials belong to a Staff account. Please use Staff Portal.");
+  }
+  return asked;
+}
+
 function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
@@ -63,4 +120,6 @@ export {
   tokenFromRequest,
   publicUser,
   requireAuth,
+  portalForUser,
+  resolvePortal,
 };

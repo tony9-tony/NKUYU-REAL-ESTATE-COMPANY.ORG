@@ -16,6 +16,29 @@ export const Payment = {
     }
     return (await query(`${paymentSelect} WHERE ${c.join(" AND ")} ORDER BY p.paid_at DESC,p.id DESC`, values)).rows;
   },
+  // Paginated twin. Same `c` array feeds the data query and the count, so filters
+  // (project, contract, method, date window) scope the total identically.
+  async paged(filters = {}) {
+    const values = [await organizationId()];
+    const access = await currentAccess();
+    const c = ["p.organization_id=$1", scopeCondition("p", ENTITY, access, values)];
+    for (const [key, sql] of [["projectId", "c.project_id"], ["contractId", "p.contract_id"], ["method", "p.method"], ["from", "p.paid_at >="], ["to", "p.paid_at <="]]) {
+      if (filters[key]) { values.push(filters[key]); c.push(`${sql} $${values.length}`); }
+    }
+    if (filters.search) {
+      values.push(`%${filters.search}%`);
+      const placeholder = `$${values.length}`;
+      c.push(`(COALESCE(p.client_name,'') ILIKE ${placeholder} OR COALESCE(p.reference,'') ILIKE ${placeholder})`);
+    }
+    const where = ` WHERE ${c.join(" AND ")}`;
+    return {
+      sql: `${paymentSelect}${where} ORDER BY p.paid_at DESC, p.id DESC`,
+      // The filter conditions reference joined columns (c.project_id), so the
+      // count needs the same join rather than a bare `FROM payments p`.
+      countSql: `SELECT COUNT(*)::int AS total FROM payments p JOIN contracts c ON c.id=p.contract_id${where}`,
+      values,
+    };
+  },
   async get(id) {
     const values = [id, await organizationId()];
     const access = await currentAccess();

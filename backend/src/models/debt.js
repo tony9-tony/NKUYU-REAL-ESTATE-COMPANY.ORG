@@ -47,6 +47,27 @@ export const Debt = {
     if (projectId) { values.push(projectId); conditions.push(`c.project_id=$${values.length}`); }
     return (await query(`${select} WHERE ${conditions.join(" AND ")} ORDER BY d.due_date ASC,d.created_at DESC`, values)).rows.map(normalize);
   },
+  // Paginated twin. `due_date` can repeat and is not unique, so `created_at` and
+  // then `id` make the order total - otherwise a row could appear on two pages.
+  async paged(status = null, projectId = null, search = null) {
+    const values = [await organizationId()];
+    const access = await currentAccess();
+    const conditions = ["d.organization_id=$1", scopeCondition("d", ENTITY, access, values)];
+    if (status) { values.push(status); conditions.push(`d.status=$${values.length}`); }
+    if (projectId) { values.push(projectId); conditions.push(`c.project_id=$${values.length}`); }
+    if (search) {
+      values.push(`%${search}%`);
+      const placeholder = `$${values.length}`;
+      conditions.push(`(COALESCE(d.client_name,'') ILIKE ${placeholder} OR COALESCE(d.notes,'') ILIKE ${placeholder})`);
+    }
+    const where = ` WHERE ${conditions.join(" AND ")}`;
+    return {
+      sql: `${select}${where} ORDER BY d.due_date ASC, d.created_at DESC, d.id DESC`,
+      // The project filter references the joined `contracts` table.
+      countSql: `SELECT COUNT(*)::int AS total FROM debts d JOIN contracts c ON c.id = d.contract_id${where}`,
+      values,
+    };
+  },
   async get(id) {
     const values = [id, await organizationId()];
     const access = await currentAccess();

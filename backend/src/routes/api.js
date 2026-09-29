@@ -13,6 +13,7 @@ import { Reminder } from "../models/reminder.js";
 import { Report } from "../models/report.js";
 import { REPORT_TYPES, REPORT_TYPE_IDS, PAYMENT_METHODS, reportTypeLabel, reportTypeIsFinancial } from "../models/reportTypes.js";
 import { Property, Client, Appointment, Document, PropertyImage } from "../models/catalog.js";
+import { paginatedList, paginationRequested, parsePagination, searchTerm } from "../pagination.js";
 import {
   hashPassword,
   verifyPassword,
@@ -21,6 +22,8 @@ import {
   tokenFromRequest,
   publicUser,
   requireAuth,
+  portalForUser,
+  resolvePortal,
 } from "../auth.js";
 import db, { DATABASE_URL, query, queryOne, withTransaction } from "../db.js";
 import { buildReport, parseFilters } from "../reports/builders.js";
@@ -54,6 +57,15 @@ import {
   availableActions,
   canTransition,
 } from "../contracts/workflow.js";
+import {
+  DEFAULT_CONTRACT_TEMPLATE,
+  PAYMENT_FREQUENCIES,
+  buildContractValues,
+  monthsPerFrequency,
+  produceContractDocument,
+  renderContractDocument,
+} from "../contracts/generation.js";
+import { CONTRACT_PLACEHOLDERS, placeholdersUsed, unknownPlaceholders } from "../contracts/workflow.js";
 
 const router = Router();
 const execFileAsync = promisify(execFile);
@@ -72,7 +84,7 @@ const clientTypes = new Set(["buyer", "seller", "landlord", "tenant"]);
 const clientStatuses = new Set(["lead", "active", "inactive"]);
 const appointmentTypes = new Set(["viewing", "call", "meeting", "inspection"]);
 const appointmentStatuses = new Set(["scheduled", "completed", "cancelled"]);
-const documentCategories = new Set(["agreement", "title", "invoice", "receipt", "report", "permit", "other"]);
+const documentCategories = new Set(["agreement", "title", "invoice", "receipt", "report", "permit", "template", "other"]);
 const documentStatuses = new Set(["pending", "approved", "archived"]);
 const paymentMethods = new Set(PAYMENT_METHODS.map((entry) => entry.value));
 const MAX_PROPERTY_IMAGES = 12;
@@ -92,10 +104,17 @@ function route(handler) {
   };
 }
 
+// Every primary key in this schema is `INTEGER GENERATED ... AS IDENTITY`, i.e.
+// a 32-bit signed integer. A value above that is well-formed as a JS integer but
+// cannot exist in the database: passing it through made PostgreSQL raise
+// "integer out of range" and surface as a 500 instead of the 400 the caller
+// deserves. Rejecting it here keeps an unrunnable id a client error.
+const MAX_INT4 = 2147483647;
+
 function parseId(value, field = "id", optional = false) {
   if (optional && (value === undefined || value === null || value === "")) return null;
   const id = Number(value);
-  if (!Number.isInteger(id) || id < 1) throw new HttpError(400, `${field} must be a positive integer`);
+  if (!Number.isInteger(id) || id < 1 || id > MAX_INT4) throw new HttpError(400, `${field} must be a positive integer`);
   return id;
 }
 
@@ -203,7 +222,9 @@ async function validateContract(body, current = {}) {
     notes: optionalText(body.notes ?? current.notes, "notes"),
     requires_management_approval: Boolean(body.requires_management_approval ?? current.requires_management_approval),
   };
-  if (data.client_id) requireRecord(await Client.get(data.client_id), "Client");
+  const client = data.client_id ? requireRecord(await Client.get(data.client_id), "Client") : null;
+  data.client_phone = optionalText(body.client_phone || client?.phone, "client_phone", 40);
+  data.client_email = validEmail(body.client_email || client?.email, "client_email");
   if (data.property_id) {
     const property = requireRecord(await Property.get(data.property_id), "Property");
     // The chain the spec describes is Customer <- Property <- Project <- Contract,
@@ -216,10 +237,42 @@ async function validateContract(body, current = {}) {
   return data;
 }
 
+// Adds a whole number of months (or the equivalent in days/weeks/years) to a
+// YYYY-MM-DD string and returns YYYY-MM-DD. Used to check that a stated
+// agreement end date actually matches a stated duration, and to derive one when
+// the office only gave a duration. UTC throughout, so the result never depends
+// on the server's timezone or on a daylight-saving boundary.
+function addMonths(dateString, months, unit = "months") {
+  const match = String(dateString).slice(0, 10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return dateString;
+  const [, year, month, day] = match.map(Number);
+  if (unit === "days" || unit === "weeks") {
+    const days = unit === "weeks" ? months * 7 : months;
+    const target = new Date(Date.UTC(year, month - 1, day + days));
+    return `${target.getUTCFullYear()}-${String(target.getUTCMonth() + 1).padStart(2, "0")}-${String(target.getUTCDate()).padStart(2, "0")}`;
+  }
+  const targetMonth = month - 1 + (unit === "years" ? months * 12 : months);
+  const anchor = new Date(Date.UTC(year, targetMonth, 1));
+  const lastDay = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth() + 1, 0)).getUTCDate();
+  return `${anchor.getUTCFullYear()}-${String(anchor.getUTCMonth() + 1).padStart(2, "0")}-${String(Math.min(day, lastDay)).padStart(2, "0")}`;
+}
+
+/** Today as YYYY-MM-DD, read from the database so every process agrees. */
+async function todayDate() {
+  const row = await queryOne("SELECT to_char(NOW(), 'YYYY-MM-DD') AS today");
+  return row?.today || new Date().toISOString().slice(0, 10);
+}
+
 // Builds an equal-installment schedule: optional deposit due at start, then N
-// monthly installments. Cents-safe: the last installment absorbs rounding.
-// Dates are computed in UTC to stay independent of the server timezone.
-function buildSchedule(contract, { deposit, installments, firstDueDate }) {
+// installments on the requested frequency. Cents-safe: the last installment
+// absorbs rounding. Dates are computed in UTC to stay independent of the server
+// timezone.
+//
+// `monthsPerStep` is 1 for the monthly default this function has always used, so
+// an existing caller that sends no frequency gets exactly the schedule it got
+// before. It is supplied by contracts/generation.js, which is also where the
+// frequency vocabulary lives - there is one schedule builder, not two.
+function buildSchedule(contract, { deposit, installments, firstDueDate, monthsPerStep = 1 }) {
   const rows = [];
   const start = contract.start_date || firstDueDate;
   if (deposit > 0) {
@@ -228,13 +281,14 @@ function buildSchedule(contract, { deposit, installments, firstDueDate }) {
   const remaining = Math.round((contract.value - deposit) * 100) / 100;
   const base = Math.floor((remaining / installments) * 100) / 100;
   const [year, month, day] = firstDueDate.split("-").map(Number);
+  const step = Number.isInteger(monthsPerStep) && monthsPerStep > 0 ? monthsPerStep : 1;
   let allocated = 0;
   for (let index = 0; index < installments; index += 1) {
     const amount = index === installments - 1
       ? Math.round((remaining - allocated) * 100) / 100
       : base;
     allocated = Math.round((allocated + amount) * 100) / 100;
-    const anchor = new Date(Date.UTC(year, month - 1 + index, 1));
+    const anchor = new Date(Date.UTC(year, month - 1 + index * step, 1));
     const lastDay = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth() + 1, 0)).getUTCDate();
     const dueDay = Math.min(day, lastDay);
     const dueDate = `${anchor.getUTCFullYear()}-${String(anchor.getUTCMonth() + 1).padStart(2, "0")}-${String(dueDay).padStart(2, "0")}`;
@@ -255,7 +309,13 @@ function validateSchedule(body) {
   const deposit = nonNegativeNumber(body.deposit, "deposit", 0);
   const firstDueDate = optionalDate(body.first_due_date, "first_due_date");
   if (!firstDueDate) throw new HttpError(400, "first_due_date is required");
-  return { installments, deposit, firstDueDate };
+  // An unknown frequency is refused rather than silently treated as monthly,
+  // so a typo cannot quietly produce the wrong due dates.
+  const frequency = body.frequency === undefined || body.frequency === null || body.frequency === "" ? "monthly" : String(body.frequency).toLowerCase();
+  if (!PAYMENT_FREQUENCIES.includes(frequency)) {
+    throw new HttpError(400, `frequency must be one of ${PAYMENT_FREQUENCIES.join(", ")}`);
+  }
+  return { installments, deposit, firstDueDate, frequency };
 }
 
 function validateDebt(body, current = {}) {
@@ -440,7 +500,7 @@ function historyFilters(query = {}) {
 
 function documentResponse(document) {
   if (!document) return document;
-  return { ...document, has_file: Boolean(document.stored_name), file_name: document.original_filename || null };
+  return { ...document, has_file: storedFileExists(documentUploadsDir, document.stored_name), file_name: document.original_filename || null };
 }
 
 /**
@@ -533,12 +593,16 @@ router.post("/auth/setup", route(async (req, res) => {
   const email = validEmail(body.email, "email");
   const password = typeof body.password === "string" ? body.password : "";
   if (password.length < 8 || password.length > 128) throw new HttpError(400, "password must be between 8 and 128 characters");
+  // Checked BEFORE the insert. First-run setup can only ever succeed once, so a
+  // refusal that happened after the write would leave an administrator behind
+  // and make every later setup attempt fail with "already configured".
+  const portal = resolvePortal(body.portal, { role: "admin" });
   const orgId = await organizationId();
   const result = await queryOne("INSERT INTO users (organization_id, email, password_hash, display_name, role) VALUES ($1, $2, $3, $4, 'admin') RETURNING *", [orgId, email, hashPassword(password), displayName]);
   await provisionSystemAdministrator(result.id);
-  await audit({ user: { id: result.id } }, "login", "auth", result.id, { method: "setup" });
+  await audit({ user: { id: result.id } }, "login", "auth", result.id, { method: "setup", portal });
   const session = await createSession(result.id);
-  res.status(201).json({ ...await publicUser(result), ...session });
+  res.status(201).json({ ...await publicUser(result), ...session, portal });
 }));
 router.post("/auth/login", route(async (req, res) => {
   const body = req.body || {};
@@ -546,10 +610,16 @@ router.post("/auth/login", route(async (req, res) => {
   const password = typeof body.password === "string" ? body.password : "";
   const user = await queryOne("SELECT * FROM users WHERE LOWER(email) = LOWER($1)", [email]);
   if (!user || !verifyPassword(password, user.password_hash)) throw new HttpError(401, "email or password is incorrect");
+  // Portal boundary. Deliberately AFTER the password check: a wrong password
+  // must not reveal which portal an address belongs to, so an attacker cannot
+  // probe for administrator accounts. `portal` is only a claim - the account's
+  // own role decides whether it is honoured, which is why a hand-crafted
+  // request cannot get further than the sign-in screen did.
+  const portal = resolvePortal(body.portal, user);
   if (user.role === "admin") await provisionSystemAdministrator(user.id);
   const session = await createSession(user.id);
-  await audit({ user }, "login", "auth", user.id);
-  res.json({ ...await publicUser(user), ...session });
+  await audit({ user }, "login", "auth", user.id, { portal });
+  res.json({ ...await publicUser(user), ...session, portal });
 }));
 router.post("/auth/logout", route(async (req, res) => {
   const token = tokenFromRequest(req);
@@ -560,7 +630,11 @@ router.post("/auth/logout", route(async (req, res) => {
   }
   res.json({ ok: true });
 }));
-router.get("/auth/me", requireAuth, route(async (req, res) => res.json(await publicUser(req.user))));
+router.get("/auth/me", requireAuth, route(async (req, res) => {
+  // The portal is re-derived from the session's own role on every read, so a
+  // refresh restores the correct portal and a tampered client cannot claim one.
+  res.json({ ...await publicUser(req.user), portal: portalForUser(req.user) });
+}));
 router.use(requireAuth);
 // Resolve the caller once per request: role scope, departments and permissions.
 // Models read it through the async-local store so list/get/update/delete all
@@ -586,7 +660,11 @@ router.use((req, res, next) => {
 });
 router.use("/org", orgRoutes);
 
-router.get("/projects", route(async (req, res) => res.json(await Project.all())));
+router.get("/projects", route(async (req, res) => {
+  if (!paginationRequested(req.query)) return res.json(await Project.all());
+  const paged = await paginatedList({ build: () => Project.paged(searchTerm(req.query.search)), ...parsePagination(req.query) });
+  res.json({ data: paged.rows, pagination: paged.pagination });
+}));
 router.get("/projects/:id", route(async (req, res) => res.json(requireRecord(await Project.get(parseId(req.params.id)), "Project"))));
 router.post("/projects", route(async (req, res) => {
   const data = validateProject(req.body || {});
@@ -611,7 +689,13 @@ router.get("/contracts", route(async (req, res) => {
   const projectId = req.query.project_id === undefined ? null : parseId(req.query.project_id, "project_id");
   const type = req.query.type || null;
   if (type && !contractTypes.has(type)) throw new HttpError(400, "type is invalid");
-  res.json(await Contract.all(projectId, type));
+  if (!paginationRequested(req.query)) return res.json(await Contract.all(projectId, type));
+  const paged = await paginatedList({ build: () => Contract.paged(projectId, type, searchTerm(req.query.search)), ...parsePagination(req.query) });
+  // The rows are returned exactly as `Contract.all` returns them - no
+  // `contractResponse` enrichment. The default list has never applied it (only
+  // the single-record route does), so a page must not quietly grow an extra
+  // `available_actions` field the unpaged caller does not receive.
+  res.json({ data: paged.rows, pagination: paged.pagination });
 }));
 router.get("/contracts/:id", route(async (req, res) => res.json(contractResponse(requireRecord(await Contract.get(parseId(req.params.id)), "Contract"), req))));
 
@@ -655,6 +739,305 @@ router.post("/contracts/:id/transition", route(async (req, res) => {
   res.json(contractResponse(await Contract.get(id), req));
 }));
 
+// ---------------------------------------------------------------------------
+// Contract generation.
+//
+// One endpoint for the whole flow the office performs: collect the
+// information, let the SERVER calculate the price, create the contract through
+// the EXISTING contract model, render the selected template into a full PDF,
+// store it as a document, link it to the contract, and - only if the caller
+// already holds financial authority - build the payment schedule from the
+// authoritative final price.
+//
+// Authorization is the existing one: this route lives under /contracts, so the
+// middleware has already required `access_contracts` plus the `create` method
+// permission. Nothing here grants a new permission, and the schedule step
+// defers to the same `view_financial` gate the standalone schedule route uses.
+// ---------------------------------------------------------------------------
+router.post("/contracts/generate", route(async (req, res) => {
+  const body = req.body || {};
+  const hasSelectedTemplate = body.template_document_id !== undefined && body.template_document_id !== null && body.template_document_id !== "";
+  if (hasSelectedTemplate && !can(req.access, "access_documents")) {
+    throw new HttpError(403, "using a contract template requires Documents access");
+  }
+  // Pricing is the server's. A final_price / discount_amount / value in the body
+  // is simply never read: validateContract derives them from original_price +
+  // discount_pct, exactly as the plain create route does.
+  const data = await validateContract(body);
+
+  // --- Agreement duration -------------------------------------------------
+  // Start/end dates and the duration are cross-checked rather than trusted, so
+  // contradictory input is refused instead of stored as a lie.
+  const durationUnit = body.agreement_duration_unit ? String(body.agreement_duration_unit).toLowerCase() : "months";
+  if (durationUnit && !["days", "weeks", "months", "years"].includes(durationUnit)) {
+    throw new HttpError(400, "agreement_duration_unit must be days, weeks, months or years");
+  }
+  const duration = body.agreement_duration === undefined || body.agreement_duration === null || body.agreement_duration === ""
+    ? null
+    : Number(body.agreement_duration);
+  if (duration === null || !Number.isInteger(duration) || duration < 1 || duration > 1200) {
+    throw new HttpError(400, "agreement_duration must be a whole number between 1 and 1200");
+  }
+  if (!data.property_id) throw new HttpError(400, "property_id is required to generate a contract");
+  if (!data.start_date) throw new HttpError(400, "start_date is required when an agreement duration is given");
+  {
+    const derived = addMonths(data.start_date, duration, durationUnit);
+    // Only fill in an end date the caller did not state. A stated end date that
+    // disagrees with the stated duration is a contradiction and is refused.
+    if (!data.end_date) data.end_date = derived;
+    else if (data.end_date !== derived) {
+      throw new HttpError(400, `end_date does not match ${duration} ${durationUnit} from start_date`);
+    }
+  }
+  const contractDate = body.contract_date === undefined || body.contract_date === null || body.contract_date === ""
+    ? await todayDate()
+    : optionalDate(body.contract_date, "contract_date");
+
+  // --- Payment plan -------------------------------------------------------
+  // Optional. With no plan fields the contract is simply created without a
+  // schedule, which is a normal thing for Sales to do.
+  const wantsPlan = Boolean(body.deposit || body.installments || body.first_due_date);
+  const plan = wantsPlan ? validateSchedule(body) : null;
+  if (plan && !(data.value > 0)) throw new HttpError(400, "the final price must be greater than 0 to build a payment plan");
+  if (plan && plan.deposit >= data.value) throw new HttpError(400, "deposit must be less than the final price");
+
+  // --- Template -----------------------------------------------------------
+  // A template is a document of category 'template'. With none chosen the
+  // built-in agreement is used, so generating a contract is always possible.
+  let templateId = null;
+  let templateBody = DEFAULT_CONTRACT_TEMPLATE;
+  let templateTitle = "Sale Agreement";
+  if (hasSelectedTemplate) {
+    templateId = parseId(body.template_document_id, "template_document_id");
+    const template = requireRecord(await Document.get(templateId), "Template");
+    if (String(template.category) !== "template") throw new HttpError(400, "the selected document is not a contract template");
+    if (!String(template.body_text || "").trim()) throw new HttpError(400, "the selected template has no body text");
+    templateBody = String(template.body_text);
+    templateTitle = template.title || "Sale Agreement";
+  }
+  const unknownTemplateTokens = unknownPlaceholders(templateBody);
+  if (unknownTemplateTokens.length) {
+    throw new HttpError(400, `the selected template has unknown placeholder(s): ${unknownTemplateTokens.join(", ")}`);
+  }
+
+  // --- Create the contract through the existing model ----------------------
+  const created = await Contract.create({
+    ...data,
+    contract_date: contractDate,
+    agreement_duration: duration,
+    agreement_duration_unit: durationUnit,
+    payment_frequency: plan ? plan.frequency : null,
+    deposit_amount: plan ? plan.deposit : null,
+    installment_count: plan ? plan.installments : null,
+    first_due_date: plan ? plan.firstDueDate : null,
+  });
+  const contract = await Contract.get(created.id);
+
+  // --- Generate the FULL document -----------------------------------------
+  const org = await queryOne("SELECT name FROM organizations WHERE id=$1", [await organizationId()]);
+  const project = requireRecord(await Project.get(data.project_id), "Project");
+  const property = data.property_id ? requireRecord(await Property.get(data.property_id), "Property") : null;
+  const client = data.client_id ? await Client.get(data.client_id) : null;
+  const values = buildContractValues({
+    contract,
+    project,
+    property,
+    client,
+    // The company identity is read from the organization row, never hardcoded.
+    companyName: org?.name || "",
+    plan: plan || {},
+  });
+  const renderedContractText = renderContractDocument(templateBody, values);
+  const file = await produceContractDocument({ templateBody, values, title: templateTitle, contractNumber: contract.contract_number });
+  const documentRow = await Document.create({
+    project_id: contract.project_id,
+    contract_id: contract.id,
+    client_id: contract.client_id,
+    title: templateTitle,
+    category: "agreement",
+    status: "pending",
+    notes: `Generated from contract ${contract.contract_number}`,
+    original_filename: file.original_filename,
+    stored_name: file.stored_name,
+    file_size: file.file_size,
+    mime_type: file.mime_type,
+    uploaded_at: new Date().toISOString().slice(0, 19).replace("T", " "),
+  });
+  await query("UPDATE documents SET body_text=$1 WHERE id=$2 AND organization_id=$3", [renderedContractText, documentRow.id, await organizationId()]);
+  // The contract points at the document it generated, which is what the contract
+  // screen's Documents section and its Open/Download actions read.
+  await query("UPDATE contracts SET generated_document_id=$1, template_document_id=$2 WHERE id=$3", [documentRow.id, templateId, contract.id]);
+
+  // --- Payment schedule, only with financial authority ---------------------
+  // Creating installments is a financial act. A caller without
+  // `view_financial` gets a contract and a document, never a schedule - the
+  // same refusal the standalone schedule route gives, not a new one.
+  let schedule = { created: 0, debts: [], skipped: null };
+  if (plan) {
+    if (!can(req.access, "view_financial")) {
+      schedule.skipped = "this account may not create the payment plan; the contract and its document were still generated";
+    } else {
+      const rows = buildSchedule(contract, { deposit: plan.deposit, installments: plan.installments, firstDueDate: plan.firstDueDate, monthsPerStep: monthsPerFrequency(plan.frequency) });
+      // Installments inherit the contract's ownership, so a sales-owned contract
+      // never silently hands its schedule to whoever generated it.
+      const inherited = { owner_id: contract.owner_id ?? null, created_by: contract.created_by ?? null, department_id: contract.department_id ?? null, visibility: contract.visibility || "organization" };
+      const createdIds = [];
+      for (const row of rows) {
+        const debt = await queryOne("INSERT INTO debts (organization_id,contract_id,client_name,amount,due_date,status,notes,owner_id,created_by,department_id,visibility) VALUES ($1,$2,$3,$4,$5,'pending',$6,$7,$8,$9,$10) RETURNING id", [await organizationId(), contract.id, contract.client_name, row.amount, row.due_date, row.label, inherited.owner_id, inherited.created_by, inherited.department_id, inherited.visibility]);
+        createdIds.push(debt.id);
+      }
+      for (let index = 0; index < createdIds.length; index += 1) {
+        await syncDebtReminder(createdIds[index], rows[index].due_date, "pending");
+      }
+      schedule = { created: createdIds.length, debts: await Promise.all(createdIds.map((debtId) => Debt.get(debtId))), skipped: null };
+    }
+  }
+
+  await audit(req, "generated", "contract", contract.id, {
+    contract_number: contract.contract_number,
+    final_price: String(contract.value),
+    document_id: documentRow.id,
+    installments: schedule.created,
+  });
+
+  res.status(201).json({
+    contract: contractResponse(await Contract.get(contract.id), req),
+    pricing: {
+      original_price: String(contract.original_price),
+      discount_pct: String(contract.discount_pct),
+      discount_amount: String(contract.discount_amount),
+      final_price: String(contract.value),
+    },
+    document: documentResponse(await Document.get(documentRow.id)),
+    template: templateId ? { id: templateId, title: templateTitle } : { id: null, title: "Built-in Sale Agreement" },
+    placeholders: { used: placeholdersUsed(templateBody), unknown: unknownPlaceholders(templateBody) },
+    schedule,
+  });
+}));
+
+// Contract templates are documents of category 'template'. They are SHARED:
+// every caller who may use documents may use every template, which is why the
+// list is deliberately not filtered by who uploaded it. Management follows the
+// existing document RBAC - there is no separate template permission system.
+router.get("/contract-templates", route(async (req, res) => {
+  if (!can(req.access, "access_documents")) throw new HttpError(403, "permission denied");
+  const templates = (await query(
+    `SELECT d.id, d.title, d.body_text, d.category, d.original_filename, d.stored_name, d.created_at, d.uploaded_at,
+        (SELECT COUNT(*)::int FROM contracts c WHERE c.template_document_id = d.id) AS used_by
+       FROM documents d
+      WHERE d.organization_id=$1 AND d.category='template'
+      ORDER BY d.title`,
+    [await organizationId()],
+  )).rows;
+  res.json(templates.map((template) => ({
+    ...template,
+    has_file: Boolean(template.stored_name),
+    placeholders: placeholdersUsed(template.body_text),
+    unknown: unknownPlaceholders(template.body_text),
+  })));
+}));
+
+router.post("/contract-templates", route(async (req, res) => {
+  if (!can(req.access, "access_documents")) throw new HttpError(403, "permission denied");
+  if (!can(req.access, "create")) throw new HttpError(403, "creating a template requires the create permission");
+  const title = requiredText(req.body?.title, "title", 160);
+  const bodyText = requiredText(req.body?.body_text, "body_text", 100000);
+  // A typo'd placeholder would render literally onto a customer's signed copy,
+  // so it is reported now rather than discovered later.
+  const unknown = unknownPlaceholders(bodyText);
+  if (unknown.length) throw new HttpError(400, `unknown placeholder(s): ${unknown.join(", ")}`);
+  const created = await queryOne(
+    "INSERT INTO documents (organization_id,title,category,status,notes,body_text) VALUES ($1,$2,'template','approved',$3,$4) RETURNING id",
+    [await organizationId(), title, `Template using: ${placeholdersUsed(bodyText).join(", ") || "no placeholders"}`, bodyText],
+  );
+  await audit(req, "created", "contract_template", created.id, { title });
+  res.status(201).json({ id: created.id, title, category: "template", placeholders: placeholdersUsed(bodyText), unknown });
+}));
+
+router.put("/contract-templates/:id", route(async (req, res) => {
+  if (!can(req.access, "access_documents")) throw new HttpError(403, "permission denied");
+  if (!can(req.access, "edit")) throw new HttpError(403, "editing a template requires the edit permission");
+  const id = parseId(req.params.id);
+  const template = requireRecord(await Document.get(id), "Template");
+  if (String(template.category) !== "template") throw new HttpError(400, "that document is not a contract template");
+  const bodyText = req.body?.body_text === undefined ? template.body_text : requiredText(req.body.body_text, "body_text", 100000);
+  const title = req.body?.title === undefined ? template.title : requiredText(req.body.title, "title", 160);
+  const unknown = unknownPlaceholders(bodyText);
+  if (unknown.length) throw new HttpError(400, `unknown placeholder(s): ${unknown.join(", ")}`);
+  const updated = await queryOne("UPDATE documents SET title=$1, body_text=$2 WHERE id=$3 RETURNING id", [title, bodyText, id]);
+  await audit(req, "updated", "contract_template", updated.id, { title });
+  res.json({ id: updated.id, title, placeholders: placeholdersUsed(bodyText), unknown });
+}));
+
+router.delete("/contract-templates/:id", route(async (req, res) => {
+  if (!can(req.access, "access_documents")) throw new HttpError(403, "permission denied");
+  if (!can(req.access, "delete")) throw new HttpError(403, "deleting a template requires the delete permission");
+  const id = parseId(req.params.id);
+  const template = requireRecord(await Document.get(id), "Template");
+  if (String(template.category) !== "template") throw new HttpError(400, "that document is not a contract template");
+  // A template a contract was generated from is history, not clutter: refuse
+  // rather than orphan a contract's reference to a document that no longer exists.
+  const inUse = Number((await queryOne("SELECT COUNT(*) AS n FROM contracts WHERE template_document_id=$1", [id])).n);
+  if (inUse > 0) throw new HttpError(409, `this template was used to generate ${inUse} contract(s) and cannot be deleted`);
+  await query("DELETE FROM documents WHERE id=$1", [id]);
+  await audit(req, "deleted", "contract_template", id, {});
+  res.json({ ok: true });
+}));
+
+// The placeholder vocabulary, so the template editor and the Generate Contract
+// form are driven by the same list the renderer actually understands.
+router.get("/contracts/:id/document-content", route(async (req, res) => {
+  if (!can(req.access, "access_documents")) throw new HttpError(403, "Documents access is required to view the generated contract");
+  const contract = requireRecord(await Contract.get(parseId(req.params.id)), "Contract");
+  if (!contract.generated_document_id) throw new HttpError(404, "This contract has no generated document");
+  const document = requireRecord(await Document.get(contract.generated_document_id), "Generated document");
+  if (Number(document.contract_id) !== Number(contract.id) || document.category !== "agreement") throw new HttpError(404, "The generated document is not linked to this contract");
+
+  let bodyText = document.body_text;
+  if (!bodyText) {
+    let templateBody = DEFAULT_CONTRACT_TEMPLATE;
+    if (contract.template_document_id) {
+      const template = await Document.get(contract.template_document_id);
+      if (template?.category === "template" && template.body_text) templateBody = template.body_text;
+    }
+    const organization = await queryOne("SELECT name FROM organizations WHERE id=$1", [await organizationId()]);
+    const project = requireRecord(await Project.get(contract.project_id), "Project");
+    const property = contract.property_id ? requireRecord(await Property.get(contract.property_id), "Property") : null;
+    const client = contract.client_id ? await Client.get(contract.client_id) : null;
+    bodyText = renderContractDocument(templateBody, buildContractValues({ contract, project, property, client, companyName: organization?.name || "MKUYU" }));
+  }
+  res.json({ contract_id: contract.id, document_id: document.id, title: document.title, original_filename: document.original_filename, body_text: bodyText, can_edit: can(req.access, "edit") });
+}));
+
+router.put("/contracts/:id/document-content", route(async (req, res) => {
+  if (!can(req.access, "access_documents")) throw new HttpError(403, "Documents access is required to edit the generated contract");
+  if (!can(req.access, "edit")) throw new HttpError(403, "edit permission is required to revise the generated contract");
+  const contract = requireRecord(await Contract.get(parseId(req.params.id)), "Contract");
+  if (!contract.generated_document_id) throw new HttpError(404, "This contract has no generated document");
+  const document = requireRecord(await Document.get(contract.generated_document_id), "Generated document");
+  if (Number(document.contract_id) !== Number(contract.id) || document.category !== "agreement") throw new HttpError(404, "The generated document is not linked to this contract");
+  const bodyText = requiredText(req.body?.body_text, "body_text", 100000);
+  if (/\{\{\s*[A-Z0-9_]+\s*\}\}/.test(bodyText)) throw new HttpError(400, "replace every unresolved {{PLACEHOLDER}} before saving the contract");
+
+  const file = await produceContractDocument({ templateBody: bodyText, values: {}, title: document.title || "Sale Agreement", contractNumber: contract.contract_number });
+  try {
+    const updated = await query(
+      `UPDATE documents SET body_text=$1,original_filename=$2,stored_name=$3,file_size=$4,mime_type=$5,uploaded_at=NOW()
+        WHERE id=$6 AND organization_id=$7 AND contract_id=$8 AND category='agreement'`,
+      [bodyText, file.original_filename, file.stored_name, file.file_size, file.mime_type, document.id, await organizationId(), contract.id],
+    );
+    if (!updated.rowCount) throw new HttpError(404, "The generated document is no longer available");
+  } catch (error) {
+    removeStoredFile(documentUploadsDir, file.stored_name);
+    throw error;
+  }
+  if (document.stored_name && document.stored_name !== file.stored_name) removeStoredFile(documentUploadsDir, document.stored_name);
+  await audit(req, "updated", "contract_document", document.id, { contract_id: contract.id, replaced_file: true });
+  res.json(documentResponse(await Document.get(document.id)));
+}));
+
+router.get("/contract-placeholders", route(async (req, res) => { res.json(CONTRACT_PLACEHOLDERS); }));
+
 router.post("/contracts", route(async (req, res) => {
   const data = await validateContract(req.body || {});
   const result = await Contract.create(data);
@@ -693,7 +1076,7 @@ router.post("/contracts/:id/schedule", route(async (req, res) => {
   if (!can(req.access, "view_financial")) throw new HttpError(403, "creating a payment schedule requires the view_financial permission");
   const id = parseId(req.params.id);
   const contract = requireRecord(await Contract.get(id), "Contract");
-  const { installments, deposit, firstDueDate } = validateSchedule(req.body || {});
+  const { installments, deposit, firstDueDate, frequency } = validateSchedule(req.body || {});
   if (!(contract.value > 0)) throw new HttpError(400, "contract value must be greater than 0");
   if (deposit >= contract.value) throw new HttpError(400, "deposit must be less than the contract value");
   const replaceRequested = req.body?.replace === true || req.body?.replace === "true";
@@ -710,7 +1093,7 @@ router.post("/contracts/:id/schedule", route(async (req, res) => {
       throw new HttpError(409, "cannot replace the schedule: some installments already have recorded payments");
     }
   }
-  const rows = buildSchedule(contract, { deposit, installments, firstDueDate });
+  const rows = buildSchedule(contract, { deposit, installments, firstDueDate, monthsPerStep: monthsPerFrequency(frequency) });
   const createdIds = [];
   // Installments inherit the contract's ownership, so a sales-owned contract
   // never silently hands its payment schedule to the creator of the schedule.
@@ -734,7 +1117,9 @@ router.get("/debts", route(async (req, res) => {
   const status = req.query.status || null;
   const projectId = req.query.project_id === undefined ? null : parseId(req.query.project_id, "project_id");
   if (status && !debtStatuses.has(status)) throw new HttpError(400, "status is invalid");
-  res.json(await Debt.all(status, projectId));
+  if (!paginationRequested(req.query)) return res.json(await Debt.all(status, projectId));
+  const paged = await paginatedList({ build: () => Debt.paged(status, projectId, searchTerm(req.query.search)), ...parsePagination(req.query) });
+  res.json({ data: paged.rows, pagination: paged.pagination });
 }));
 router.get("/debts/:id", route(async (req, res) => res.json(requireRecord(await Debt.get(parseId(req.params.id)), "Debt"))));
 router.post("/debts", route(async (req, res) => {
@@ -774,7 +1159,9 @@ router.get("/payments", route(async (req, res) => {
   const from = optionalDate(req.query.from, "from");
   const to = optionalDate(req.query.to, "to");
   if (from && to && from > to) throw new HttpError(400, "from cannot be after to");
-  res.json((await Payment.all({ projectId, contractId, method, from, to })).map(paymentResponse));
+  if (!paginationRequested(req.query)) return res.json((await Payment.all({ projectId, contractId, method, from, to })).map(paymentResponse));
+  const paged = await paginatedList({ build: () => Payment.paged({ projectId, contractId, method, from, to, search: searchTerm(req.query.search) }), ...parsePagination(req.query) });
+  res.json({ data: paged.rows.map(paymentResponse), pagination: paged.pagination });
 }));
 router.get("/payments/:id", route(async (req, res) => res.json(paymentResponse(requireRecord(await Payment.get(parseId(req.params.id)), "Payment")))));
 router.post("/payments", route(async (req, res) => {
@@ -920,6 +1307,10 @@ const SNAPSHOT_TABLES = [
   { table: "appointments" }, { table: "documents" }, { table: "debts" }, { table: "reminders" },
   { table: "payments" }, { table: "reports" }, { table: "leads" }, { table: "follow_ups" },
   { table: "approvals" }, { table: "record_shares" }, { table: "property_history" }, { table: "settings" },
+  // Task-assignment workflow, so a portable snapshot carries the assignment
+  // history and its review comments. task_comments has no organization_id, so
+  // it is captured through its task.
+  { table: "tasks" }, { table: "task_comments", org: false, via: "tasks" },
 ];
 
 async function writeJsonSnapshot(stamp) {
@@ -927,11 +1318,15 @@ async function writeJsonSnapshot(stamp) {
   const target = path.join(backupsDir, name);
   const org = await organizationId();
   const data = {};
-  for (const { table, org: scoped = true } of SNAPSHOT_TABLES) {
+  for (const { table, org: scoped = true, via } of SNAPSHOT_TABLES) {
     // Global tables are small by definition; organization tables are filtered.
-    const result = scoped
-      ? await query(`SELECT * FROM ${table} WHERE organization_id = $1`, [org])
-      : await query(`SELECT * FROM ${table}`);
+    // `via` captures a child table through its parent's ids, because the child
+    // carries no organization column of its own.
+    const result = via
+      ? await query(`SELECT c.* FROM ${table} c WHERE c.${via.replace(/s$/, "")}_id IN (SELECT id FROM ${via} WHERE organization_id = $1)`, [org])
+      : scoped
+        ? await query(`SELECT * FROM ${table} WHERE organization_id = $1`, [org])
+        : await query(`SELECT * FROM ${table}`);
     data[table] = result.rows;
   }
   const payload = { format: "mkuyu-json-snapshot", version: 1, created_at: new Date().toISOString(), organization_id: org, data };
@@ -978,7 +1373,9 @@ router.get("/properties", route(async (req, res) => {
   const projectId = req.query.project_id === undefined ? null : parseId(req.query.project_id, "project_id");
   const status = req.query.status || null;
   if (status && !propertyStatuses.has(status)) throw new HttpError(400, "status is invalid");
-  res.json(await Property.all(projectId, status));
+  if (!paginationRequested(req.query)) return res.json(await Property.all(projectId, status));
+  const paged = await paginatedList({ build: () => Property.paged(projectId, status, searchTerm(req.query.search)), ...parsePagination(req.query) });
+  res.json({ data: paged.rows, pagination: paged.pagination });
 }));
 router.get("/properties/:id", route(async (req, res) => res.json(requireRecord(await Property.get(parseId(req.params.id)), "Property"))));
 router.post("/properties", route(async (req, res) => {
@@ -1067,7 +1464,9 @@ router.get("/clients", route(async (req, res) => {
   const projectId = req.query.project_id === undefined ? null : parseId(req.query.project_id, "project_id");
   const status = req.query.status || null;
   if (status && !clientStatuses.has(status)) throw new HttpError(400, "status is invalid");
-  res.json(await Client.all(projectId, status));
+  if (!paginationRequested(req.query)) return res.json(await Client.all(projectId, status));
+  const paged = await paginatedList({ build: () => Client.paged(projectId, status, searchTerm(req.query.search)), ...parsePagination(req.query) });
+  res.json({ data: paged.rows, pagination: paged.pagination });
 }));
 router.get("/clients/:id", route(async (req, res) => res.json(requireRecord(await Client.get(parseId(req.params.id)), "Client"))));
 router.post("/clients", route(async (req, res) => {
@@ -1133,7 +1532,9 @@ router.get("/appointments", route(async (req, res) => {
   const status = req.query.status || null;
   const projectId = req.query.project_id === undefined ? null : parseId(req.query.project_id, "project_id");
   if (status && !appointmentStatuses.has(status)) throw new HttpError(400, "status is invalid");
-  res.json(await Appointment.all(status, projectId));
+  if (!paginationRequested(req.query)) return res.json(await Appointment.all(status, projectId));
+  const paged = await paginatedList({ build: () => Appointment.paged(status, projectId, searchTerm(req.query.search)), ...parsePagination(req.query) });
+  res.json({ data: paged.rows, pagination: paged.pagination });
 }));
 router.get("/appointments/:id", route(async (req, res) => res.json(requireRecord(await Appointment.get(parseId(req.params.id)), "Appointment"))));
 router.post("/appointments", route(async (req, res) => {
@@ -1159,7 +1560,9 @@ router.get("/documents", route(async (req, res) => {
   const status = req.query.status || null;
   const projectId = req.query.project_id === undefined ? null : parseId(req.query.project_id, "project_id");
   if (status && !documentStatuses.has(status)) throw new HttpError(400, "status is invalid");
-  res.json((await Document.all(status, projectId)).map(documentResponse));
+  if (!paginationRequested(req.query)) return res.json((await Document.all(status, projectId)).map(documentResponse));
+  const paged = await paginatedList({ build: () => Document.paged(status, projectId, searchTerm(req.query.search)), ...parsePagination(req.query) });
+  res.json({ data: paged.rows.map(documentResponse), pagination: paged.pagination });
 }));
 router.get("/documents/:id/file", route(async (req, res) => {
   const document = requireRecord(await Document.get(parseId(req.params.id)), "Document");
@@ -1218,6 +1621,11 @@ router.get("/reports/types", route((req, res) => {
   const financial = can(req.access, "view_financial");
   res.json({ types: REPORT_TYPES.filter((type) => financial || !reportTypeIsFinancial(type.id)), payment_methods: PAYMENT_METHODS, financial });
 }));
+// Report history is ALREADY bounded: `Report.history` appends its own
+// `LIMIT 250` (report.js:162), so it cannot return an unbounded collection and
+// does not participate in the pagination contract. Changing it here would alter
+// an existing cap for no measured benefit, so the response is left exactly as
+// it was. It stays opt-in-compatible for a future phase.
 router.get("/reports/history", route(async (req, res) => res.json((await Report.history(historyFilters(req.query))).map(reportResponse))));
 router.post("/reports/preview", route(async (req, res) => {
   const type = reportTypeForCaller(req, req.body?.report_type);
