@@ -217,19 +217,19 @@ async function bootstrap() {
 }
 
 const viewMeta = {
-  dashboard: ["Dashboard", "Overview of contracts, debts, and reminders"],
-  projects: ["Projects", "Organize contracts and client records by development"],
-  properties: ["Properties", "List, track, and classify estate inventory"],
-  clients: ["Clients", "Contacts, roles, and relationship status across projects"],
-  contracts: ["Contracts", "Track new and terminal contracts across every project"],
-  debts: ["Debts", "Monitor client balances, due dates, and payment progress"],
-  appointments: ["Appointments", "Viewings, calls, meetings, and inspections"],
-  documents: ["Documents", "Agreements, titles, invoices, reports, and permits"],
-  reports: ["Reports", "Turn project activity into clear management records"],
-  "admin-dashboard": ["Admin overview", "Control staff access, privileges, and organization performance"],
+  dashboard: ["Dashboard", "What needs you today, and where the portfolio stands"],
+  projects: ["Projects", "Developments and the properties, clients and contracts in each"],
+  properties: ["Properties", "The property portfolio: status, price, location and photos"],
+  clients: ["Clients", "People and companies, from first enquiry to signed agreement"],
+  contracts: ["Contracts", "Every agreement and where it sits in the approval workflow"],
+  debts: ["Payments & debts", "Installments, balances, recorded payments and reminders"],
+  appointments: ["Appointments", "Viewings, calls, meetings and inspections"],
+  documents: ["Documents", "Agreements, titles, receipts, reports and permits"],
+  reports: ["Reports", "Generated and uploaded management reports"],
+  "admin-dashboard": ["Admin overview", "Staff access, privileges and organization health"],
   duties: ["Duties & approvals", "The approval path, and every duty on every department"],
   assignments: ["Assignments", "Work assigned to you, and the decisions waiting on you"],
-  organization: ["Administration", "Staff, roles, departments, approvals, and organization activity"],
+  organization: ["Administration", "Staff, roles, departments, approvals and activity"],
 };
 
 // Contract lifecycle labels. The status vocabulary is defined server-side in
@@ -311,13 +311,24 @@ function debtState(debt) {
 // Label shown on the state badge. Kept in one place so the debts register, the
 // filters and the reminder panel all call the installment the same thing.
 function debtStateLabel(state) {
-  return { paid: "Paid", partial: "Part paid", overdue: "Overdue", upcoming: "Upcoming", pending: "Pending" }[state] || state;
+  return { paid: "Paid", partial: "Partial", overdue: "Overdue", upcoming: "Due soon", pending: "Pending", "due-today": "Due today" }[state] || state;
+}
+
+/**
+ * The badge for one installment. Same states as `debtState` - the only
+ * refinement is that an installment falling due TODAY is called out as such,
+ * which is a presentation of the due date and changes no stored status.
+ */
+function debtBadge(debt) {
+  const value = debtState(debt);
+  const key = value === "upcoming" && debt.due_date === today() ? "due-today" : value;
+  return badgeVariant(debtStateLabel(key), key);
 }
 
 function badge(value, variant) {
   const normalized = String(value || "").toLowerCase();
   const key = variant ? String(variant).toLowerCase() : normalized;
-  return `<span class="badge badge-${escapeHtml(key)}">${escapeHtml(value)}</span>`;
+  return `<span class="badge badge-${escapeHtml(key)}">${escapeHtml(humanize(value))}</span>`;
 }
 
 function badgeVariant(value, variant) {
@@ -328,15 +339,104 @@ function badgeVariant(value, variant) {
 
 function documentIcon(category) {
   const map = {
-    agreement: "⌥",
-    title: "⌖",
-    invoice: "$",
-    receipt: "✓",
-    report: "✦",
-    permit: "⌘",
-    other: "▱",
+    agreement: "contract",
+    title: "stamp",
+    invoice: "receipt",
+    receipt: "receipt",
+    report: "chart",
+    permit: "shield",
+    other: "file",
   };
-  return `<span class="doc-icon-mark">${map[category] || map.other}</span>`;
+  return `<span class="doc-icon-mark">${icon(map[category] || map.other)}</span>`;
+}
+
+/* --------------------------------------------------------------------------
+   Design-system primitives
+
+   One outline icon set (24px grid, 1.8 stroke, currentColor) replaces the mixed
+   unicode glyphs, so every icon inherits the text colour and scales with it.
+   The helpers below are presentation only: they never decide what a caller may
+   do. Callers pass in controls they have ALREADY permission-gated, and an empty
+   list renders nothing, so no helper can surface an action on its own.
+   -------------------------------------------------------------------------- */
+const ICON_PATHS = {
+  dashboard: '<rect x="3" y="3" width="7.5" height="9" rx="1.6"/><rect x="13.5" y="3" width="7.5" height="5.5" rx="1.6"/><rect x="13.5" y="11.5" width="7.5" height="9.5" rx="1.6"/><rect x="3" y="15" width="7.5" height="6" rx="1.6"/>',
+  tasks: '<path d="M9 11.5l2.5 2.5L20 5.5"/><path d="M20 12.5V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h8.5"/>',
+  shield: '<path d="M12 3l7.5 3v5.6c0 4.4-3.1 8.2-7.5 9.4-4.4-1.2-7.5-5-7.5-9.4V6z"/><path d="M9 12l2 2 4-4"/>',
+  home: '<path d="M3.5 10.5L12 3.5l8.5 7"/><path d="M5.5 9v10.5a1 1 0 0 0 1 1H10v-6h4v6h3.5a1 1 0 0 0 1-1V9"/>',
+  building: '<rect x="4.5" y="3" width="15" height="18" rx="1.6"/><path d="M9 7.5h1.5M13.5 7.5H15M9 11.5h1.5M13.5 11.5H15M9 15.5h1.5M13.5 15.5H15"/><path d="M10.5 21v-2.5h3V21"/>',
+  users: '<circle cx="9" cy="8" r="3.4"/><path d="M2.8 20a6.2 6.2 0 0 1 12.4 0"/><path d="M15.5 4.8a3.4 3.4 0 0 1 0 6.5"/><path d="M18 14.6a6.2 6.2 0 0 1 3.2 5.4"/>',
+  calendar: '<rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
+  contract: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M8.5 13h7M8.5 16.5h4.5"/>',
+  folder: '<path d="M3.5 7.2a2 2 0 0 1 2-2h3.8l2 2.2h7.2a2 2 0 0 1 2 2v8.4a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>',
+  chart: '<path d="M4 20.5h16"/><path d="M7 17v-5M12 17V7M17 17v-8"/>',
+  wallet: '<rect x="3" y="6.5" width="18" height="13.5" rx="2"/><path d="M3 10.5h18"/><path d="M15.5 15h2.5"/><path d="M6 6.5V5.2A1.7 1.7 0 0 1 7.7 3.5H18"/>',
+  scale: '<path d="M12 4v16.5M7.5 20.5h9"/><path d="M5 7.5h14"/><path d="M5 7.5l-2.7 6.2a2.8 2.8 0 0 0 5.4 0z"/><path d="M19 7.5l-2.7 6.2a2.8 2.8 0 0 0 5.4 0z"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="M12 2.8v2.4M12 18.8v2.4M4.9 4.9l1.7 1.7M17.4 17.4l1.7 1.7M2.8 12h2.4M18.8 12h2.4M4.9 19.1l1.7-1.7M17.4 6.6l1.7-1.7"/>',
+  bell: '<path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2H4.5z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/>',
+  search: '<circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  more: '<circle cx="5.5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="18.5" cy="12" r="1.3"/>',
+  check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+  alert: '<path d="M12 4l9 15.5H3z"/><path d="M12 10v4M12 17.2v.3"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  image: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.8"/><path d="M20.5 16l-4.8-4.8L7 20"/>',
+  pin: '<path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.3"/>',
+  file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+  receipt: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6M9 16h3"/>',
+  stamp: '<path d="M9.5 3.5h5l-1 6.5h-3z"/><path d="M5 13a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v2.5H5z"/><path d="M5 19.5h14"/>',
+  inbox: '<path d="M3.5 13.5l2.6-7.3A2 2 0 0 1 8 5h8a2 2 0 0 1 1.9 1.2l2.6 7.3v4.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M3.5 13.5H8l1.5 2.5h5l1.5-2.5h4.5"/>',
+  arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  spark: '<path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z"/>',
+  money: '<rect x="3" y="6" width="18" height="12" rx="2"/><circle cx="12" cy="12" r="2.6"/><path d="M6.5 9.5v.01M17.5 14.5v.01"/>',
+  phone: '<path d="M5 4h3.5l1.8 4.3-2.2 1.4a11 11 0 0 0 6.2 6.2l1.4-2.2L20 15.5V19a1.5 1.5 0 0 1-1.6 1.5C10.6 20 4 13.4 3.5 5.6A1.5 1.5 0 0 1 5 4z"/>',
+  mail: '<rect x="3" y="5.5" width="18" height="13" rx="2"/><path d="M3.5 7l8.5 6 8.5-6"/>',
+  logout: '<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 16l-4-4 4-4M6 12h10"/>',
+  user: '<circle cx="12" cy="8.5" r="3.8"/><path d="M4.5 20.5a7.5 7.5 0 0 1 15 0"/>',
+  dot: '<circle cx="12" cy="12" r="3"/>',
+};
+
+function icon(name, extraClass = "") {
+  return `<svg class="ic${extraClass ? ` ${extraClass}` : ""}" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICON_PATHS[name] || ICON_PATHS.dot}</svg>`;
+}
+
+/** "SALES, MARKETING & OPERATIONS" -> "Sales, Marketing & Operations". */
+function titleCase(value) {
+  return String(value ?? "").toLowerCase().replace(/(^|[\s/(-])([a-z])/g, (match, lead, letter) => lead + letter.toUpperCase()).replace(/\bIct\b/g, "ICT");
+}
+
+/** Title-cases a stored enum for display. The badge CLASS keeps the raw key. */
+function humanize(value) {
+  const text = String(value ?? "").replace(/_/g, " ").trim();
+  return text ? text[0].toUpperCase() + text.slice(1) : "";
+}
+
+/**
+ * A designed empty state: what is missing, why it matters, and - only when the
+ * caller already holds the permission - the one action that fills it.
+ */
+function emptyState(title, text = "", { iconName = "inbox", action = "", compact = false } = {}) {
+  return `<div class="empty-state${compact ? " empty-compact" : ""}"><div class="empty-icon">${icon(iconName)}</div><strong>${escapeHtml(title)}</strong>${text ? `<span>${escapeHtml(text)}</span>` : ""}${action ? `<div class="empty-actions">${action}</div>` : ""}</div>`;
+}
+
+/**
+ * Secondary row actions collapsed behind one "More" button, so a register row
+ * shows its main action instead of a wall of buttons. `items` are controls the
+ * caller already rendered behind their own permission checks; blanks are
+ * dropped, and a row with nothing left gets no menu at all.
+ */
+function rowMenu(items) {
+  const entries = (items || []).filter((entry) => entry && String(entry).trim());
+  if (!entries.length) return "";
+  return `<div class="row-menu"><button type="button" class="btn btn-ghost btn-small btn-icon" data-action="toggle-row-menu" aria-haspopup="menu" aria-expanded="false" aria-label="More actions" title="More actions">${icon("more")}</button><div class="row-menu-list" role="menu" hidden>${entries.join("")}</div></div>`;
+}
+
+function closeRowMenus(except = null) {
+  document.querySelectorAll(".row-menu-list").forEach((list) => {
+    if (list === except) return;
+    list.hidden = true;
+    list.parentElement?.querySelector('[data-action="toggle-row-menu"]')?.setAttribute("aria-expanded", "false");
+  });
 }
 
 function formatDateTime(value, includeDate = true) {
@@ -705,10 +805,11 @@ function pager(kind) {
   const total = Number(page.total || 0);
   const totalPages = Number(page.total_pages || 0);
   const size = Number(page.page_size || PAGE_SIZE);
-  if (totalPages <= 1) return `<div class="section-note">${total} ${total === 1 ? "record" : "records"}</div>`;
+  // One page: the toolbar already states the count, so no pager is drawn.
+  if (totalPages <= 1) return "";
   const current = Number(page.page || 1);
   return `<div class="pager" data-list="${kind}">
-    <span class="pager-note">Showing ${((current - 1) * size) + 1}-${Math.min(current * size, total)} of ${total}</span>
+    <span class="pager-note">Showing <strong>${((current - 1) * size) + 1}–${Math.min(current * size, total)}</strong> of <strong>${total}</strong></span>
     <div class="row-actions">
       <button class="btn btn-small" data-action="page-prev" data-list="${kind}" ${current <= 1 || book.loading ? "disabled" : ""}>Previous</button>
       <span class="pager-note">Page ${current} of ${totalPages}</span>
@@ -832,25 +933,28 @@ function canSeeFinancial() {
 // administration is held by the `users.role = 'admin'` account only, which is
 // why the Managing Director never sees Admin overview or Administration even
 // though the MD holds plenty of business modules.
+// Grouping and order are presentation only (Main / Business / Contracts &
+// records / Finance / Organization). Every entry keeps exactly the module and
+// permission it had before the redesign, so regrouping cannot widen access.
 const NAV_ITEMS = [
-  { view: "dashboard", label: "Dashboard", icon: "◆", group: "Overview" },
-  { view: "admin-dashboard", label: "Admin overview", icon: "⚙", adminOnly: true, group: "Overview" },
-  { view: "projects", label: "Projects", icon: "▦", module: "projects", permission: "view", group: "Portfolio" },
-  { view: "properties", label: "Properties", icon: "⌂", module: "properties", permission: "view", group: "Portfolio" },
-  { view: "clients", label: "Clients", icon: "◌", module: "clients", permission: "view", group: "Portfolio" },
-  { view: "contracts", label: "Contracts", icon: "▤", module: "contracts", permission: "view", group: "Operations" },
-  { view: "debts", label: "Payments", icon: "◷", module: "debts", permission: "view_financial", group: "Operations" },
-  { view: "appointments", label: "Appointments", icon: "◫", module: "appointments", permission: "view", group: "Operations" },
-  { view: "documents", label: "Documents", icon: "▱", module: "documents", permission: "view", group: "Information" },
-  { view: "reports", label: "Reports", icon: "↗", module: "reports", permission: "view_reports", group: "Information" },
-  // Reference view, not a module: every signed-in member may read the duty
-  // catalogue and the approval path. It exposes no record and no way to act.
-  { view: "duties", label: "Duties & approvals", icon: "⚖", group: "My work" },
+  { view: "dashboard", label: "Dashboard", icon: "dashboard", group: "Main" },
   // Task assignments. Open to every signed-in member - a member may always
   // RECEIVE work - but the actions inside come from the server per task, so a
   // staff member sees Submit without ever seeing Approve.
-  { view: "assignments", label: "Assignments", icon: "☑", group: "My work" },
-  { view: "organization", label: "Administration", icon: "◎", adminOnly: true, group: "Administration" },
+  { view: "assignments", label: "Assignments", icon: "tasks", group: "Main" },
+  { view: "admin-dashboard", label: "Admin overview", icon: "shield", adminOnly: true, group: "Main" },
+  { view: "properties", label: "Properties", icon: "home", module: "properties", permission: "view", group: "Business" },
+  { view: "projects", label: "Projects", icon: "building", module: "projects", permission: "view", group: "Business" },
+  { view: "clients", label: "Clients", icon: "users", module: "clients", permission: "view", group: "Business" },
+  { view: "appointments", label: "Appointments", icon: "calendar", module: "appointments", permission: "view", group: "Business" },
+  { view: "contracts", label: "Contracts", icon: "contract", module: "contracts", permission: "view", group: "Contracts & records" },
+  { view: "documents", label: "Documents", icon: "folder", module: "documents", permission: "view", group: "Contracts & records" },
+  { view: "reports", label: "Reports", icon: "chart", module: "reports", permission: "view_reports", group: "Contracts & records" },
+  { view: "debts", label: "Payments & debts", icon: "wallet", module: "debts", permission: "view_financial", group: "Finance" },
+  // Reference view, not a module: every signed-in member may read the duty
+  // catalogue and the approval path. It exposes no record and no way to act.
+  { view: "duties", label: "Duties & approvals", icon: "scale", group: "Organization" },
+  { view: "organization", label: "Administration", icon: "settings", adminOnly: true, group: "Organization" },
 ];
 
 /** Whether the caller is entitled to a navigation entry at all. */
@@ -872,10 +976,13 @@ function updateNavigation() {
     // only ever attached to an item they are entitled to, so it cannot disclose
     // the existence of anything hidden from them.
     const counts = {
-      contracts: canModule("contracts") ? (state.contracts || []).filter((contract) => !["completed", "cancelled", "rejected"].includes(contract.status)).length : 0,
+      // Attention, not inventory: a contract counts only when the SERVER offers
+      // this caller a step to take on it (`available_actions`), ignoring the
+      // withdraw-anytime "cancel". A register of 40 open deals nobody here can
+      // move shows no number at all.
+      contracts: canModule("contracts") ? contractsAwaitingCaller().length : 0,
       debts: canModule("debts") && canSeeFinancial() ? (state.debts || []).filter((debt) => debtState(debt) === "overdue").length : 0,
-      documents: canModule("documents") ? (state.documents || []).filter((doc) => doc.status === "pending").length : 0,
-      organization: isAdmin() ? (state.organization.users || []).filter((user) => user.active).length : 0,
+      documents: canModule("documents") && can("edit") ? (state.documents || []).filter((doc) => doc.status === "pending").length : 0,
       // The attention badge is the SERVER's count of items that need this user
       // to act (new or returned work they own, plus work awaiting their review).
       // It is never derived from a list the browser happens to hold, so it is
@@ -887,7 +994,7 @@ function updateNavigation() {
       const count = counts[item.view] || 0;
       const heading = item.group && item.group !== lastGroup ? `<div class="nav-group-label">${escapeHtml(item.group)}</div>` : "";
       lastGroup = item.group || null;
-      return `${heading}<button class="nav-item${item.view === activeView ? " active" : ""}" data-view="${item.view}"><span class="nav-ic">${item.icon}</span><span>${escapeHtml(item.label)}</span>${count > 0 ? `<span class="nav-count">${count > 99 ? "99+" : count}</span>` : ""}</button>`;
+      return `${heading}<button class="nav-item${item.view === activeView ? " active" : ""}" data-view="${item.view}"${item.view === activeView ? ' aria-current="page"' : ""}><span class="nav-ic">${icon(item.icon)}</span><span class="nav-label">${escapeHtml(item.label)}</span>${count > 0 ? `<span class="nav-count">${count > 99 ? "99+" : count}</span>` : ""}</button>`;
     }).join("");
   }
   // Administrator-only controls outside the nav are hidden for anyone else, but
@@ -899,6 +1006,12 @@ function updateNavigation() {
   });
   if (!isAdmin() && (state.view === "admin-dashboard" || state.view === "organization")) state.view = "dashboard";
   if (allowedViewFor(state.view) === false) state.view = "dashboard";
+}
+
+/** Contracts on which the server offers this caller a real workflow step. */
+function contractsAwaitingCaller() {
+  return (state.contracts || []).filter((contract) =>
+    (contract.available_actions || []).some((entry) => entry && entry.action !== "cancel"));
 }
 
 /** The authorized views, used both for navigation and to reject a forced view. */
@@ -987,7 +1100,7 @@ async function openShares(entity, recordId) {
   const users = (state.organization.users || []).map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
   const departments = (state.organization.departments || []).map((department) => `<option value="${department.id}">${escapeHtml(department.name)}</option>`).join("");
   modal.dataset.type = "shares";
-  modal.innerHTML = `<div class="modal-head"><div><h2>Sharing</h2><p>${escapeHtml(entity)} #${recordId}</p></div><button class="icon-btn" data-action="close-modal">×</button></div>
+  modal.innerHTML = `<div class="modal-head"><div><h2>Sharing</h2><p>${escapeHtml(entity)} #${recordId}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
     <div class="form-grid">
       <div class="field"><label for="share-user">Share with a person</label><select id="share-user"><option value="">Select staff</option>${users}</select></div>
       <div class="field"><label for="share-department">Or a department</label><select id="share-department"><option value="">Select department</option>${departments}</select></div>
@@ -1032,7 +1145,9 @@ function priorityBadge(value) {
 }
 
 function taskStatusBadge(value) {
-  return badge(TASK_STATUS_LABELS[value] || value || "assigned", value === "approved" || value === "completed" ? "approved" : value === "changes_requested" || value === "cancelled" ? "archived" : "neutral");
+  // One colour per lifecycle stage (see .badge-task-* in app.css); the label is
+  // always the word, so status never depends on colour alone.
+  return badge(TASK_STATUS_LABELS[value] || value || "assigned", `task-${String(value || "assigned").replace(/_/g, "-")}`);
 }
 
 function shortDate(value) {
@@ -1043,45 +1158,55 @@ function shortDate(value) {
 }
 
 function taskActionButtons(task) {
-  return (task.available_actions || []).map((action) => `<button class="btn btn-${action === "request_changes" ? "soft" : "primary"} btn-small" data-action="task-action" data-id="${task.id}" data-task-action="${action}">${escapeHtml(TASK_ACTION_LABELS[action] || action)}</button>`).join("");
+  return (task.available_actions || []).map((action) => `<button class="btn btn-${action === "request_changes" || action === "cancel" ? "soft" : "primary"} btn-small" data-action="task-action" data-id="${task.id}" data-task-action="${action}">${escapeHtml(TASK_ACTION_LABELS[action] || action)}</button>`).join("");
 }
 
 function taskRow(task) {
-  const link = task.linked_entity ? `<div class="table-sub">Linked: ${escapeHtml(task.linked_entity)} #${task.linked_record_id}</div>` : "";
+  const link = task.linked_entity ? `<span class="cell-sub">Linked: ${escapeHtml(humanize(task.linked_entity))} #${task.linked_record_id}</span>` : "";
+  // The server's `available_actions` decide every button. The first forward
+  // step is the row's main action; the rest (and Cancel) sit in the row menu,
+  // so a reviewer's Approve and Request changes are both still one click away.
+  const actions = task.available_actions || [];
+  const forward = actions.filter((action) => action !== "cancel");
+  const buttons = (list) => taskActionButtons({ ...task, available_actions: list });
+  const primary = forward[0] ? buttons([forward[0]]) : "";
+  const secondary = [...forward.slice(1), ...actions.filter((action) => action === "cancel")];
+  const overdue = task.due_date && String(task.due_date).slice(0, 10) < today() && !["approved", "completed", "cancelled"].includes(task.status);
   return `<tr>
-    <td><strong>${escapeHtml(task.title)}</strong>${task.description ? `<div class="table-sub">${escapeHtml(String(task.description).slice(0, 140))}</div>` : ""}${link}</td>
+    <td><button class="cell-link" data-action="open-task" data-id="${task.id}"><span class="cell-main">${escapeHtml(task.title)}</span></button>${task.description ? `<span class="cell-sub">${escapeHtml(String(task.description).slice(0, 140))}</span>` : ""}${link}</td>
     <td>${escapeHtml(task.assigned_by_name || "—")}</td>
     <td>${escapeHtml(task.assigned_to_name || "—")}</td>
     <td>${priorityBadge(task.priority)}</td>
-    <td>${shortDate(task.due_date)}</td>
+    <td class="${overdue ? "danger-text" : ""}">${shortDate(task.due_date)}${overdue ? `<span class="cell-sub danger-text">Overdue</span>` : ""}</td>
     <td>${taskStatusBadge(task.status)}</td>
-    <td class="align-right">${taskActionButtons(task) || `<button class="btn btn-soft btn-small" data-action="open-task" data-id="${task.id}">Open</button>`}</td>
+    <td class="align-right"><div class="row-actions">${primary || `<button class="btn btn-soft btn-small" data-action="open-task" data-id="${task.id}">Open</button>`}${rowMenu([secondary.length ? buttons(secondary) : "", primary ? `<button class="btn btn-small" data-action="open-task" data-id="${task.id}">Open details</button>` : ""])}</div></td>
   </tr>`;
 }
 
 function renderAssignments() {
   const mayAssign = can("assign_tasks");
   const attention = state.attention || { total: 0, mine: 0, review: 0 };
-  const tabs = TASK_BOXES.map((box) => `<button class="btn btn-${state.taskBox === box.key ? "primary" : "soft"} btn-small" data-action="task-box" data-box="${box.key}">${escapeHtml(box.label)}</button>`).join("");
-  const priorityFilter = `<select id="task-priority" data-action="task-priority-filter" aria-label="Filter by priority"><option value="">All priorities</option>${TASK_PRIORITIES.map((value) => `<option value="${value}" ${state.taskPriority === value ? "selected" : ""}>${escapeHtml(TASK_PRIORITY_LABELS[value])}</option>`).join("")}</select>`;
-  const statusFilter = `<select id="task-status" data-action="task-status-filter" aria-label="Filter by status"><option value="">All statuses</option>${TASK_STATUSES.map((value) => `<option value="${value}" ${state.taskStatus === value ? "selected" : ""}>${escapeHtml(TASK_STATUS_LABELS[value])}</option>`).join("")}</select>`;
+  const tabs = TASK_BOXES.map((box) => `<button class="seg-btn${state.taskBox === box.key ? " active" : ""}" data-action="task-box" data-box="${box.key}" aria-pressed="${state.taskBox === box.key}">${escapeHtml(box.label)}</button>`).join("");
+  const priorityFilter = `<select id="task-priority" class="filter-input" data-action="task-priority-filter" aria-label="Filter by priority"><option value="">All priorities</option>${TASK_PRIORITIES.map((value) => `<option value="${value}" ${state.taskPriority === value ? "selected" : ""}>${escapeHtml(TASK_PRIORITY_LABELS[value])}</option>`).join("")}</select>`;
+  const statusFilter = `<select id="task-status" class="filter-input" data-action="task-status-filter" aria-label="Filter by status"><option value="">All statuses</option>${TASK_STATUSES.map((value) => `<option value="${value}" ${state.taskStatus === value ? "selected" : ""}>${escapeHtml(TASK_STATUS_LABELS[value])}</option>`).join("")}</select>`;
   const tasks = state.tasks || [];
   const rows = tasks.map(taskRow).join("");
   const table = rows
-    ? `<div class="table-wrap"><table><thead><tr><th>Task</th><th>Assigned by</th><th>Assigned to</th><th>Priority</th><th>Due</th><th>Status</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Task</th><th>Assigned by</th><th>Assigned to</th><th>Priority</th><th>Due</th><th>Status</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`
     // An empty section says so plainly rather than inventing filler content.
-    : `<div class="empty"><strong>No tasks in this section</strong>Nothing is waiting on you here right now.</div>`;
-  return `<div class="metric-grid">
-      <div class="metric"><span>Needs your attention</span><strong>${attention.total}</strong></div>
-      <div class="metric"><span>Assigned to you</span><strong>${attention.mine}</strong></div>
-      <div class="metric"><span>Awaiting your review</span><strong>${attention.review}</strong></div>
+    : `<div class="panel">${emptyState("No tasks in this section", "Nothing is waiting on you here right now.", { iconName: "tasks", compact: true })}</div>`;
+  const tile = (label, value, iconName, tone) => `<article class="stat-tile${Number(value) ? "" : " is-quiet"}"><div class="stat-icon ${Number(value) ? tone : ""}">${icon(iconName)}</div><div class="stat-copy"><div class="stat-label">${escapeHtml(label)}</div><div class="stat-value">${Number(value) || 0}</div></div></article>`;
+  return `<div class="stat-grid stat-grid-compact">
+      ${tile("Needs your attention", attention.total, "bell", "gold")}
+      ${tile("Assigned to you", attention.mine, "tasks", "green")}
+      ${tile("Awaiting your review", attention.review, "check", "amber")}
     </div>
-    <section class="card glass" style="margin-top:18px">
-      <div class="section-head"><div><h2 class="section-title">Assignments</h2><div class="section-note">Work assigned to you, work you have assigned, and work waiting on your decision</div></div>${mayAssign ? `<button class="btn btn-primary btn-small" data-action="new-task">+ New Task</button>` : ""}</div>
-      <div class="row-actions" style="margin-bottom:12px">${tabs}</div>
-      <div class="row-actions" style="margin-bottom:12px">${priorityFilter}${statusFilter}</div>
-      ${table}
-    </section>`;
+    <div class="toolbar">
+      <div class="toolbar-filters"><div class="segmented" role="group" aria-label="Task sections">${tabs}</div>${priorityFilter}${statusFilter}</div>
+      <div class="toolbar-end">${mayAssign ? `<button class="btn btn-primary" data-action="new-task">${icon("plus")}New Task</button>` : ""}</div>
+    </div>
+    <div class="section-head section-head-tight"><div><h2 class="section-title">Assignments · ${escapeHtml((TASK_BOXES.find((box) => box.key === state.taskBox) || TASK_BOXES[0]).label)}</h2><div class="section-note">${tasks.length} task${tasks.length === 1 ? "" : "s"} in this section</div></div></div>
+    ${table}`;
 }
 
 async function loadTasks() {
@@ -1123,7 +1248,7 @@ async function openTask(id) {
   const history = (task.history || []).map((entry) => `<tr><td>${formatDateTime(entry.created_at, true)}</td><td>${escapeHtml(entry.actor_name || "System")}</td><td>${escapeHtml(String(entry.action || "").replace(/^task_/, "").replace(/_/g, " "))}</td><td>${escapeHtml(entry.details_json?.from || "—")} → ${escapeHtml(entry.details_json?.to || "—")}</td></tr>`).join("");
   const comments = (task.comments || []).map((comment) => `<tr><td>${escapeHtml(comment.author_name || "—")}</td><td>${escapeHtml(comment.body)}</td><td>${formatDateTime(comment.created_at, true)}</td></tr>`).join("");
   modal.dataset.type = "task";
-  modal.innerHTML = `<div class="modal-head"><div><h2>${escapeHtml(task.title)}</h2><p>${escapeHtml(TASK_STATUS_LABELS[task.status] || task.status)} · ${escapeHtml(TASK_PRIORITY_LABELS[task.priority] || task.priority)}</p></div><button class="icon-btn" data-action="close-modal">×</button></div>
+  modal.innerHTML = `<div class="modal-head"><div><h2>${escapeHtml(task.title)}</h2><p>${escapeHtml(TASK_STATUS_LABELS[task.status] || task.status)} · ${escapeHtml(TASK_PRIORITY_LABELS[task.priority] || task.priority)}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
     <div class="task-detail">
       <div><span>Assigned by</span><strong>${escapeHtml(task.assigned_by_name || "—")}</strong></div>
       <div><span>Assigned to</span><strong>${escapeHtml(task.assigned_to_name || "—")}</strong></div>
@@ -1187,17 +1312,17 @@ async function openTaskModal() {
   const priorities = TASK_PRIORITIES.map((value) => `<option value="${value}" ${value === "medium" ? "selected" : ""}>${escapeHtml(TASK_PRIORITY_LABELS[value])}</option>`).join("");
   const links = TASK_LINK_CHOICES.map(([value, label]) => `<option value="${value}">${escapeHtml(label)}</option>`).join("");
   modal.dataset.type = "task";
-  modal.innerHTML = `<div class="modal-head"><div><h2>New Task</h2><p>Assigning as yourself · only people inside your authorized scope are listed</p></div><button class="icon-btn" data-action="close-modal">×</button></div>
+  modal.innerHTML = `<div class="modal-head"><div><h2>New Task</h2><p>Assigning as yourself · only people inside your authorized scope are listed</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
     <form id="task-form" class="form-grid">
       <div class="field"><label for="task-title">Task title <span class="req">*</span></label><input id="task-title" name="title" required maxlength="160" placeholder="Prepare Monthly Sales Report"></div>
-      <div class="field"><label for="task-description">Description / instructions</label><textarea id="task-description" name="description" rows="3" placeholder="What exactly must be produced?"></textarea></div>
+      <div class="field full"><label for="task-description">Description / instructions</label><textarea id="task-description" name="description" rows="3" placeholder="What exactly must be produced?"></textarea></div>
       <div class="field"><label for="task-assignee">Assign to <span class="req">*</span></label><select id="task-assignee" name="assigned_to" required><option value="">Select authorized staff</option>${people}</select></div>
       ${reviewerField}
       <div class="field"><label for="task-priority-input">Priority</label><select id="task-priority-input" name="priority">${priorities}</select></div>
       <div class="field"><label for="task-due">Due date</label><input id="task-due" name="due_date" type="date"></div>
       <div class="field"><label for="task-link-entity">Linked record (optional)</label><select id="task-link-entity" name="linked_entity">${links}</select></div>
       <div class="field"><label for="task-link-id">Linked record id</label><input id="task-link-id" name="linked_record_id" type="number" min="1" step="1" placeholder="e.g. 21"></div>
-      <button class="btn btn-primary" type="submit">Assign work</button>
+      <div class="form-actions full"><button type="button" class="btn" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="submit">Assign work</button></div>
     </form>`;
   modalBackdrop.hidden = false;
 }
@@ -1392,9 +1517,9 @@ function generateContractFormBody() {
       <div class="field full"><div class="field-help">The contract number is issued by the system when the contract is created.</div></div>
     </fieldset>
 
-    <div class="row-actions full">
-      <button class="btn btn-primary" type="button" data-action="contract-preview">Preview contract</button>
+    <div class="form-actions full">
       <button class="btn" type="button" data-action="close-modal">Cancel</button>
+      <button class="btn btn-primary" type="button" data-action="contract-preview">Review contract${icon("arrow")}</button>
     </div>
   </form>`;
 }
@@ -1412,27 +1537,31 @@ function generateContractReviewBody(data) {
   const row = (label, value) => `<div class="task-detail"><div><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value ?? "") || "—")}</strong></div></div>`;
   return `<div class="gen-review">
       <p class="field-help">Check these details. The server recalculates the price, issues the contract number and creates the document when you generate.</p>
+      <h3 class="review-heading">Client</h3>
       ${row("Client", data.client_name)}
       ${row("Client phone", data.client_phone)}
       ${row("Client email", data.client_email)}
+      <h3 class="review-heading">Property & agreement</h3>
       ${row("Project", project?.name)}
       ${row("Property", property ? `${property.name} · ${property.location || ""}` : "—")}
-      ${row("Agreement", `${data.start_date || "—"} → ${data.end_date || "—"}`)}
+      ${row("Agreement", `${data.start_date ? formatDate(data.start_date) : "—"} → ${data.end_date ? formatDate(data.end_date) : "—"}`)}
       ${row("Duration", data.agreement_duration ? `${data.agreement_duration} ${data.agreement_duration_unit || "months"}` : "—")}
-      ${row("Contract date", data.contract_date || today())}
-      ${row("Original price", money(priced.original_price))}
-      ${row("Discount", `${money(priced.discount_pct)}% = ${money(priced.discount_amount)}`)}
+      ${row("Contract date", formatDate(data.contract_date || today()))}
+      <h3 class="review-heading">Pricing & payment plan</h3>
+      ${row("Original price", money(data.original_price))}
+      ${row("Discount", `${numberValue(data.discount_pct)}% = ${money(priced.discount_amount)}`)}
       ${row("Final price", money(priced.final_price))}
       ${row("Deposit", data.deposit ? money(data.deposit) : "—")}
       ${row("Installments", data.installments || "—")}
       ${row("Frequency", data.frequency || "—")}
-      ${row("First due date", data.first_due_date || "—")}
+      ${row("First due date", data.first_due_date ? formatDate(data.first_due_date) : "—")}
+      <h3 class="review-heading">Document</h3>
       ${row("Template", template?.title || "Built-in Sale Agreement")}
       ${row("Contract number", "Issued automatically when generated")}
     </div>
-    <div class="row-actions">
-      <button class="btn btn-primary" type="button" data-action="contract-confirm">Generate contract</button>
+    <div class="form-actions">
       <button class="btn" type="button" data-action="contract-back">Back to edit</button>
+      <button class="btn btn-primary" type="button" data-action="contract-confirm">${icon("contract")}Generate contract</button>
     </div>`;
 }
 
@@ -1443,36 +1572,47 @@ function generateContractSuccessBody(result) {
   // A contract with no stored file gets NO Open button. A dead link is worse
   // than an honest absence - this mirrors the document system's own rule.
   const actions = file.has_file && canModule("documents")
-     ? `<button class="btn btn-soft" type="button" data-action="view-generated-contract" data-id="${contract.id}">View / Edit</button>
-       <button class="btn btn-primary" type="button" data-action="download-generated-document" data-id="${file.id}" data-filename="${escapeHtml(file.original_filename || file.file_name || "contract.docx")}">Download DOCX</button>`
+     ? `<button class="btn btn-primary" type="button" data-action="view-generated-contract" data-id="${contract.id}">${icon("file")}Open contract</button>
+       <button class="btn" type="button" data-action="download-generated-document" data-id="${file.id}" data-filename="${escapeHtml(file.original_filename || file.file_name || "contract.docx")}">Download DOCX</button>
+       ${allowedViewFor("documents") !== false ? `<button class="btn btn-ghost" type="button" data-action="open-alert-view" data-view="documents">Go to Documents${icon("arrow")}</button>` : ""}`
     : `<div class="field-help">${file.has_file ? "The document is saved; your account does not have Documents access." : "The contract was created but no document file was stored."}</div>`;
   return `<div class="gen-success">
-      <div class="gen-success-mark">✓</div>
-      <h2>Contract generated successfully</h2>
-      <div class="task-detail">
-        <div><span>Contract #</span><strong>${escapeHtml(contract.contract_number || "—")}</strong></div>
+      <div class="gen-success-mark">${icon("check")}</div>
+      <h2>Contract Generated Successfully</h2>
+      <p class="gen-success-number">Contract number <strong>${escapeHtml(contract.contract_number || "—")}</strong></p>
+      <div class="summary-grid">
         <div><span>Client</span><strong>${escapeHtml(contract.client_name || "—")}</strong></div>
         <div><span>Final price</span><strong>${escapeHtml(money(result.pricing?.final_price))}</strong></div>
         <div><span>Generated document</span><strong>${escapeHtml(file.original_filename || file.file_name || "—")}</strong></div>
+        ${result.schedule?.created ? `<div><span>Payment plan</span><strong>${result.schedule.created} installment(s) from the final price</strong></div>` : ""}
       </div>
-      ${result.schedule?.created ? `<div class="field-help">${result.schedule.created} installment(s) created from the final price.</div>` : ""}
       ${result.schedule?.skipped ? `<div class="field-help">${escapeHtml(result.schedule.skipped)}</div>` : ""}
-      <div class="row-actions">${actions}
-        <button class="btn" type="button" data-action="close-modal">Done</button>
+      <div class="gen-success-actions">${actions}
+        <button class="btn btn-ghost" type="button" data-action="close-modal">Done</button>
       </div>
     </div>`;
 }
 
+/** Details -> Review -> Done, shown at the top of the overlay. */
+function generateContractSteps(step) {
+  const order = ["form", "review", "success"];
+  const labels = { form: "Contract details", review: "Review", success: "Generated" };
+  const current = order.indexOf(step);
+  return `<ol class="stepper" aria-label="Contract generation progress">${order.map((key, index) => `<li class="${index < current ? "done" : index === current ? "current" : ""}"${index === current ? ' aria-current="step"' : ""}><span class="stepper-dot">${index < current ? icon("check") : index + 1}</span><span>${labels[key]}</span></li>`).join("")}</ol>`;
+}
+
 function renderGenerateContractModal() {
   const step = state.contractGen.step;
+  const close = `<button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button>`;
   if (step === "success") {
-    modal.innerHTML = `<div class="modal-head"><div><h2>Done</h2><p>The contract and its document are saved.</p></div><button class="icon-btn" data-action="close-modal">×</button></div>${generateContractSuccessBody(state.contractGen.result || {})}`;
+    modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">Contract generated</h2><p class="modal-sub">The contract and its document are saved.</p></div>${close}</div>${generateContractSteps("success")}<div class="modal-body">${generateContractSuccessBody(state.contractGen.result || {})}</div>`;
     return;
   }
   const data = generateContractFormData();
   const body = step === "review" ? generateContractReviewBody(data) : generateContractFormBody();
-  modal.innerHTML = `<div class="modal-head"><div><h2>${step === "review" ? "Review contract" : "Generate contract"}</h2><p>${step === "review" ? "Check everything before the document is created." : "Collect the agreement, the price and the payment plan."}</p></div><button class="icon-btn" data-action="close-modal">×</button></div>${body}`;
+  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">${step === "review" ? "Review contract" : "Generate contract"}</h2><p class="modal-sub">${step === "review" ? "Check everything before the document is created." : "Client, property, pricing and payment plan. The server calculates the final price."}</p></div>${close}</div>${generateContractSteps(step)}<div class="modal-body">${body}</div>`;
   modal.dataset.type = "contract-generate";
+  if (step !== "review") markRequiredFields(modal);
 }
 
 /** Opens the overlay. Loading the template list is all that happens here. */
@@ -1528,7 +1668,7 @@ async function submitGenerateContract() {
     renderGenerateContractModal();
     // The register must show the new contract without a manual refresh.
     state.listState.contracts = null;
-    loadWorkspace();
+    refresh();
   } catch (error) {
     showToast(error.message || "The contract could not be generated.");
     state.contractGen.step = "form";
@@ -1913,17 +2053,27 @@ function projectSelect(selected = "") {
   return `<select class="filter-input" data-filter="project" aria-label="Filter by project"><option value="">All projects</option>${projectOptions(selected)}</select>`;
 }
 
-function card(label, value, foot, icon = "◆", tone = "") {
-  return `<article class="card glass card-accent"><div><div class="card-label">${escapeHtml(label)}</div><div class="card-value">${value}</div><div class="card-foot">${foot}</div></div><div class="card-icon ${tone}">${icon}</div></article>`;
+function card(label, value, foot, iconName = "dot", tone = "") {
+  return `<article class="stat-tile"><div class="stat-icon ${tone}">${icon(iconName)}</div><div class="stat-copy"><div class="stat-label">${escapeHtml(label)}</div><div class="stat-value">${value}</div>${foot ? `<div class="stat-foot">${foot}</div>` : ""}</div></article>`;
 }
 
 function renderLoading() {
-  content.innerHTML = `<div class="loading glass"><div><div class="spinner"></div>Loading workspace…</div></div>`;
+  content.innerHTML = `<div class="loading" role="status" aria-live="polite"><div class="spinner" aria-hidden="true"></div><span>Loading workspace…</span></div>`;
 }
 
-// Sector dashboard. Only cards whose module the caller holds are rendered, and
-// every monetary card is gated on `view_financial`, so a sales dashboard can
-// never display balances or income.
+/** A dashboard panel: a titled surface with an optional header action. */
+function dashPanel(title, note, body, action = "", extraClass = "") {
+  return `<article class="panel${extraClass ? ` ${extraClass}` : ""}"><div class="panel-head"><div><h2 class="panel-title">${escapeHtml(title)}</h2>${note ? `<div class="panel-note">${escapeHtml(note)}</div>` : ""}</div>${action}</div><div class="panel-body">${body}</div></article>`;
+}
+
+// Command-centre dashboard. Three rules shape it:
+//   1. Attention first - only things the caller can act on, only when there is
+//      something to act on.
+//   2. No meaningless numbers - the statistics strip appears once the workspace
+//      holds records; an empty workspace gets a getting-started path instead of
+//      a wall of zeros.
+//   3. Every card, panel and quick action is gated exactly as before: modules
+//      via canModule(), money via view_financial, actions via can().
 function renderDashboard() {
   const summary = state.summary || {};
   const financial = canSeeFinancial() && summary.financial !== false;
@@ -1939,50 +2089,64 @@ function renderDashboard() {
   const followUps = state.organization.followUps || [];
   const attentionCount = Number(state.attention?.total || 0);
   const visibleRecordCount = [state.projects, state.properties, state.clients, state.contracts, state.debts, state.appointments, state.documents, state.payments, state.reports, leads, followUps].reduce((total, rows) => total + (rows || []).length, 0);
+  const hasRecords = visibleRecordCount > 0;
+
   const quickActions = [];
-  if (canModule("projects") && can("create")) quickActions.push(`<button class="btn" data-action="new-project">Create project</button>`);
-  if (canModule("properties") && can("create")) quickActions.push(`<button class="btn btn-primary" data-action="new-property">Create property</button>`);
-  if (canModule("contracts") && can("create")) quickActions.push(`<button class="btn btn-primary" data-action="generate-contract">Generate contract</button>`);
-  if (canModule("clients") && can("create")) quickActions.push(`<button class="btn" data-action="new-client">Add client</button>`);
+  if (canModule("contracts") && can("create")) quickActions.push(`<button class="btn btn-primary" data-action="generate-contract">${icon("contract")}Generate contract</button>`);
+  if (canModule("properties") && can("create")) quickActions.push(`<button class="btn" data-action="new-property">${icon("plus")}Property</button>`);
+  if (canModule("clients") && can("create")) quickActions.push(`<button class="btn" data-action="new-client">${icon("plus")}Client</button>`);
+  if (canModule("projects") && can("create")) quickActions.push(`<button class="btn" data-action="new-project">${icon("plus")}Project</button>`);
 
-  const cards = [];
-  if (canModule("projects")) cards.push(card("Active projects", summary.active_projects || 0, "Developments in progress", "▥", "teal"));
-  if (canModule("properties")) cards.push(card("Available properties", summary.properties_available || 0, "Ready to sell or lease", "⌂", "teal"));
-  if (canModule("leads")) cards.push(card("Open leads", leads.filter((lead) => lead.status !== "converted").length, `${leads.filter((lead) => lead.status === "new").length} new enquiries`, "◌", "teal"));
-  if (canModule("clients")) cards.push(card("Active clients", summary.clients_active || 0, "Relationships on record", "◍", "teal"));
-  if (canModule("follow_ups")) cards.push(card("Follow-ups", followUps.filter((entry) => entry.status === "open").length, "Open tasks assigned", "↻", "teal"));
-  if (canModule("contracts")) cards.push(card("New contracts", newContracts.count || 0, `${money(newContracts.total || 0)} active value`, "↗", "teal"));
-  if (canModule("appointments")) cards.push(card("Scheduled viewings", summary.appointments_scheduled || 0, "Appointments booked", "◫", "teal"));
-  if (canModule("documents")) cards.push(card("Pending documents", summary.documents_pending || 0, "Awaiting approval", "▱", "amber"));
-  if (financial && canModule("debts")) cards.push(card("Open debts", pending.count || 0, `${money(pending.total || 0)} awaiting payment`, "◷", "amber"));
-  if (financial && canModule("debts")) cards.push(card("Overdue", overdue.count || 0, `${money(overdue.total || 0)} needs follow-up`, "!", "red"));
-  if (financial && canModule("payments")) cards.push(card("Collected · 30 days", money(income30.total || 0), `${income30.count || 0} payment${income30.count === 1 ? "" : "s"} recorded`, "$", "teal"));
-
-  // Declared before the panels below: the portfolio panel renders this chart.
-  const maxProjectValue = Math.max(1, ...state.projectReports.map((project) => numberValue(project.contract_value)));
-  const chart = state.projectReports.length ? state.projectReports.map((project) => {
-    const height = Math.max(5, Math.round(numberValue(project.contract_value) / maxProjectValue * 110));
-    return `<div class="chart-col" title="${escapeHtml(project.name)}: ${money(project.contract_value)}"><div class="chart-value">${money(project.contract_value)}</div><div class="chart-bar" style="height:${height}px"></div><div class="chart-label">${escapeHtml(project.name)}</div></div>`;
-  }).join("") : `<div class="empty">Add a project to begin building your portfolio.</div>`;
-
-  const panels = [];
-  panels.push(`<article class="card glass dashboard-attention"><div class="section-head"><div><h2 class="section-title">Pending tasks</h2><div class="section-note">Work that needs your attention</div></div><span class="attention-count${attentionCount ? " has-items" : ""}">${attentionCount}</span></div>${attentionCount ? `<p class="dashboard-panel-copy">${attentionCount} task${attentionCount === 1 ? "" : "s"} need${attentionCount === 1 ? "s" : ""} your attention.</p><button class="btn btn-soft btn-small" data-action="open-alert-view" data-view="assignments">Review assignments</button>` : `<div class="dashboard-empty-state"><strong>No pending tasks</strong><span>New assignments and reviews will appear here.</span></div>`}</article>`);
-  if (canModule("projects") || canModule("contracts")) {
-    panels.push(`<article class="card glass"><div class="section-head"><div><h2 class="section-title">Portfolio value</h2><div class="section-note">Contract value by project</div></div><span class="badge badge-active">Live records</span></div><div class="chart">${chart}</div></article>`);
-  }
+  // ---- 1. Needs your attention ---------------------------------------------
+  const attentionItems = [];
+  const attentionRow = (count, label, note, view, iconName, tone = "") => attentionItems.push(
+    `<button class="attention-item" data-action="open-alert-view" data-view="${view}"><span class="attention-icon ${tone}">${icon(iconName)}</span><span class="attention-copy"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(note)}</span></span><span class="attention-count">${count > 99 ? "99+" : count}</span>${icon("arrow", "attention-go")}</button>`);
+  if (attentionCount) attentionRow(attentionCount, `${attentionCount === 1 ? "Assignment needs" : "Assignments need"} you`, "New, returned or awaiting your review", "assignments", "tasks", "gold");
   if (canModule("contracts")) {
-    const hasContracts = Number(newContracts.count || 0) + Number(terminal.count || 0) > 0;
-    panels.push(`<article class="card glass"><div class="section-head"><div><h2 class="section-title">Contracts</h2><div class="section-note">New and terminal agreements</div></div></div>${hasContracts ? `<div class="grid grid-2"><div><div class="card-label">New</div><div class="card-value positive">${newContracts.count || 0}</div><div class="card-foot">${money(newContracts.total || 0)}</div></div><div><div class="card-label">Terminal</div><div class="card-value warning-text">${terminal.count || 0}</div><div class="card-foot">${money(terminal.total || 0)}</div></div></div><div class="trend">Use Reports for a detailed breakdown.</div>` : `<div class="dashboard-empty-state"><strong>No active contracts</strong><span>Contracts will appear here once created.</span>${can("create") ? `<button class="btn btn-soft btn-small" data-action="generate-contract">Generate contract</button>` : ""}</div>`}</article>`);
+    const awaiting = contractsAwaitingCaller().length;
+    if (awaiting) attentionRow(awaiting, `${awaiting === 1 ? "Contract awaits" : "Contracts await"} your step`, "Workflow actions are available to you", "contracts", "contract");
   }
-  if (canModule("leads")) {
-    const rows = leads.slice(0, 6).map((lead) => `<tr><td><span class="cell-main">${escapeHtml(lead.name)}</span><span class="cell-sub">${escapeHtml(lead.source || "—")}</span></td><td>${badge(lead.status, "neutral")}</td><td class="align-right">${formatDate(lead.created_at)}</td></tr>`).join("");
-    panels.push(`<article class="card glass"><div class="section-head"><div><h2 class="section-title">Latest leads</h2><div class="section-note">Enquiries assigned to your sector</div></div></div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Lead</th><th>Status</th><th class="align-right">Received</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty"><strong>No leads yet</strong>New enquiries will appear here.</div>`}</article>`);
-  }
-  if (canModule("appointments")) {
-    const rows = [...state.appointments].sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at))).slice(0, 6).map((entry) => `<tr><td><span class="cell-main">${escapeHtml(entry.title)}</span><span class="cell-sub">${escapeHtml(entry.client_name || "")}</span></td><td>${escapeHtml(entry.project_name || "—")}</td><td class="align-right">${formatDateTime(entry.starts_at)}</td></tr>`).join("");
-    panels.push(`<article class="card glass"><div class="section-head"><div><h2 class="section-title">Next appointments</h2><div class="section-note">Viewings, calls and inspections</div></div></div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Appointment</th><th>Project</th><th class="align-right">When</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty"><strong>Nothing booked</strong>Schedule a viewing or call.</div>`}</article>`);
+  if (financial && canModule("debts") && Number(overdue.count || 0) > 0) attentionRow(Number(overdue.count), `Overdue ${Number(overdue.count) === 1 ? "installment" : "installments"}`, `${money(overdue.total || 0)} past due`, "debts", "alert", "red");
+  // Reminders are derived from installments, so they only count once the
+  // caller can see installments at all.
+  if (financial && canModule("reminders") && canModule("debts") && hasRecords && upcoming.length) attentionRow(upcoming.length, "Payments due soon", "Due now or within the next 7 days", "debts", "clock", "amber");
+  if (canModule("documents") && can("edit") && Number(summary.documents_pending || 0) > 0) attentionRow(Number(summary.documents_pending), `${Number(summary.documents_pending) === 1 ? "Document awaits" : "Documents await"} approval`, "Pending review in the document register", "documents", "folder", "amber");
+  const attentionPanel = dashPanel(
+    "Needs your attention",
+    attentionItems.length ? "Only work you can act on appears here" : "",
+    attentionItems.length
+      ? `<div class="attention-list">${attentionItems.join("")}</div>`
+      : emptyState("No pending tasks", "You're all caught up. New assignments, reviews and approvals will appear here.", { iconName: "check", compact: true }),
+    "",
+    "attention-panel",
+  );
+
+  // ---- 2. Key figures (only once there is something to count) -------------
+  const cards = [];
+  if (hasRecords) {
+    if (canModule("properties")) cards.push(card("Available properties", summary.properties_available || 0, "Ready to sell or lease", "home"));
+    if (canModule("projects")) cards.push(card("Active projects", summary.active_projects || 0, "Developments in progress", "building"));
+    if (canModule("clients")) cards.push(card("Active clients", summary.clients_active || 0, "Relationships on record", "users"));
+    if (canModule("contracts")) cards.push(card("New contracts", newContracts.count || 0, `${money(newContracts.total || 0)} contract value`, "contract"));
+    if (canModule("leads")) cards.push(card("Open leads", leads.filter((lead) => lead.status !== "converted").length, `${leads.filter((lead) => lead.status === "new").length} new enquiries`, "spark"));
+    if (canModule("appointments")) cards.push(card("Scheduled appointments", summary.appointments_scheduled || 0, "Viewings, calls and meetings", "calendar"));
+    if (financial && canModule("debts")) cards.push(card("Outstanding", money(pending.total || 0), `${pending.count || 0} open installment${Number(pending.count) === 1 ? "" : "s"}`, "wallet", "amber"));
+    if (financial && canModule("payments")) cards.push(card("Collected · 30 days", money(income30.total || 0), `${income30.count || 0} payment${income30.count === 1 ? "" : "s"} recorded`, "money", "green"));
   }
 
+  // ---- 3. Getting started (empty workspace only) --------------------------
+  const startSteps = [];
+  const startStep = (n, title, text, action) => startSteps.push(`<li class="start-step"><span class="start-num">${n}</span><div class="start-copy"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(text)}</span></div>${action}</li>`);
+  if (!hasRecords) {
+    let n = 1;
+    if (canModule("projects") && can("create")) startStep(n++, "Create a project", "Group properties by development.", `<button class="btn btn-small" data-action="new-project">Create project</button>`);
+    if (canModule("properties") && can("create")) startStep(n++, "Add your first property", "Price, location, status and photos.", `<button class="btn btn-small" data-action="new-property">Add property</button>`);
+    if (canModule("clients") && can("create")) startStep(n++, "Register a client", "A client can exist before any contract.", `<button class="btn btn-small" data-action="new-client">Add client</button>`);
+    if (canModule("contracts") && can("create")) startStep(n++, "Generate a contract", "Pricing, payment plan and the full document.", `<button class="btn btn-small btn-primary" data-action="generate-contract">Generate</button>`);
+  }
+
+  // ---- 4. Module panels ---------------------------------------------------
+  const panels = [];
   if (canModule("contracts")) {
     // The contract value is deliberately shown to every caller holding the
     // contracts module, financial or not: Sales negotiates the price and Legal
@@ -1990,28 +2154,84 @@ function renderDashboard() {
     // them and the UI must agree. What is withheld from a non-financial caller
     // is the FINANCIAL aggregate set - outstanding, overdue, income, the debt
     // and payment registers - and those are gated on `financial` above.
-    panels.push(`<article class="card glass"><div class="section-head"><div><h2 class="section-title">Recent contracts</h2><div class="section-note">Latest additions to the register</div></div>${can("create") ? `<button class="btn btn-soft btn-small" data-action="new-contract">+ New contract</button>` : ""}</div>${recent.length ? `<div class="table-wrap"><table><thead><tr><th>Client</th><th>Project</th><th>Type</th><th>Value</th></tr></thead><tbody>${recent.map((contract) => `<tr><td><span class="cell-main">${escapeHtml(contract.client_name)}</span></td><td><span class="cell-sub">${escapeHtml(contract.project_name)}</span></td><td>${badge(contract.contract_type)}</td><td class="amount">${money(contract.value)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty"><strong>No contracts yet</strong>Create the first contract to start the register.</div>`}</article>`);
+    const hasContracts = recent.length > 0 || Number(newContracts.count || 0) + Number(terminal.count || 0) > 0;
+    const list = recent.map((contract) => `<li class="list-row" data-searchable><div class="list-main"><strong>${escapeHtml(contract.client_name)}</strong><span>${escapeHtml(contract.contract_number || contract.project_name || "")}${contract.contract_number && contract.project_name ? ` · ${escapeHtml(contract.project_name)}` : ""}</span></div><div class="list-side">${contractStatusBadge(contract.status)}<span class="amount">${money(contract.value)}</span></div></li>`).join("");
+    panels.push(dashPanel(
+      "Recent contracts",
+      hasContracts ? `${newContracts.count || 0} new · ${terminal.count || 0} terminal` : "",
+      hasContracts && list ? `<ul class="list">${list}</ul>` : emptyState("No active contracts", "Contracts will appear here once created.", { iconName: "contract", compact: true, action: can("create") ? `<button class="btn btn-small btn-primary" data-action="generate-contract">Generate contract</button>` : "" }),
+      hasContracts ? `<button class="btn btn-ghost btn-small" data-action="open-alert-view" data-view="contracts">View all${icon("arrow")}</button>` : "",
+    ));
   }
   // Reminders are their own module with their own access key, so the panel is
   // gated on `reminders` rather than on `debts`. Anything the panel links to is
   // gated separately, so a caller without the debts module still gets the list.
-  if (financial && canModule("reminders")) {
-    panels.push(`<article class="card glass"><div class="section-head"><div><h2 class="section-title">Payment reminders</h2><div class="section-note">Due now or within the next 7 days</div></div>${canModule("debts") ? `<button class="btn btn-soft btn-small" data-action="view-debts">View debts</button>` : ""}</div><div class="reminder-list">${upcoming.length ? upcoming.map((debt) => `<div class="reminder" data-searchable><div class="reminder-icon">◷</div><div class="reminder-copy"><div class="reminder-title">${escapeHtml(debt.client_name)}</div><div class="reminder-meta">${escapeHtml(debt.project_name)} · ${money(debt.amount)} · due ${formatDate(debt.due_date)}</div></div>${debt.remind_at ? `<button class="btn btn-small" data-action="dismiss-reminder" data-id="${debt.id}" title="Mark reminder as handled">Dismiss</button>` : ""}<button class="btn btn-small" data-action="edit-debt" data-id="${debt.debt_id || debt.id}">Review</button></div>`).join("") : `<div class="empty"><strong>All clear</strong>No payments are due in the next 7 days.</div>`}</div></article>`);
+  if (financial && canModule("reminders") && hasRecords) {
+    const rows = upcoming.map((debt) => `<li class="list-row reminder" data-searchable><div class="list-main"><strong>${escapeHtml(debt.client_name)}</strong><span>${escapeHtml(debt.project_name || "")}${debt.project_name ? " · " : ""}due ${formatDate(debt.due_date)}</span></div><div class="list-side"><span class="amount">${money(debt.amount)}</span>${debt.remind_at && can("edit") ? `<button class="btn btn-ghost btn-small" data-action="dismiss-reminder" data-id="${debt.id}" title="Mark reminder as handled">Dismiss</button>` : ""}${can("edit") ? `<button class="btn btn-small" data-action="edit-debt" data-id="${debt.debt_id || debt.id}">Review</button>` : ""}</div></li>`).join("");
+    panels.push(dashPanel(
+      "Payment reminders",
+      "Due now or within the next 7 days",
+      rows ? `<ul class="list">${rows}</ul>` : emptyState("All clear", "No payments are due in the next 7 days.", { iconName: "check", compact: true }),
+      canModule("debts") ? `<button class="btn btn-ghost btn-small" data-action="view-debts">View debts${icon("arrow")}</button>` : "",
+    ));
   }
-  if (canModule("follow_ups")) {
-    const rows = followUps.slice(0, 6).map((entry) => `<tr><td><span class="cell-main">${escapeHtml(entry.follow_up_type)}</span></td><td>${badge(entry.status, "neutral")}</td><td class="align-right">${formatDateTime(entry.due_at)}</td></tr>`).join("");
-    panels.push(`<article class="card glass"><div class="section-head"><div><h2 class="section-title">Open follow-ups</h2><div class="section-note">Outstanding tasks in your sector</div></div></div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Type</th><th>Status</th><th class="align-right">Due</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty"><strong>Nothing outstanding</strong>Schedule a follow-up to keep clients engaged.</div>`}</article>`);
+  if (canModule("appointments") && hasRecords) {
+    const rows = [...state.appointments].filter((entry) => entry.status !== "cancelled").sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at))).slice(0, 5).map((entry) => `<li class="list-row" data-searchable><div class="date-chip">${appointmentDateChip(entry.starts_at)}</div><div class="list-main"><strong>${escapeHtml(entry.title)}</strong><span>${escapeHtml(entry.client_name || "")}${entry.project_name ? ` · ${escapeHtml(entry.project_name)}` : ""}</span></div><div class="list-side">${badge(entry.appointment_type, "neutral")}</div></li>`).join("");
+    panels.push(dashPanel("Next appointments", "Viewings, calls and inspections", rows ? `<ul class="list">${rows}</ul>` : emptyState("Nothing booked", "Scheduled viewings and calls will appear here.", { iconName: "calendar", compact: true })));
   }
+  if (canModule("leads") && leads.length) {
+    const rows = leads.slice(0, 5).map((lead) => `<li class="list-row" data-searchable><div class="list-main"><strong>${escapeHtml(lead.name)}</strong><span>${escapeHtml(lead.source || "—")}</span></div><div class="list-side">${badge(lead.status, "neutral")}<span class="muted">${formatDate(lead.created_at)}</span></div></li>`).join("");
+    panels.push(dashPanel("Latest leads", "Enquiries assigned to your sector", `<ul class="list">${rows}</ul>`));
+  }
+  if (canModule("follow_ups") && followUps.some((entry) => entry.status === "open")) {
+    const rows = followUps.filter((entry) => entry.status === "open").slice(0, 5).map((entry) => `<li class="list-row" data-searchable><div class="list-main"><strong>${escapeHtml(humanize(entry.follow_up_type))}</strong><span>Due ${formatDateTime(entry.due_at)}</span></div><div class="list-side">${badge(entry.status, "neutral")}</div></li>`).join("");
+    panels.push(dashPanel("Open follow-ups", "Outstanding tasks in your sector", `<ul class="list">${rows}</ul>`));
+  }
+  // A chart of zeros says nothing, so the portfolio chart only appears once at
+  // least one project actually carries contract value.
+  const valued = (state.projectReports || []).filter((project) => numberValue(project.contract_value) > 0);
+  if ((canModule("projects") || canModule("contracts")) && valued.length) {
+    const maxProjectValue = Math.max(1, ...valued.map((project) => numberValue(project.contract_value)));
+    const bars = valued.slice(0, 8).map((project) => {
+      const width = Math.max(3, Math.round(numberValue(project.contract_value) / maxProjectValue * 100));
+      return `<li class="bar-row" title="${escapeHtml(project.name)}: ${money(project.contract_value)}"><span class="bar-label">${escapeHtml(project.name)}</span><span class="bar-track"><span class="bar-fill" style="width:${width}%"></span></span><span class="bar-value">${money(project.contract_value)}</span></li>`;
+    }).join("");
+    panels.push(dashPanel("Portfolio value", "Contract value by project", `<ul class="bar-list">${bars}</ul>`));
+  }
+
   const scope = state.organization.me?.scope || "own";
   const scopeNote = {
-    own: "You are seeing your own records and anything shared with you.",
-    department: "You are seeing your department's records.",
-    organization: "You are seeing every record in the organization.",
+    own: "Your records and anything shared with you",
+    department: "Your department's records",
+    organization: "Every record in the organization",
   }[scope];
+  const roleName = state.organization.me?.user?.roles?.[0]?.name || "Workspace";
+  const firstName = String(currentUser?.display_name || "").split(" ")[0] || "team";
   content.innerHTML = `
-    <div class="hero-strip dashboard-hero"><div class="hero-copy"><div class="eyebrow">${escapeHtml(state.organization.me?.user?.roles?.[0]?.name || "Workspace")} · ${escapeHtml(scopeNote || "")}</div><h2>${visibleRecordCount ? `Welcome back, ${escapeHtml(currentUser?.display_name || "team")}` : "Your workspace is ready"}</h2><p>${visibleRecordCount ? "Here is the latest activity in your authorized workspace." : "No records are visible in your workspace yet. Start with a property, client or agreement."}</p></div>${quickActions.length ? `<div class="hero-actions dashboard-quick-actions">${quickActions.join("")}</div>` : ""}</div>
-    ${cards.length ? `<div class="grid grid-5 dashboard-metrics">${cards.join("")}</div>` : `<div class="card glass empty"><strong>No workspace modules assigned</strong>Ask an administrator to grant module access.</div>`}
-    ${panels.length ? `<div class="section grid grid-2">${panels.join("")}</div>` : ""}`;
+    <section class="dash-head">
+      <div class="dash-intro">
+        <div class="dash-meta"><span class="chip chip-brand">${escapeHtml(roleName)}</span><span class="chip" title="Data scope">${icon("shield")}${escapeHtml(scopeNote || "")}</span></div>
+        <h2>${hasRecords ? `Welcome back, ${escapeHtml(firstName)}` : "Your workspace is ready"}</h2>
+        <p>${hasRecords ? "Here is what needs you today, and where the portfolio stands." : "No business records are visible in your workspace yet. Start with the steps below."}</p>
+      </div>
+      ${quickActions.length ? `<div class="dash-actions">${quickActions.join("")}</div>` : ""}
+    </section>
+    <div class="dash-top${startSteps.length ? " has-start" : ""}">
+      ${attentionPanel}
+      ${startSteps.length ? dashPanel("Get started", "Set up the workspace in a few steps", `<ol class="start-list">${startSteps.join("")}</ol>`, "", "start-panel") : ""}
+    </div>
+    ${cards.length ? `<div class="stat-grid">${cards.join("")}</div>` : ""}
+    ${panels.length ? `<div class="panel-grid">${panels.join("")}</div>` : ""}
+    ${!hasRecords && !startSteps.length && !panels.length ? `<div class="panel">${emptyState("Nothing to show yet", "Records you are allowed to see will appear here as the team adds them.", { iconName: "inbox" })}</div>` : ""}`;
+}
+
+/** Two-line date chip (day over month) for schedule lists. */
+function appointmentDateChip(value) {
+  if (!value) return `<span class="date-chip-day">—</span>`;
+  const date = new Date(String(value).replace(" ", "T"));
+  if (Number.isNaN(date.getTime())) return `<span class="date-chip-day">—</span>`;
+  const month = new Intl.DateTimeFormat("en-GB", { month: "short" }).format(date);
+  return `<span class="date-chip-month">${escapeHtml(month)}</span><span class="date-chip-day">${date.getDate()}</span>`;
 }
 
 function renderProjects() {
@@ -2022,30 +2242,83 @@ function renderProjects() {
   // rollup is computed with the same scope predicate as everything else, so the
   // figures are the caller's own and are correct for the whole set.
   const rollup = new Map((state.projectReports || []).map((entry) => [String(entry.id), entry]));
-  const rows = state.projects.map((project) => {
+  const mayCreate = canModule("projects") && can("create");
+  const cards = state.projects.map((project) => {
     const report = rollup.get(String(project.id));
     const contracts = report ? Number(report.new_contracts || 0) + Number(report.terminal_contracts || 0) : 0;
     const value = report ? numberValue(report.contract_value) : 0;
-    return `<tr data-searchable><td><span class="cell-main">${escapeHtml(project.name)}</span><span class="cell-sub">${formatDate(project.created_at)}</span></td><td>${badge(project.status)}</td><td class="amount">${contracts}</td><td class="amount">${money(value)}</td><td><div class="row-actions">${can("edit") ? `<button class="btn btn-small" data-action="edit-project" data-id="${project.id}">Edit</button>` : ""}${can("delete") ? `<button class="btn btn-danger btn-small icon-btn" data-action="delete-project" data-id="${project.id}" title="Delete project">×</button>` : ""}</div></td></tr>`;
+    const properties = report ? Number(report.properties || 0) : 0;
+    const clients = report ? Number(report.clients || 0) : 0;
+    const edit = can("edit") ? `<button class="btn btn-small" data-action="edit-project" data-id="${project.id}">Edit</button>` : "";
+    const remove = can("delete") ? `<button class="btn btn-small btn-danger-ghost" data-action="delete-project" data-id="${project.id}" title="Delete project">Delete project</button>` : "";
+    return `<article class="project-card" data-searchable>
+      <div class="project-card-head"><span class="project-icon">${icon("building")}</span><div class="project-title"><strong>${escapeHtml(project.name)}</strong><span>Created ${formatDate(project.created_at)}</span></div>${badge(project.status)}</div>
+      <dl class="project-stats">
+        <div><dt>Properties</dt><dd>${properties}</dd></div>
+        <div><dt>Clients</dt><dd>${clients}</dd></div>
+        <div><dt>Contracts</dt><dd>${contracts}</dd></div>
+        <div><dt>Contract value</dt><dd class="amount">${money(value)}</dd></div>
+      </dl>
+      ${edit || remove ? `<div class="card-actions">${canModule("properties") ? `<button class="btn btn-ghost btn-small" data-action="project-properties" data-id="${project.id}">View properties</button>` : ""}<span class="spacer"></span>${edit}${rowMenu([remove])}</div>` : (canModule("properties") ? `<div class="card-actions"><button class="btn btn-ghost btn-small" data-action="project-properties" data-id="${project.id}">View properties</button></div>` : "")}
+    </article>`;
   }).join("");
   // `projects` is still delivered complete, so `.length` is a true count here.
-  content.innerHTML = `<div class="section-head"><div><h2 class="section-title">Project register</h2><div class="section-note">${state.projects.length} projects in the workspace</div></div></div>${state.projects.length ? `<div class="table-wrap"><table><thead><tr><th>Project</th><th>Status</th><th>Contracts</th><th>Value</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="card glass empty"><strong>No projects yet</strong>Create a project before adding contracts.</div>`}`;
+  content.innerHTML = `<div class="toolbar"><div class="toolbar-filters"><span class="toolbar-title">All projects</span></div><div class="toolbar-end"><span class="toolbar-count">${state.projects.length} project${state.projects.length === 1 ? "" : "s"}</span>${pageActions()}</div></div>${state.projects.length
+    ? `<div class="project-grid">${cards}</div>`
+    : `<div class="panel">${emptyState("No projects yet", "Projects group properties by development. Create one before adding properties and contracts.", { iconName: "building", action: mayCreate ? `<button class="btn btn-primary" data-action="new-project">${icon("plus")}Create your first project</button>` : "" })}</div>`}`;
+}
+
+/**
+ * Where a contract sits in the pipeline, as the SERVER describes it: the stage
+ * number and the department holding it come from GET /org/duties (derived from
+ * the enforced state machine), so the register can never disagree with the
+ * workflow. Until that reference data arrives the status badge stands alone.
+ */
+function contractStageInfo(status) {
+  const stages = state.duties?.workflow?.stages || [];
+  const stage = stages.find((entry) => entry.status === status);
+  if (!stage) return null;
+  return { number: stage.stage, total: stages.length, owner: stage.owner || "" };
 }
 
 function renderContracts() {
   const filters = state.filters;
+  // The pipeline reference data is loaded once, on demand, like the Duties view.
+  if (!state.duties && !state.dutiesRequested) loadDuties().then(() => { if (state.view === "contracts") render(); });
   // Generating a payment schedule creates financial records, so the action is
   // only offered to callers allowed to see money. Built per row: the contract id
   // is only in scope inside the map callback.
-  const scheduleAction = (id) => canSeeFinancial() ? `<button class="btn btn-soft btn-small" data-action="generate-schedule" data-id="${id}" title="Generate a payment schedule">Schedule</button>` : "";
-  // The workflow steps the API said this caller may take. Rendered as buttons so
-  // Legal, Finance, Sales and the MD each act only on their own steps.
-  const workflowButtons = (contract) => (contract.available_actions || []).slice(0, 3)
-    .map((entry) => `<button class="btn btn-soft btn-small" data-action="contract-transition" data-id="${contract.id}" data-transition="${escapeHtml(entry.action)}" title="${escapeHtml(entry.label)}">${escapeHtml(entry.label)}</button>`)
-    .join("");
+  const scheduleAction = (id) => canSeeFinancial() ? `<button class="btn btn-soft btn-small" data-action="generate-schedule" data-id="${id}" title="Generate a payment schedule">Payment schedule</button>` : "";
+  // The workflow steps the API said this caller may take. Nothing here decides
+  // what is allowed: the first step the server offers becomes the row's main
+  // button and the rest go in the row menu, so Legal, Finance, Sales and the MD
+  // each see only their own steps.
+  const workflowButton = (contract, entry, primary) => `<button class="btn ${primary ? "btn-primary" : "btn-soft"} btn-small" data-action="contract-transition" data-id="${contract.id}" data-transition="${escapeHtml(entry.action)}" title="${escapeHtml(entry.label)}">${escapeHtml(entry.label)}</button>`;
   const generatedDocumentAction = (contract) => contract.generated_document_id && canModule("documents")
-    ? `<button class="btn btn-soft btn-small" data-action="view-generated-contract" data-id="${contract.id}">View</button>` : "";
-  const rows = state.contracts.filter((contract) => (!filters.project || String(contract.project_id) === filters.project) && (!filters.type || contract.contract_type === filters.type) && (!filters.status || contract.status === filters.status)).map((contract) => `<tr data-searchable><td><span class="cell-main">${escapeHtml(contract.client_name)}</span><span class="cell-sub">${escapeHtml(contract.contract_number || contract.project_name || "")}</span></td><td>${badge(contract.contract_type)}</td><td>${contractStatusBadge(contract.status)}</td><td>${formatDate(contract.start_date)}</td><td>${formatDate(contract.end_date)}</td><td class="amount">${money(contract.value)}</td><td><div class="row-actions">${workflowButtons(contract)}${generatedDocumentAction(contract)}<button class="btn btn-small" data-action="contract-history" data-id="${contract.id}">History</button>${can("edit") ? `<button class="btn btn-small" data-action="edit-contract" data-id="${contract.id}">Edit</button>` : ""}${scheduleAction(contract.id)}${can("delete") ? `<button class="btn btn-danger btn-small icon-btn" data-action="delete-contract" data-id="${contract.id}" title="Delete contract">×</button>` : ""}</div></td></tr>`).join("");
+    ? `<button class="btn btn-soft btn-small" data-action="view-generated-contract" data-id="${contract.id}">Open contract</button>` : "";
+  const rows = state.contracts.filter((contract) => (!filters.project || String(contract.project_id) === filters.project) && (!filters.type || contract.contract_type === filters.type) && (!filters.status || contract.status === filters.status)).map((contract) => {
+    const actions = (contract.available_actions || []).filter(Boolean);
+    const forward = actions.filter((entry) => entry.action !== "cancel");
+    const primary = forward[0] ? workflowButton(contract, forward[0], true) : "";
+    const secondary = [...forward.slice(1), ...actions.filter((entry) => entry.action === "cancel")].map((entry) => workflowButton(contract, entry, false));
+    const stage = contractStageInfo(contract.status);
+    const menu = rowMenu([
+      ...secondary,
+      generatedDocumentAction(contract),
+      `<button class="btn btn-small" data-action="contract-history" data-id="${contract.id}">History</button>`,
+      can("edit") ? `<button class="btn btn-small" data-action="edit-contract" data-id="${contract.id}">Edit details</button>` : "",
+      scheduleAction(contract.id),
+      can("delete") ? `<button class="btn btn-danger-ghost btn-small" data-action="delete-contract" data-id="${contract.id}" title="Delete contract">Delete contract</button>` : "",
+    ]);
+    return `<tr data-searchable>
+      <td><button class="cell-link" data-action="view-contract" data-id="${contract.id}"><span class="cell-main">${escapeHtml(contract.client_name)}</span></button><span class="cell-sub">${escapeHtml(contract.contract_number || "No number yet")}${contract.project_name ? ` · ${escapeHtml(contract.project_name)}` : ""}</span></td>
+      <td>${contractStatusBadge(contract.status)}${stage ? `<span class="cell-sub stage-note" title="Department currently holding the contract">Stage ${stage.number} of ${stage.total} · Held by ${escapeHtml(titleCase(stage.owner))}</span>` : ""}</td>
+      <td>${badge(contract.contract_type, "neutral")}</td>
+      <td><span class="cell-main cell-plain">${formatDate(contract.start_date)}</span><span class="cell-sub">to ${formatDate(contract.end_date)}</span></td>
+      <td class="amount">${money(contract.value)}${Number(contract.discount_pct || 0) > 0 ? `<span class="cell-sub">${numberValue(contract.discount_pct)}% discount</span>` : ""}</td>
+      <td><div class="row-actions">${primary}${menu}</div></td>
+    </tr>`;
+  }).join("");
   const statusOptions = Object.entries(CONTRACT_STATUS_LABELS)
     .map(([value, label]) => `<option value="${value}" ${filters.status === value ? "selected" : ""}>${escapeHtml(label)}</option>`)
     .join("");
@@ -2055,7 +2328,11 @@ function renderContracts() {
   // duplicate the work and understate the result.
   const total = Number(state.pages?.contracts?.total ?? state.contracts.length);
   const visibleLabel = `${total} ${total === 1 ? "contract" : "contracts"}`;
-  content.innerHTML = `<div class="filters"><label class="muted">Filters</label>${projectSelect(filters.project)}<select class="filter-input" data-filter="type" aria-label="Filter by contract type"><option value="">All types</option><option value="new" ${filters.type === "new" ? "selected" : ""}>New</option><option value="terminal" ${filters.type === "terminal" ? "selected" : ""}>Terminal</option></select><select class="filter-input" data-filter="status" aria-label="Filter by contract status"><option value="">All statuses</option>${statusOptions}</select></div><div class="section-head"><div><h2 class="section-title">Contract register</h2><div class="section-note">${visibleLabel}</div></div>${can("create") ? `<button class="btn btn-primary" data-action="generate-contract">Generate Contract</button>` : ""}</div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Client / project</th><th>Type</th><th>Status</th><th>Start</th><th>End</th><th>Value</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>${pager("contracts")}` : `<div class="card glass empty"><strong>No contracts found</strong>Try another filter or create a new contract.</div>`}`;
+  const filtered = Boolean(filters.project || filters.type || filters.status);
+  const awaiting = contractsAwaitingCaller().length;
+  content.innerHTML = `<div class="toolbar"><div class="toolbar-filters"><span class="toolbar-label">${icon("search")}Filter</span>${projectSelect(filters.project)}<select class="filter-input" data-filter="type" aria-label="Filter by contract type"><option value="">All types</option><option value="new" ${filters.type === "new" ? "selected" : ""}>New</option><option value="terminal" ${filters.type === "terminal" ? "selected" : ""}>Terminal</option></select><select class="filter-input" data-filter="status" aria-label="Filter by contract status"><option value="">All statuses</option>${statusOptions}</select></div><div class="toolbar-end"><span class="toolbar-count">${visibleLabel}${awaiting ? ` · <strong class="count-attention">${awaiting} awaiting you</strong>` : ""}</span>${pageActions()}</div></div>${rows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Contract</th><th>Status</th><th>Type</th><th>Term</th><th>Value</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>${pager("contracts")}` : `<div class="panel">${filtered
+    ? emptyState("No contracts match these filters", "Try a different project, type or status.", { iconName: "search" })
+    : emptyState("No contracts yet", "Generate a contract to price the deal, build the payment plan and produce the full document.", { iconName: "contract", action: canModule("contracts") && can("create") ? `<button class="btn btn-primary" data-action="generate-contract">${icon("contract")}Generate contract</button>` : "" })}</div>`}`;
 }
 
 function renderDebts() {
@@ -2072,20 +2349,38 @@ function renderDebts() {
   const mayCreate = can("create");
   const mayEdit = can("edit");
   const mayDelete = can("delete");
+  const summary = state.summary || {};
   const rows = state.debts.filter((debt) => (!filters.project || String(debt.project_id) === filters.project) && (!filters.debtStatus || debtState(debt) === filters.debtStatus)).map((debt) => {
     const debtStateValue = debtState(debt);
     const viewContract = canSeeContract && state.contracts.some((c) => String(c.id) === String(debt.contract_id))
       ? `<button class="btn btn-small" data-action="view-contract" data-id="${debt.contract_id}" title="Open the contract this installment belongs to">View contract</button>` : "";
-    const settle = debt.status !== "paid"
-      ? `${mayEdit ? `<button class="btn btn-soft btn-small" data-action="pay-debt" data-id="${debt.id}">Mark paid</button>` : ""}${mayCreate ? `<button class="btn btn-small" data-action="record-payment" data-id="${debt.id}" title="Record a payment with an optional receipt">Record payment</button>` : ""}`
-      : "";
+    const open = debt.status !== "paid";
+    const record = open && mayCreate ? `<button class="btn btn-primary btn-small" data-action="record-payment" data-id="${debt.id}" title="Record a payment with an optional receipt">Record payment</button>` : "";
+    const markPaidButton = open && mayEdit ? `<button class="btn btn-soft btn-small" data-action="pay-debt" data-id="${debt.id}">Mark paid</button>` : "";
     const edit = mayEdit ? `<button class="btn btn-small" data-action="edit-debt" data-id="${debt.id}">Edit</button>` : "";
-    const remove = mayDelete ? `<button class="btn btn-danger btn-small icon-btn" data-action="delete-debt" data-id="${debt.id}" title="Delete debt">×</button>` : "";
-    return `<tr data-searchable><td><span class="cell-main">${escapeHtml(debt.client_name)}</span><span class="cell-sub">${escapeHtml(debt.project_name)}</span></td><td>${badge(debt.contract_type)}</td><td>${badgeVariant(debtStateLabel(debtStateValue), debtStateValue)}</td><td>${formatDate(debt.due_date)}</td><td class="amount ${debtStateValue === "overdue" ? "danger-text" : ""}">${money(debt.amount)}</td><td>${debt.status === "paid" ? "—" : escapeHtml(debt.notes || "")}</td><td><div class="row-actions">${settle}${viewContract}${edit}${remove}</div></td></tr>`;
+    const remove = mayDelete ? `<button class="btn btn-danger-ghost btn-small" data-action="delete-debt" data-id="${debt.id}" title="Delete debt">Delete installment</button>` : "";
+    return `<tr data-searchable class="${debtStateValue === "overdue" ? "row-overdue" : ""}"><td><span class="cell-main">${escapeHtml(debt.client_name)}</span><span class="cell-sub">${escapeHtml(debt.project_name || "")}${debt.contract_number ? ` · ${escapeHtml(debt.contract_number)}` : ""}</span></td><td>${debtBadge(debt)}</td><td>${formatDate(debt.due_date)}</td><td class="amount ${debtStateValue === "overdue" ? "danger-text" : ""}">${money(debt.amount)}</td><td class="cell-note">${debt.status === "paid" ? "—" : escapeHtml(debt.notes || "")}</td><td><div class="row-actions">${record}${rowMenu([markPaidButton, viewContract, edit, remove])}</div></td></tr>`;
   }).join("");
-  content.innerHTML = `<div class="filters"><label class="muted">Filters</label>${projectSelect(filters.project)}<select class="filter-input" data-filter="debtStatus" aria-label="Filter by debt state"><option value="">All debt states</option><option value="pending" ${filters.debtStatus === "pending" ? "selected" : ""}>Pending</option><option value="partial" ${filters.debtStatus === "partial" ? "selected" : ""}>Part paid</option><option value="upcoming" ${filters.debtStatus === "upcoming" ? "selected" : ""}>Upcoming</option><option value="overdue" ${filters.debtStatus === "overdue" ? "selected" : ""}>Overdue</option><option value="paid" ${filters.debtStatus === "paid" ? "selected" : ""}>Paid</option></select></div><div class="section-head"><div><h2 class="section-title">Debt register</h2><div class="section-note">Client balances linked to contracts</div></div>${mayCreate ? `<button class="btn btn-primary" data-action="new-debt">+ New debt</button>` : ""}</div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Client / project</th><th>Contract</th><th>State</th><th>Due date</th><th>Amount</th><th>Note</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>${pager("debts")}` : `<div class="card glass empty"><strong>No debts found</strong>Add a debt to a contract or change the filters.</div>`}
+  const pendingSummary = summary.debts_pending || { count: 0, total: 0 };
+  const overdueSummary = summary.debts_overdue || { count: 0, total: 0 };
+  const incomeSummary = summary.income_30d || { count: 0, total: 0 };
+  const anyMoney = state.debts.length || (state.payments || []).length || Number(pendingSummary.count || 0) || Number(incomeSummary.count || 0);
+  const filtered = Boolean(filters.project || filters.debtStatus);
+  const stateOption = (value, label) => `<option value="${value}" ${filters.debtStatus === value ? "selected" : ""}>${label}</option>`;
+  content.innerHTML = `${anyMoney ? `<div class="stat-grid stat-grid-compact">
+      ${card("Outstanding", money(pendingSummary.total || 0), `${pendingSummary.count || 0} open installment${Number(pendingSummary.count) === 1 ? "" : "s"}`, "wallet", "amber")}
+      ${card("Overdue", money(overdueSummary.total || 0), `${overdueSummary.count || 0} installment${Number(overdueSummary.count) === 1 ? "" : "s"} past due`, "alert", Number(overdueSummary.count || 0) ? "red" : "")}
+      ${card("Collected · 30 days", money(incomeSummary.total || 0), `${incomeSummary.count || 0} payment${Number(incomeSummary.count) === 1 ? "" : "s"} recorded`, "money", "green")}
+    </div>` : ""}
     <div class="section">
-      <div class="section-head"><div><h2 class="section-title">Recorded payments</h2><div class="section-note">Money actually received, with receipts</div></div>${mayCreate ? `<button class="btn btn-soft btn-small" data-action="new-payment">+ Record payment</button>` : ""}</div>
+      <div class="section-head"><div><h2 class="section-title">Installments &amp; debts</h2><div class="section-note">Client balances linked to contracts</div></div></div>
+      <div class="toolbar"><div class="toolbar-filters"><span class="toolbar-label">${icon("search")}Filter</span>${projectSelect(filters.project)}<select class="filter-input" data-filter="debtStatus" aria-label="Filter by debt state"><option value="">All states</option>${stateOption("pending", "Pending")}${stateOption("upcoming", "Due soon")}${stateOption("overdue", "Overdue")}${stateOption("partial", "Partial")}${stateOption("paid", "Paid")}</select></div><div class="toolbar-end"><span class="toolbar-count">${state.debts.length} on this page</span>${mayCreate ? `<button class="btn" data-action="new-debt">${icon("plus")}New debt</button>` : ""}</div></div>
+      ${rows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Client / project</th><th>State</th><th>Due date</th><th>Amount</th><th>Note</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>${pager("debts")}` : `<div class="panel">${filtered
+        ? emptyState("No installments match these filters", "Try a different project or state.", { iconName: "search", compact: true })
+        : emptyState("No installments yet", "Payment plans created with a contract appear here as installments.", { iconName: "wallet", compact: true, action: mayCreate ? `<button class="btn btn-primary btn-small" data-action="new-debt">${icon("plus")}Add a debt</button>` : "" })}</div>`}
+    </div>
+    <div class="section">
+      <div class="section-head"><div><h2 class="section-title">Recorded payments</h2><div class="section-note">Money actually received, with receipts</div></div>${mayCreate ? `<button class="btn btn-soft btn-small" data-action="new-payment">${icon("plus")}Record payment</button>` : ""}</div>
       ${renderPaymentsTable(mayEdit, mayDelete)}
     </div>
     ${canModule("reminders") ? `<div class="section">
@@ -2098,7 +2393,7 @@ function renderDebts() {
 // Gated on the `reminders` module so a caller without it never sees the block.
 function renderRemindersTable() {
   const reminders = state.reminders || [];
-  if (!reminders.length) return `<div class="card glass empty"><strong>No reminders due</strong>Nothing needs a payment reminder right now.</div>`;
+  if (!reminders.length) return `<div class="panel">${emptyState("No reminders due", "Nothing needs a payment reminder right now.", { iconName: "bell", compact: true })}</div>`;
   // Acknowledging a reminder and opening the debt are both writes the API gates,
   // so both buttons follow the caller's own edit permission.
   const mayEdit = can("edit");
@@ -2117,12 +2412,15 @@ function renderRemindersTable() {
 // the set the debts register offers on the same screen.
 function renderPaymentsTable(mayEdit = can("edit"), mayDelete = can("delete")) {
   const payments = [...(state.payments || [])].sort((a, b) => String(b.paid_at).localeCompare(String(a.paid_at)));
-  if (!payments.length) return `<div class="card glass empty"><strong>No payments recorded</strong>Use “Record payment” on a debt to log income with an optional receipt.</div>`;
+  if (!payments.length) return `<div class="panel">${emptyState("No payments recorded", "Use “Record payment” on an installment to log income with an optional receipt.", { iconName: "money", compact: true })}</div>`;
   const rows = payments.map((payment) => {
-    const remove = mayDelete ? `<button class="btn btn-danger btn-small icon-btn" data-action="delete-payment" data-id="${payment.id}" title="Delete payment">×</button>` : "";
-    return `<tr data-searchable><td><span class="cell-main">${escapeHtml(payment.client_name)}</span><span class="cell-sub">${escapeHtml(payment.project_name || "")}</span></td><td>${formatDate(payment.paid_at, String(payment.paid_at).length > 10)}</td><td>${badge(payment.method, "neutral")}</td><td class="amount">${money(payment.amount)}</td><td>${escapeHtml(payment.reference || "—")}</td><td><div class="row-actions">${payment.has_receipt ? `<button class="btn btn-small" data-action="open-receipt" data-id="${payment.id}">View receipt</button>` : `<span class="muted">None</span>`}${remove}</div></td></tr>`;
+    const remove = mayDelete ? `<button class="btn btn-danger-ghost btn-small" data-action="delete-payment" data-id="${payment.id}" title="Delete payment">Delete payment</button>` : "";
+    const receipt = payment.has_receipt
+      ? `<button class="btn btn-small" data-action="open-receipt" data-id="${payment.id}">${icon("receipt")}Receipt</button>`
+      : `<span class="muted cell-plain">No receipt</span>`;
+    return `<tr data-searchable><td><span class="cell-main">${escapeHtml(payment.client_name)}</span><span class="cell-sub">${escapeHtml(payment.project_name || "")}</span></td><td>${formatDate(payment.paid_at, String(payment.paid_at).length > 10)}</td><td>${badge(humanize(payment.method), "neutral")}</td><td class="amount amount-positive">${money(payment.amount)}</td><td><span class="mono">${escapeHtml(payment.reference || "—")}</span></td><td><div class="row-actions">${receipt}${rowMenu([remove])}</div></td></tr>`;
   }).join("");
-  return `<div class="table-wrap"><table><thead><tr><th>Client / project</th><th>Paid at</th><th>Method</th><th>Amount</th><th>Reference</th><th class="align-right">Receipt & actions</th></tr></thead><tbody>${rows}</tbody></table></div>${pager("payments")}`;
+  return `<div class="table-wrap"><table class="data-table"><thead><tr><th>Client / project</th><th>Paid on</th><th>Method</th><th>Amount</th><th>Reference</th><th class="align-right">Receipt</th></tr></thead><tbody>${rows}</tbody></table></div>${pager("payments")}`;
 }
 
 function renderReports() {
@@ -2131,42 +2429,43 @@ function renderReports() {
   const history = state.reportHistory || [];
   const typeOptions = types.map((type) => `<option value="${escapeHtml(type.id)}" ${filters.reportType === type.id ? "selected" : ""}>${escapeHtml(type.label)}</option>`).join("");
   const sourceOptions = `<option value="">All sources</option><option value="generated" ${filters.source === "generated" ? "selected" : ""}>Generated</option><option value="uploaded" ${filters.source === "uploaded" ? "selected" : ""}>Uploaded</option>`;
-  const projectHistoryOptions = projectOptions(filters.projectId);
+  const projectHistoryOptions = `<option value="">All projects</option>${projectOptions(filters.projectId)}`;
   const rows = history.map((report) => {
     const date = formatDateTime(report.created_at, true);
+    // DELETE on /reports is gated by the method permission like every module
+    // route, so the control follows can("delete") rather than always rendering.
+    const remove = can("delete") ? `<button class="btn btn-danger-ghost btn-small" data-action="delete-report" data-id="${report.id}" title="Delete report">Delete report</button>` : "";
+    const reexport = report.source === "generated" ? `<button class="btn btn-small" data-action="reexport-report" data-id="${report.id}" title="Re-generate this report">Re-export</button>` : "";
     return `<tr>
       <td><span class="cell-main">${escapeHtml(report.title)}</span><span class="cell-sub">${escapeHtml(reportTypeLabel(report.report_type))}</span></td>
       <td>${sourceBadge(report.source)}</td>
       <td>${reportKindBadge(report.file_format)}</td>
-      <td><span class="cell-sub">${escapeHtml(report.project_name || "—")}</span></td>
+      <td><span class="cell-sub cell-plain">${escapeHtml(report.project_name || "—")}</span></td>
       <td>${escapeHtml(date)}</td>
       <td class="align-right">
         <div class="row-actions">
           <button class="btn btn-small" data-action="download-report" data-id="${report.id}" data-format="${escapeHtml(report.file_format || "xlsx")}" data-source="${escapeHtml(report.source)}">Download</button>
-          ${report.source === "generated" ? `<button class="btn btn-small" data-action="reexport-report" data-id="${report.id}" title="Re-generate this report">Re-export</button>` : ""}
-          <button class="btn btn-danger btn-small icon-btn" data-action="delete-report" data-id="${report.id}" title="Delete report">×</button>
+          ${rowMenu([reexport, remove])}
         </div>
       </td>
     </tr>`;
   }).join("");
+  const filtered = Boolean(filters.source || filters.reportType || filters.projectId || filters.search || filters.from || filters.to);
+  const emptyActions = `${can("view_reports") ? `<button class="btn btn-primary" data-action="open-report-generate">${icon("chart")}Generate a report</button>` : ""}${can("export") ? `<button class="btn" data-action="open-report-upload">Upload a report</button>` : ""}`;
   content.innerHTML = `
-    <div class="filters">
-      <span class="muted">History</span>
-      <select class="filter-input" data-filter="source" aria-label="Filter by source">${sourceOptions}</select>
-      <select class="filter-input" data-filter="reportType" aria-label="Filter by report type"><option value="">All types</option>${typeOptions}</select>
-      <select class="filter-input" data-filter="projectId" aria-label="Filter by project">${projectHistoryOptions}</select>
-      <input class="filter-input" data-filter="search" type="search" value="${escapeHtml(filters.search)}" placeholder="Search title or filename" aria-label="Search reports" style="min-width:200px">
-      <input class="filter-input" data-filter="from" type="date" value="${escapeHtml(filters.from || "")}" aria-label="From date" style="min-width:150px">
-      <input class="filter-input" data-filter="to" type="date" value="${escapeHtml(filters.to || "")}" aria-label="To date" style="min-width:150px">
-    </div>
-    <div class="section-head">
-      <div><h2 class="section-title">Report history</h2><div class="section-note">${history.length} report${history.length === 1 ? "" : "s"} in the workspace</div></div>
-      <div class="row-actions">
-        <button class="btn btn-primary" data-action="open-report-generate">+ Generate report</button>
-        <button class="btn" data-action="open-report-upload">+ Upload report</button>
+    <div class="toolbar">
+      <div class="toolbar-filters">
+        <label class="toolbar-search">${icon("search")}<input class="filter-input" data-filter="search" type="search" value="${escapeHtml(filters.search)}" placeholder="Search title or filename" aria-label="Search reports"></label>
+        <select class="filter-input" data-filter="source" aria-label="Filter by source">${sourceOptions}</select>
+        <select class="filter-input" data-filter="reportType" aria-label="Filter by report type"><option value="">All types</option>${typeOptions}</select>
+        <select class="filter-input" data-filter="projectId" aria-label="Filter by project">${projectHistoryOptions}</select>
+        <span class="toolbar-range"><input class="filter-input" data-filter="from" type="date" value="${escapeHtml(filters.from || "")}" aria-label="From date"><span class="muted">to</span><input class="filter-input" data-filter="to" type="date" value="${escapeHtml(filters.to || "")}" aria-label="To date"></span>
       </div>
+      <div class="toolbar-end"><span class="toolbar-count">${history.length} report${history.length === 1 ? "" : "s"}</span>${pageActions()}</div>
     </div>
-    ${rows ? `<div class="table-wrap"><table><thead><tr><th>Report</th><th>Source</th><th>Format</th><th>Project</th><th>Created</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="card glass empty"><strong>No reports found</strong>Generate or upload a report to build the history.</div>`}`;
+    ${rows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Report</th><th>Source</th><th>Format</th><th>Project</th><th>Created</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="panel">${filtered
+      ? emptyState("No reports match these filters", "Try a wider date range or clear the filters.", { iconName: "search" })
+      : emptyState("No reports yet", "Generate a report from live records, or upload an existing report file to keep it in the history.", { iconName: "chart", action: emptyActions })}</div>`}`;
 }
 
 function renderProperties() {
@@ -2178,68 +2477,73 @@ function renderProperties() {
   );
   const list = rows.map((property) => {
     const price = money(property.price);
+    const number = `P-${String(property.id).padStart(4, "0")}`;
     // `cover_image_id` is only set by the server when the file really exists, so
-    // no cover markup is emitted for a picture that would 404.
+    // no cover markup is emitted for a picture that would 404. A picture that
+    // still fails to load swaps to the same designed fallback, never a broken
+    // image icon.
     const cover = property.cover_image_id
-      ? `<div class="property-cover"><img data-src="${API_ROOT}/properties/${property.id}/images/${property.cover_image_id}/file" alt="${escapeHtml(property.name)}" loading="lazy"><div class="property-cover-fallback" aria-hidden="true" hidden>⌂ <span>Photo unavailable</span></div></div>`
-      : `<div class="property-cover property-cover-empty"><span aria-hidden="true">⌂</span><span>Photo unavailable</span></div>`;
-    return `<div class="property-card" data-searchable>
-      ${cover}
-      <div class="property-head">
-        <div class="property-name">${escapeHtml(property.name)}</div>
-        <div class="property-type">${badge(property.property_type, "neutral")}</div>
-      </div>
-      <div class="property-meta">
-        <div><span class="muted">Status</span>${badge(property.status)}</div>
-        <div><span class="muted">Property number</span><span class="cell-sub">P-${String(property.id).padStart(4, "0")}</span></div>
-        <div><span class="muted">Price</span><span class="amount">${price}</span></div>
-        ${property.location ? `<div><span class="muted">Location</span>${escapeHtml(property.location)}</div>` : ""}
-        ${property.area ? `<div><span class="muted">Area</span>${numberValue(property.area)} units</div>` : ""}
-        ${(property.bedrooms || property.bathrooms) ? `<div><span class="muted">Layout</span>${property.bedrooms || 0} bed · ${property.bathrooms || 0} bath</div>` : ""}
-        ${property.image_count ? `<div><span class="muted">Photos</span>${property.image_count}</div>` : ""}
-      </div>
-      ${property.description ? `<p class="property-desc">${escapeHtml(property.description)}</p>` : ""}
-      <div class="property-foot">
-        <div><span class="muted">Project</span><span class="cell-sub">${escapeHtml(property.project_name || "—")}</span></div>
-        <div><span class="muted">Added</span>${formatDate(property.created_at)}</div>
-        <div class="row-actions">
-          <button class="btn btn-small" data-action="edit-property" data-id="${property.id}"${can("edit") ? "" : " hidden"}>Edit</button>
-          <button class="btn btn-danger btn-small icon-btn" data-action="delete-property" data-id="${property.id}" title="Delete property"${can("delete") ? "" : " hidden"}>×</button>
+      ? `<div class="property-cover"><img data-src="${API_ROOT}/properties/${property.id}/images/${property.cover_image_id}/file" alt="${escapeHtml(property.name)}" loading="lazy"><div class="property-cover-fallback" aria-hidden="true" hidden>${icon("image")}<span>Photo unavailable</span></div></div>`
+      : `<div class="property-cover property-cover-empty">${icon("image")}<span>No photo yet</span></div>`;
+    const facts = [
+      property.area ? `${numberValue(property.area).toLocaleString()} m²` : "",
+      property.bedrooms ? `${property.bedrooms} bed` : "",
+      property.bathrooms ? `${property.bathrooms} bath` : "",
+      property.image_count ? `${property.image_count} photo${Number(property.image_count) === 1 ? "" : "s"}` : "",
+    ].filter(Boolean);
+    const edit = can("edit") ? `<button class="btn btn-small" data-action="edit-property" data-id="${property.id}">Edit</button>` : "";
+    const remove = can("delete") ? `<button class="btn btn-small btn-danger-ghost" data-action="delete-property" data-id="${property.id}" title="Delete property">Delete property</button>` : "";
+    return `<article class="property-card" data-searchable>
+      <div class="property-media">${cover}<div class="property-badges">${badge(property.status)}${property.featured ? `<span class="badge badge-featured">Featured</span>` : ""}</div></div>
+      <div class="property-body">
+        <div class="property-head">
+          <div class="property-name" title="${escapeHtml(property.name)}">${escapeHtml(property.name)}</div>
+          <span class="property-number">${number}</span>
         </div>
+        <div class="property-sub">${escapeHtml(property.project_name || "No project")} · ${escapeHtml(humanize(property.property_type))}</div>
+        ${property.location ? `<div class="property-location">${icon("pin")}<span>${escapeHtml(property.location)}</span></div>` : ""}
+        ${facts.length ? `<div class="property-facts">${facts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}</div>` : ""}
       </div>
-    </div>`;
+      <div class="property-foot">
+        <div class="property-price"><span>Price</span><strong>${price}</strong></div>
+        <div class="row-actions">${edit}${rowMenu([remove])}</div>
+      </div>
+    </article>`;
   }).join("");
+  const mayCreate = canModule("properties") && can("create");
+  const filtered = Boolean(filters.project || filters.propertyStatus || filters.type);
   content.innerHTML = `
-    <div class="filters">
-      <span class="muted">Filters</span>
-      <select class="filter-input" data-filter="project" aria-label="Filter by project">
-        <option value="">All projects</option>
-        ${(state.projects || []).map((p) => `<option value="${p.id}" ${filters.project === String(p.id) ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
-      </select>
-      <select class="filter-input" data-filter="propertyStatus" aria-label="Filter by property status">
-        <option value="">All statuses</option>
-        <option value="available" ${filters.propertyStatus === "available" ? "selected" : ""}>Available</option>
-        <option value="reserved" ${filters.propertyStatus === "reserved" ? "selected" : ""}>Reserved</option>
-        <option value="sold" ${filters.propertyStatus === "sold" ? "selected" : ""}>Sold</option>
-        <option value="leased" ${filters.propertyStatus === "leased" ? "selected" : ""}>Leased</option>
-      </select>
-      <select class="filter-input" data-filter="type" aria-label="Filter by property type">
-        <option value="">All types</option>
-        <option value="land" ${filters.type === "land" ? "selected" : ""}>Land</option>
-        <option value="house" ${filters.type === "house" ? "selected" : ""}>House</option>
-        <option value="apartment" ${filters.type === "apartment" ? "selected" : ""}>Apartment</option>
-        <option value="villa" ${filters.type === "villa" ? "selected" : ""}>Villa</option>
-        <option value="commercial" ${filters.type === "commercial" ? "selected" : ""}>Commercial</option>
-        <option value="penthouse" ${filters.type === "penthouse" ? "selected" : ""}>Penthouse</option>
-      </select>
-    </div>
-    <div class="section-head">
-      <div><h2 class="section-title">Property register</h2><div class="section-note">${rows.length} propert${rows.length === 1 ? "y" : "ies"} in the workspace</div></div>
-      <button class="btn btn-primary" data-action="new-property">+ New property</button>
+    <div class="toolbar">
+      <div class="toolbar-filters">
+        <span class="toolbar-label">${icon("search")}Filter</span>
+        <select class="filter-input" data-filter="project" aria-label="Filter by project">
+          <option value="">All projects</option>
+          ${(state.projects || []).map((p) => `<option value="${p.id}" ${filters.project === String(p.id) ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
+        </select>
+        <select class="filter-input" data-filter="propertyStatus" aria-label="Filter by property status">
+          <option value="">All statuses</option>
+          <option value="available" ${filters.propertyStatus === "available" ? "selected" : ""}>Available</option>
+          <option value="reserved" ${filters.propertyStatus === "reserved" ? "selected" : ""}>Reserved</option>
+          <option value="sold" ${filters.propertyStatus === "sold" ? "selected" : ""}>Sold</option>
+          <option value="leased" ${filters.propertyStatus === "leased" ? "selected" : ""}>Leased</option>
+        </select>
+        <select class="filter-input" data-filter="type" aria-label="Filter by property type">
+          <option value="">All types</option>
+          <option value="land" ${filters.type === "land" ? "selected" : ""}>Land</option>
+          <option value="house" ${filters.type === "house" ? "selected" : ""}>House</option>
+          <option value="apartment" ${filters.type === "apartment" ? "selected" : ""}>Apartment</option>
+          <option value="villa" ${filters.type === "villa" ? "selected" : ""}>Villa</option>
+          <option value="commercial" ${filters.type === "commercial" ? "selected" : ""}>Commercial</option>
+          <option value="penthouse" ${filters.type === "penthouse" ? "selected" : ""}>Penthouse</option>
+        </select>
+      </div>
+      <div class="toolbar-end"><span class="toolbar-count">${rows.length} propert${rows.length === 1 ? "y" : "ies"}</span>${pageActions()}</div>
     </div>
     ${rows.length
       ? `<div class="property-grid">${list}</div>${pager("properties")}`
-      : `<div class="card glass empty"><strong>No properties found</strong>Add the first property to start building your portfolio.</div>`}`;
+      : `<div class="panel">${filtered
+        ? emptyState("No properties match these filters", "Try a different project, status or type.", { iconName: "search" })
+        : emptyState("No properties yet", "Properties are the core of the portfolio: price, location, status and photos.", { iconName: "home", action: mayCreate ? `<button class="btn btn-primary" data-action="new-property">${icon("plus")}Create your first property</button>` : "" })}</div>`}`;
 }
 
 function renderClients() {
@@ -2249,48 +2553,51 @@ function renderClients() {
     (!filters.clientStatus || client.status === filters.clientStatus)
   );
   const list = rows.map((client) => {
-    return `<div class="client-card" data-searchable>
+    const initials = String(client.name || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
+    const edit = can("edit") ? `<button class="btn btn-small" data-action="edit-client" data-id="${client.id}">Edit</button>` : "";
+    const remove = can("delete") ? `<button class="btn btn-small btn-danger-ghost" data-action="delete-client" data-id="${client.id}" title="Delete client">Delete client</button>` : "";
+    return `<article class="client-card" data-searchable>
       <div class="client-head">
-        <div class="client-name">${escapeHtml(client.name)}</div>
-        <div class="client-type">${badge(client.client_type, "neutral")}</div>
+        <span class="avatar" aria-hidden="true">${escapeHtml(initials || "?")}</span>
+        <div class="client-title"><div class="client-name">${escapeHtml(client.name)}</div><div class="client-type">${escapeHtml(humanize(client.client_type))}${client.project_name ? ` · ${escapeHtml(client.project_name)}` : ""}</div></div>
+        ${badge(client.status === "lead" ? "Lead / prospect" : client.status, client.status)}
       </div>
       <div class="client-meta">
-        ${client.email ? `<div><span class="muted">Email</span>${escapeHtml(client.email)}</div>` : ""}
-        ${client.phone ? `<div><span class="muted">Phone</span>${escapeHtml(client.phone)}</div>` : ""}
-        <div><span class="muted">Status</span>${badge(client.status)}</div>
+        ${client.email ? `<a class="contact-line" href="mailto:${escapeHtml(client.email)}">${icon("mail")}<span>${escapeHtml(client.email)}</span></a>` : ""}
+        ${client.phone ? `<a class="contact-line" href="tel:${escapeHtml(String(client.phone).replace(/\s+/g, ""))}">${icon("phone")}<span>${escapeHtml(client.phone)}</span></a>` : ""}
+        ${!client.email && !client.phone ? `<span class="contact-line muted">${icon("user")}<span>No contact details yet</span></span>` : ""}
         ${client.notes ? `<p class="client-notes">${escapeHtml(client.notes)}</p>` : ""}
       </div>
       <div class="client-foot">
-        <div><span class="muted">Project</span><span class="cell-sub">${escapeHtml(client.project_name || "—")}</span></div>
-        <div><span class="muted">Added</span>${formatDate(client.created_at)}</div>
-        <div class="row-actions">
-          <button class="btn btn-small" data-action="edit-client" data-id="${client.id}"${can("edit") ? "" : " hidden"}>Edit</button>
-          <button class="btn btn-danger btn-small icon-btn" data-action="delete-client" data-id="${client.id}" title="Delete client"${can("delete") ? "" : " hidden"}>×</button>
-        </div>
+        <span class="muted">Added ${formatDate(client.created_at)}</span>
+        <div class="row-actions">${edit}${rowMenu([remove])}</div>
       </div>
-    </div>`;
+    </article>`;
   }).join("");
+  const mayCreate = canModule("clients") && can("create");
+  const filtered = Boolean(filters.project || filters.clientStatus);
   content.innerHTML = `
-    <div class="filters">
-      <span class="muted">Filters</span>
-      <select class="filter-input" data-filter="project" aria-label="Filter by project">
-        <option value="">All projects</option>
-        ${(state.projects || []).map((p) => `<option value="${p.id}" ${filters.project === String(p.id) ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
-      </select>
-      <select class="filter-input" data-filter="clientStatus" aria-label="Filter by client status">
-        <option value="">All statuses</option>
-        <option value="lead" ${filters.clientStatus === "lead" ? "selected" : ""}>Lead</option>
-        <option value="active" ${filters.clientStatus === "active" ? "selected" : ""}>Active</option>
-        <option value="inactive" ${filters.clientStatus === "inactive" ? "selected" : ""}>Inactive</option>
-      </select>
-    </div>
-    <div class="section-head">
-      <div><h2 class="section-title">Client register</h2><div class="section-note">${rows.length} contact${rows.length === 1 ? "" : "s"} in the workspace</div></div>
-      <button class="btn btn-primary" data-action="new-client">+ New client</button>
+    <div class="toolbar">
+      <div class="toolbar-filters">
+        <span class="toolbar-label">${icon("search")}Filter</span>
+        <select class="filter-input" data-filter="project" aria-label="Filter by project">
+          <option value="">All projects</option>
+          ${(state.projects || []).map((p) => `<option value="${p.id}" ${filters.project === String(p.id) ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
+        </select>
+        <select class="filter-input" data-filter="clientStatus" aria-label="Filter by client status">
+          <option value="">All statuses</option>
+          <option value="lead" ${filters.clientStatus === "lead" ? "selected" : ""}>Lead / prospect</option>
+          <option value="active" ${filters.clientStatus === "active" ? "selected" : ""}>Active</option>
+          <option value="inactive" ${filters.clientStatus === "inactive" ? "selected" : ""}>Inactive</option>
+        </select>
+      </div>
+      <div class="toolbar-end"><span class="toolbar-count">${rows.length} client${rows.length === 1 ? "" : "s"}</span>${pageActions()}</div>
     </div>
     ${rows.length
       ? `<div class="client-grid">${list}</div>${pager("clients")}`
-      : `<div class="card glass empty"><strong>No clients found</strong>Add the first contact to begin tracking people.</div>`}`;
+      : `<div class="panel">${filtered
+        ? emptyState("No clients match these filters", "Try a different project or status.", { iconName: "search" })
+        : emptyState("No clients yet", "A client can be registered as a lead or prospect before any contract exists.", { iconName: "users", action: mayCreate ? `<button class="btn btn-primary" data-action="new-client">${icon("plus")}Add your first client</button>` : "" })}</div>`}`;
 }
 
 function renderAppointments() {
@@ -2300,57 +2607,63 @@ function renderAppointments() {
     (!filters.appointmentStatus || apt.status === filters.appointmentStatus) &&
     (!filters.type || apt.appointment_type === filters.type)
   ).sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)));
+  const timeOf = (value) => {
+    if (!value) return "";
+    const date = new Date(String(value).replace(" ", "T"));
+    return Number.isNaN(date.getTime()) ? "" : new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit" }).format(date);
+  };
   const list = rows.map((apt) => {
-    return `<div class="apt-row" data-searchable>
-      <div class="apt-time">
-        <div class="apt-datetime">${formatDateTime(apt.starts_at, true)}</div>
-        ${apt.ends_at ? `<div class="apt-datetime muted">${formatDateTime(apt.ends_at, true)}</div>` : ""}
-      </div>
+    const start = timeOf(apt.starts_at);
+    const end = timeOf(apt.ends_at);
+    const edit = can("edit") ? `<button class="btn btn-small" data-action="edit-appointment" data-id="${apt.id}">Edit</button>` : "";
+    const remove = can("delete") ? `<button class="btn btn-small btn-danger-ghost" data-action="delete-appointment" data-id="${apt.id}" title="Delete appointment">Delete appointment</button>` : "";
+    return `<article class="apt-row${apt.status === "cancelled" ? " is-muted" : ""}" data-searchable>
+      <div class="date-chip date-chip-lg">${appointmentDateChip(apt.starts_at)}</div>
       <div class="apt-body">
-        <div class="apt-title">${escapeHtml(apt.title)}</div>
+        <div class="apt-title-line"><div class="apt-title">${escapeHtml(apt.title)}</div>${badge(apt.status)}</div>
         <div class="apt-meta">
-          <div><span class="muted">Client</span><span class="cell-main">${escapeHtml(apt.client_name || "—")}</span></div>
-          ${apt.property_name ? `<div><span class="muted">Property</span><span class="cell-sub">${escapeHtml(apt.property_name)}</span></div>` : ""}
-          <div><span class="muted">Project</span><span class="cell-sub">${escapeHtml(apt.project_name || "—")}</span></div>
-          <div><span class="muted">Type</span>${badge(apt.appointment_type, "neutral")}</div>
-          <div><span class="muted">Status</span>${badge(apt.status)}</div>
-          ${apt.notes ? `<p class="apt-notes">${escapeHtml(apt.notes)}</p>` : ""}
+          <span>${icon("clock")}${start ? `${escapeHtml(start)}${end ? ` – ${escapeHtml(end)}` : ""}` : "Time not set"}</span>
+          <span>${icon("user")}${escapeHtml(apt.client_name || "—")}</span>
+          ${apt.property_name ? `<span>${icon("home")}${escapeHtml(apt.property_name)}</span>` : ""}
+          ${apt.project_name ? `<span>${icon("building")}${escapeHtml(apt.project_name)}</span>` : ""}
+          <span class="apt-type">${badge(apt.appointment_type, "neutral")}</span>
         </div>
+        ${apt.notes ? `<p class="apt-notes">${escapeHtml(apt.notes)}</p>` : ""}
       </div>
-      <div class="apt-actions">
-        <button class="btn btn-small" data-action="edit-appointment" data-id="${apt.id}"${can("edit") ? "" : " hidden"}>Edit</button>
-        <button class="btn btn-danger btn-small icon-btn" data-action="delete-appointment" data-id="${apt.id}" title="Delete appointment"${can("delete") ? "" : " hidden"}>×</button>
-      </div>
-    </div>`;
+      <div class="apt-actions">${edit}${rowMenu([remove])}</div>
+    </article>`;
   }).join("");
+  const mayCreate = canModule("appointments") && can("create");
+  const filtered = Boolean(filters.project || filters.appointmentStatus || filters.type);
   content.innerHTML = `
-    <div class="filters">
-      <span class="muted">Filters</span>
-      <select class="filter-input" data-filter="project" aria-label="Filter by project">
-        <option value="">All projects</option>
-        ${(state.projects || []).map((p) => `<option value="${p.id}" ${filters.project === String(p.id) ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
-      </select>
-      <select class="filter-input" data-filter="appointmentStatus" aria-label="Filter by appointment status">
-        <option value="">All statuses</option>
-        <option value="scheduled" ${filters.appointmentStatus === "scheduled" ? "selected" : ""}>Scheduled</option>
-        <option value="completed" ${filters.appointmentStatus === "completed" ? "selected" : ""}>Completed</option>
-        <option value="cancelled" ${filters.appointmentStatus === "cancelled" ? "selected" : ""}>Cancelled</option>
-      </select>
-      <select class="filter-input" data-filter="type" aria-label="Filter by appointment type">
-        <option value="">All types</option>
-        <option value="viewing" ${filters.type === "viewing" ? "selected" : ""}>Viewing</option>
-        <option value="call" ${filters.type === "call" ? "selected" : ""}>Call</option>
-        <option value="meeting" ${filters.type === "meeting" ? "selected" : ""}>Meeting</option>
-        <option value="inspection" ${filters.type === "inspection" ? "selected" : ""}>Inspection</option>
-      </select>
-    </div>
-    <div class="section-head">
-      <div><h2 class="section-title">Appointment schedule</h2><div class="section-note">${rows.length} appointment${rows.length === 1 ? "" : "s"} in the workspace</div></div>
-      <button class="btn btn-primary" data-action="new-appointment">+ New appointment</button>
+    <div class="toolbar">
+      <div class="toolbar-filters">
+        <span class="toolbar-label">${icon("search")}Filter</span>
+        <select class="filter-input" data-filter="project" aria-label="Filter by project">
+          <option value="">All projects</option>
+          ${(state.projects || []).map((p) => `<option value="${p.id}" ${filters.project === String(p.id) ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
+        </select>
+        <select class="filter-input" data-filter="appointmentStatus" aria-label="Filter by appointment status">
+          <option value="">All statuses</option>
+          <option value="scheduled" ${filters.appointmentStatus === "scheduled" ? "selected" : ""}>Scheduled</option>
+          <option value="completed" ${filters.appointmentStatus === "completed" ? "selected" : ""}>Completed</option>
+          <option value="cancelled" ${filters.appointmentStatus === "cancelled" ? "selected" : ""}>Cancelled</option>
+        </select>
+        <select class="filter-input" data-filter="type" aria-label="Filter by appointment type">
+          <option value="">All types</option>
+          <option value="viewing" ${filters.type === "viewing" ? "selected" : ""}>Viewing</option>
+          <option value="call" ${filters.type === "call" ? "selected" : ""}>Call</option>
+          <option value="meeting" ${filters.type === "meeting" ? "selected" : ""}>Meeting</option>
+          <option value="inspection" ${filters.type === "inspection" ? "selected" : ""}>Inspection</option>
+        </select>
+      </div>
+      <div class="toolbar-end"><span class="toolbar-count">${rows.length} appointment${rows.length === 1 ? "" : "s"}</span>${pageActions()}</div>
     </div>
     ${rows.length
       ? `<div class="apt-list">${list}</div>${pager("appointments")}`
-      : `<div class="card glass empty"><strong>No appointments found</strong>Schedule a viewing, call, meeting, or inspection.</div>`}`;
+      : `<div class="panel">${filtered
+        ? emptyState("No appointments match these filters", "Try a different project, status or type.", { iconName: "search" })
+        : emptyState("No appointments scheduled", "Book viewings, calls, meetings and inspections with clients.", { iconName: "calendar", action: mayCreate ? `<button class="btn btn-primary" data-action="new-appointment">${icon("plus")}Schedule an appointment</button>` : "" })}</div>`}`;
 }
 
 function renderDocuments() {
@@ -2363,81 +2676,98 @@ function renderDocuments() {
   ).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
   const list = rows.map((doc) => {
     const hasFile = doc.has_file;
-    const openPath = hasFile ? `/documents/${doc.id}/file?download=1` : null;
-    return `<div class="doc-row" data-searchable>
+    const related = [
+      doc.contract_client ? `Contract · ${doc.contract_client}` : "",
+      doc.client_name ? `Client · ${doc.client_name}` : "",
+      doc.project_name ? `Project · ${doc.project_name}` : "",
+    ].filter(Boolean);
+    const fileName = doc.original_filename || doc.file_name || "";
+    // Open and Download exist only for a document whose file is really stored;
+    // a record without a file gets neither, never a dead link.
+    const view = doc.category === "agreement" && doc.contract_id && canModule("contracts") ? `<button class="btn btn-small" data-action="view-generated-contract" data-id="${doc.contract_id}">View</button>` : "";
+    const open = hasFile ? `<button class="btn btn-small" data-action="open-document" data-id="${doc.id}">Open</button>` : "";
+    const download = hasFile ? `<button class="btn btn-small btn-ghost" data-action="download-generated-document" data-id="${doc.id}" data-filename="${escapeHtml(fileName || "document")}">Download</button>` : "";
+    const edit = can("edit") ? `<button class="btn btn-small" data-action="edit-document" data-id="${doc.id}">Edit details</button>` : "";
+    const remove = can("delete") ? `<button class="btn btn-small btn-danger-ghost" data-action="delete-document" data-id="${doc.id}" title="Delete document">Delete document</button>` : "";
+    return `<article class="doc-row" data-searchable>
       <div class="doc-icon">${documentIcon(doc.category)}</div>
       <div class="doc-body">
         <div class="doc-title">${escapeHtml(doc.title)}</div>
         <div class="doc-meta">
-          <div><span class="muted">Category</span>${badge(doc.category, "neutral")}</div>
-          <div><span class="muted">Status</span>${badge(doc.status)}</div>
-          <div><span class="muted">Uploaded</span>${formatDate(doc.uploaded_at || doc.created_at)}</div>
-          ${hasFile ? `<div><span class="muted">File</span><span class="cell-sub">${escapeHtml(doc.original_filename || doc.file_name || "")} · ${formatBytes(doc.file_size)}</span></div>` : ""}
-          ${doc.client_name ? `<div><span class="muted">Client</span><span class="cell-sub">${escapeHtml(doc.client_name)}</span></div>` : ""}
-          ${doc.contract_client ? `<div><span class="muted">Contract</span><span class="cell-sub">${escapeHtml(doc.contract_client)}</span></div>` : ""}
-          <div><span class="muted">Project</span><span class="cell-sub">${escapeHtml(doc.project_name || "—")}</span></div>
-          ${doc.file_reference ? `<div><span class="muted">Reference</span>${escapeHtml(doc.file_reference)}</div>` : ""}
-          ${doc.notes ? `<p class="doc-notes">${escapeHtml(doc.notes)}</p>` : ""}
+          <span>${escapeHtml(humanize(doc.category))}</span>
+          ${related.map((entry) => `<span>${escapeHtml(entry)}</span>`).join("")}
+          ${hasFile ? `<span>${escapeHtml(fileName)}${doc.file_size ? ` · ${formatBytes(doc.file_size)}` : ""}</span>` : `<span class="muted">No file attached</span>`}
+          ${doc.file_reference ? `<span>Ref · ${escapeHtml(doc.file_reference)}</span>` : ""}
         </div>
+        ${doc.notes ? `<p class="doc-notes">${escapeHtml(doc.notes)}</p>` : ""}
       </div>
-      <div class="doc-actions">
-        ${doc.category === "agreement" && doc.contract_id && canModule("contracts") ? `<button class="btn btn-small" data-action="view-generated-contract" data-id="${doc.contract_id}">View</button>` : ""}
-        ${hasFile ? `<button class="btn btn-small" data-action="open-document" data-id="${doc.id}">Open</button>` : ""}
-        <button class="btn btn-small" data-action="edit-document" data-id="${doc.id}"${can("edit") ? "" : " hidden"}>Edit</button>
-        <button class="btn btn-danger btn-small icon-btn" data-action="delete-document" data-id="${doc.id}" title="Delete document"${can("delete") ? "" : " hidden"}>×</button>
-      </div>
-    </div>`;
+      <div class="doc-date">${formatDate(doc.uploaded_at || doc.created_at)}</div>
+      <div class="doc-status">${badge(doc.status)}</div>
+      <div class="doc-actions">${view}${open}${rowMenu([download, edit, remove])}</div>
+    </article>`;
   }).join("");
+  const mayCreate = canModule("documents") && can("create");
+  const filtered = Boolean(filters.project || filters.documentStatus || filters.type || filters.documentSearch);
   content.innerHTML = `
-    <div class="filters">
-      <span class="muted">Filters</span>
-      <select class="filter-input" data-filter="project" aria-label="Filter by project">
-        <option value="">All projects</option>
-        ${(state.projects || []).map((p) => `<option value="${p.id}" ${filters.project === String(p.id) ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
-      </select>
-      <select class="filter-input" data-filter="type" aria-label="Filter by document category">
-        <option value="">All categories</option>
-        <option value="agreement" ${filters.type === "agreement" ? "selected" : ""}>Agreement</option>
-        <option value="title" ${filters.type === "title" ? "selected" : ""}>Title</option>
-        <option value="invoice" ${filters.type === "invoice" ? "selected" : ""}>Invoice</option>
-        <option value="receipt" ${filters.type === "receipt" ? "selected" : ""}>Receipt</option>
-        <option value="report" ${filters.type === "report" ? "selected" : ""}>Report</option>
-        <option value="permit" ${filters.type === "permit" ? "selected" : ""}>Permit</option>
-        <option value="other" ${filters.type === "other" ? "selected" : ""}>Other</option>
-      </select>
-      <select class="filter-input" data-filter="documentStatus" aria-label="Filter by document status">
-        <option value="">All statuses</option>
-        <option value="pending" ${filters.documentStatus === "pending" ? "selected" : ""}>Pending</option>
-        <option value="approved" ${filters.documentStatus === "approved" ? "selected" : ""}>Approved</option>
-        <option value="archived" ${filters.documentStatus === "archived" ? "selected" : ""}>Archived</option>
-      </select>
-      <input class="filter-input" data-filter="documentSearch" type="search" value="${escapeHtml(filters.documentSearch || "")}" placeholder="Search title" aria-label="Search documents" style="min-width:200px">
-    </div>
-    <div class="section-head">
-      <div><h2 class="section-title">Document register</h2><div class="section-note">${rows.length} document${rows.length === 1 ? "" : "s"} in the workspace</div></div>
-      <button class="btn btn-primary" data-action="new-document">+ New document</button>
+    <div class="toolbar">
+      <div class="toolbar-filters">
+        <label class="toolbar-search">${icon("search")}<input class="filter-input" data-filter="documentSearch" type="search" value="${escapeHtml(filters.documentSearch || "")}" placeholder="Search document titles" aria-label="Search documents"></label>
+        <select class="filter-input" data-filter="project" aria-label="Filter by project">
+          <option value="">All projects</option>
+          ${(state.projects || []).map((p) => `<option value="${p.id}" ${filters.project === String(p.id) ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
+        </select>
+        <select class="filter-input" data-filter="type" aria-label="Filter by document category">
+          <option value="">All categories</option>
+          <option value="agreement" ${filters.type === "agreement" ? "selected" : ""}>Agreement</option>
+          <option value="title" ${filters.type === "title" ? "selected" : ""}>Title</option>
+          <option value="invoice" ${filters.type === "invoice" ? "selected" : ""}>Invoice</option>
+          <option value="receipt" ${filters.type === "receipt" ? "selected" : ""}>Receipt</option>
+          <option value="report" ${filters.type === "report" ? "selected" : ""}>Report</option>
+          <option value="permit" ${filters.type === "permit" ? "selected" : ""}>Permit</option>
+          <option value="other" ${filters.type === "other" ? "selected" : ""}>Other</option>
+        </select>
+        <select class="filter-input" data-filter="documentStatus" aria-label="Filter by document status">
+          <option value="">All statuses</option>
+          <option value="pending" ${filters.documentStatus === "pending" ? "selected" : ""}>Pending</option>
+          <option value="approved" ${filters.documentStatus === "approved" ? "selected" : ""}>Approved</option>
+          <option value="archived" ${filters.documentStatus === "archived" ? "selected" : ""}>Archived</option>
+        </select>
+      </div>
+      <div class="toolbar-end"><span class="toolbar-count">${rows.length} document${rows.length === 1 ? "" : "s"}</span>${pageActions()}</div>
     </div>
     ${rows.length
-      ? `<div class="document-list">${list}</div>${pager("documents")}`
-      : `<div class="card glass empty"><strong>No documents found</strong>Upload or register the first document.</div>`}`;
+      ? `<div class="doc-table"><div class="doc-table-head" aria-hidden="true"><span></span><span>Document</span><span>Date</span><span>Status</span><span class="align-right">Actions</span></div><div class="document-list">${list}</div></div>${pager("documents")}`
+      : `<div class="panel">${filtered
+        ? emptyState("No documents match these filters", "Try a different search, project, category or status.", { iconName: "search" })
+        : emptyState("No documents yet", "Generated contracts, receipts, title deeds and permits are stored here.", { iconName: "folder", action: mayCreate ? `<button class="btn btn-primary" data-action="new-document">${icon("plus")}Upload a document</button>` : "" })}</div>`}`;
+}
+
+/**
+ * The page's primary create action, gated exactly as the topbar gated it before
+ * the redesign. It now sits at the end of each register's toolbar - next to the
+ * filters it relates to - instead of being repeated in the topbar AND the page.
+ */
+function pageActions() {
+  const view = (name, permission) => state.view === name && canModule(name) && can(permission);
+  const plus = icon("plus");
+  return (
+    view("projects", "create") ? `<button class="btn btn-primary" data-action="new-project">${plus}New project</button>` :
+    view("properties", "create") ? `<button class="btn btn-primary" data-action="new-property">${plus}New property</button>` :
+    view("clients", "create") ? `<button class="btn btn-primary" data-action="new-client">${plus}New client</button>` :
+    view("contracts", "create") ? `<button class="btn btn-primary" data-action="generate-contract">${icon("contract")}Generate contract</button>` :
+    view("appointments", "create") ? `<button class="btn btn-primary" data-action="new-appointment">${plus}New appointment</button>` :
+    view("documents", "create") ? `<button class="btn btn-primary" data-action="new-document">${plus}New document</button>` :
+    state.view === "reports" && canModule("reports") && can("view_reports") ? `${can("export") ? `<button class="btn" data-action="open-report-upload">Upload report</button>` : ""}<button class="btn btn-primary" data-action="open-report-generate">${icon("chart")}Generate report</button>` :
+    "");
 }
 
 function render() {
   const [title, sub] = viewMeta[state.view] || ["Workspace", ""];
   pageTitle.textContent = title;
   pageSub.textContent = sub;
-  const view = (name, permission) => state.view === name && canModule(name) && can(permission);
-  topbarActions.innerHTML =
-    view("projects", "create") ? `<button class="btn btn-primary" data-action="new-project">+ New project</button>` :
-    view("properties", "create") ? `<button class="btn btn-primary" data-action="new-property">+ New property</button>` :
-    view("clients", "create") ? `<button class="btn btn-primary" data-action="new-client">+ New client</button>` :
-    view("contracts", "create") ? `<button class="btn btn-primary" data-action="generate-contract">Generate contract</button>` :
-    state.view === "debts" && canModule("debts") && can("create") ? `<button class="btn btn-primary" data-action="new-debt">+ New debt</button>${can("create") ? `<button class="btn" data-action="new-payment">+ Record payment</button>` : ""}` :
-    view("appointments", "create") ? `<button class="btn btn-primary" data-action="new-appointment">+ New appointment</button>` :
-    view("documents", "create") ? `<button class="btn btn-primary" data-action="new-document">+ New document</button>` :
-    state.view === "reports" && canModule("reports") && can("view_reports") ? `<button class="btn btn-primary" data-action="open-report-generate">+ Generate report</button>${can("export") ? `<button class="btn" data-action="open-report-upload">+ Upload report</button>` : ""}` :
-    state.view === "assignments" && can("assign_tasks") ? `<button class="btn btn-primary" data-action="new-task">+ New Task</button>` :
-    "";
+  // The topbar carries the title, search and notifications only; each page
+  // renders its own primary action beside its filters (see pageActions()).
+  topbarActions.innerHTML = "";
   if (state.loading) { renderLoading(); return; }
   // The admin overview needs the organization counters, which load lazily.
   if (state.view === "admin-dashboard" && !adminExtrasLoaded) {
@@ -2688,6 +3018,23 @@ function updateClientContractPreview() {
   if (final) final.value = money(preview.final_price);
 }
 
+/** A titled group inside a form grid. Layout only: it adds no field. */
+function formSection(title, note = "") {
+  return `<div class="form-section full"><h3>${escapeHtml(title)}</h3>${note ? `<p>${escapeHtml(note)}</p>` : ""}</div>`;
+}
+
+/**
+ * Marks every required control's label with an asterisk, so the indicator can
+ * never disagree with the `required` attribute the browser actually enforces.
+ */
+function markRequiredFields(root) {
+  root.querySelectorAll("input[required], select[required], textarea[required]").forEach((control) => {
+    if (!control.id) return;
+    const label = root.querySelector(`label[for="${control.id}"]`);
+    if (label && !label.querySelector(".req")) label.insertAdjacentHTML("beforeend", ' <span class="req" aria-hidden="true">*</span>');
+  });
+}
+
 function openModal(type, record = null) {
   modal.dataset.type = type;
   let title = "Create record";
@@ -2702,7 +3049,7 @@ function openModal(type, record = null) {
   if (type === "contract") {
     title = record ? "Edit contract" : "New contract";
     subtitle = record ? "Update contract details." : "Link a client agreement to a project.";
-    body = `<div class="form-grid"><div class="field full"><label for="field-project">Project</label><select id="field-project" name="project_id" required><option value="">Select project</option>${projectOptions(record?.project_id)}</select></div><div class="field full"><label for="field-linked-client">Client from register (optional)</label><select id="field-linked-client" name="client_id">${linkedClientOptions(record?.client_id)}</select></div><div class="field"><label for="field-client">Client name</label><input id="field-client" name="client_name" required maxlength="120" value="${escapeHtml(record?.client_name || "")}" placeholder="Client full name"></div><div class="field"><label for="field-type">Contract type</label><select id="field-type" name="contract_type" required><option value="new" ${record?.contract_type === "new" ? "selected" : ""}>New</option><option value="terminal" ${record?.contract_type === "terminal" ? "selected" : ""}>Terminal</option></select></div><div class="field"><label for="field-contract-status">Status</label><select id="field-contract-status" name="status"><option value="active" ${record?.status !== "closed" && record?.status !== "cancelled" ? "selected" : ""}>Active</option><option value="closed" ${record?.status === "closed" ? "selected" : ""}>Closed</option><option value="cancelled" ${record?.status === "cancelled" ? "selected" : ""}>Cancelled</option></select></div><div class="field"><label for="field-original-price">Original price</label><input id="field-original-price" name="original_price" type="number" min="0" step="0.01" required value="${escapeHtml(record?.original_price ?? record?.value ?? "")}" placeholder="0"></div><div class="field"><label for="field-discount-pct">Discount %</label><input id="field-discount-pct" name="discount_pct" type="number" min="0" max="100" step="0.01" value="${escapeHtml(record?.discount_pct ?? 0)}" placeholder="0"></div><div class="field"><label for="field-discount-amount">Discount amount</label><input id="field-discount-amount" type="text" value="${escapeHtml(money(pricingPreview(record).discount_amount))}" readonly aria-readonly="true" tabindex="-1" title="Calculated by the system from the original price and discount"></div><div class="field"><label for="field-final-price">Final price</label><input id="field-final-price" type="text" value="${escapeHtml(money(pricingPreview(record).final_price))}" readonly aria-readonly="true" tabindex="-1" title="Calculated by the system. This is the amount the payment plan is built from."></div><div class="field"><label for="field-start">Start date</label><input id="field-start" name="start_date" type="date" value="${escapeHtml(record?.start_date || "")}"></div><div class="field"><label for="field-end">End date</label><input id="field-end" name="end_date" type="date" value="${escapeHtml(record?.end_date || "")}"></div><div class="field full"><label for="field-notes">Notes</label><textarea id="field-notes" name="notes" placeholder="Property, unit, payment terms, or reference">${escapeHtml(record?.notes || "")}</textarea></div></div>`;
+    body = `<div class="form-grid">${formSection("Client & project")}<div class="field full"><label for="field-project">Project</label><select id="field-project" name="project_id" required><option value="">Select project</option>${projectOptions(record?.project_id)}</select></div><div class="field full"><label for="field-linked-client">Client from register (optional)</label><select id="field-linked-client" name="client_id">${linkedClientOptions(record?.client_id)}</select></div><div class="field"><label for="field-client">Client name</label><input id="field-client" name="client_name" required maxlength="120" value="${escapeHtml(record?.client_name || "")}" placeholder="Client full name"></div><div class="field"><label for="field-type">Contract type</label><select id="field-type" name="contract_type" required><option value="new" ${record?.contract_type === "new" ? "selected" : ""}>New</option><option value="terminal" ${record?.contract_type === "terminal" ? "selected" : ""}>Terminal</option></select></div><div class="field"><label for="field-contract-status">Status</label><select id="field-contract-status" name="status"><option value="active" ${record?.status !== "closed" && record?.status !== "cancelled" ? "selected" : ""}>Active</option><option value="closed" ${record?.status === "closed" ? "selected" : ""}>Closed</option><option value="cancelled" ${record?.status === "cancelled" ? "selected" : ""}>Cancelled</option></select></div>${formSection("Pricing", "Discount amount and final price are calculated by the system.")}<div class="field"><label for="field-original-price">Original price</label><input id="field-original-price" name="original_price" type="number" min="0" step="0.01" required value="${escapeHtml(record?.original_price ?? record?.value ?? "")}" placeholder="0"></div><div class="field"><label for="field-discount-pct">Discount %</label><input id="field-discount-pct" name="discount_pct" type="number" min="0" max="100" step="0.01" value="${escapeHtml(record?.discount_pct ?? 0)}" placeholder="0"></div><div class="field"><label for="field-discount-amount">Discount amount</label><input id="field-discount-amount" type="text" value="${escapeHtml(money(pricingPreview(record).discount_amount))}" readonly aria-readonly="true" tabindex="-1" title="Calculated by the system from the original price and discount"></div><div class="field"><label for="field-final-price">Final price</label><input id="field-final-price" type="text" value="${escapeHtml(money(pricingPreview(record).final_price))}" readonly aria-readonly="true" tabindex="-1" title="Calculated by the system. This is the amount the payment plan is built from."></div>${formSection("Agreement term")}<div class="field"><label for="field-start">Start date</label><input id="field-start" name="start_date" type="date" value="${escapeHtml(record?.start_date || "")}"></div><div class="field"><label for="field-end">End date</label><input id="field-end" name="end_date" type="date" value="${escapeHtml(record?.end_date || "")}"></div><div class="field full"><label for="field-notes">Notes</label><textarea id="field-notes" name="notes" placeholder="Property, unit, payment terms, or reference">${escapeHtml(record?.notes || "")}</textarea></div></div>`;
   }
   if (type === "schedule") {
     title = "Generate payment schedule";
@@ -2726,12 +3073,14 @@ function openModal(type, record = null) {
       : [{ value: "cash", label: "Cash" }, { value: "bank", label: "Bank transfer" }, { value: "mobile", label: "Mobile money" }, { value: "card", label: "Card" }, { value: "other", label: "Other" }];
     const prefill = record || {};
     body = `<div class="form-grid">
+      ${formSection("Payment")}
       <div class="field full"><label for="field-payment-contract">Contract</label><select id="field-payment-contract" name="contract_id" required><option value="">Select contract</option>${contractOptions(prefill.contract_id)}</select></div>
       <div class="field"><label for="field-payment-debt">Installment (optional)</label><select id="field-payment-debt" name="debt_id"><option value="">None — general payment</option>${(state.debts || []).filter((debt) => !prefill.contract_id || String(debt.contract_id) === String(prefill.contract_id)).map((debt) => `<option value="${debt.id}" ${String(debt.id) === String(prefill.debt_id || "") ? "selected" : ""}>${escapeHtml(debt.client_name)} · ${money(debt.amount)} · ${formatDate(debt.due_date)}</option>`).join("")}</select></div>
       <div class="field"><label for="field-payment-amount">Amount</label><input id="field-payment-amount" name="amount" type="number" min="0" step="0.01" required value="${escapeHtml(prefill.amount ?? "")}" placeholder="0"></div>
       <div class="field"><label for="field-payment-date">Paid at</label><input id="field-payment-date" name="paid_at" type="date" required value="${today()}"></div>
       <div class="field"><label for="field-payment-method">Method</label><select id="field-payment-method" name="method">${methods.map((m) => `<option value="${escapeHtml(m.value)}">${escapeHtml(m.label)}</option>`).join("")}</select></div>
       <div class="field"><label for="field-payment-reference">Reference</label><input id="field-payment-reference" name="reference" maxlength="120" placeholder="Receipt no. / transaction ID"></div>
+      ${formSection("Receipt & notes")}
       <div class="field full"><label for="field-payment-receipt">Receipt (optional)</label><input id="field-payment-receipt" name="file" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.png,.jpg,.jpeg,.gif,.webp,.bmp"><div class="field-help">PDF or image of the receipt. You can attach it later too.</div></div>
       <div class="field full"><label for="field-payment-notes">Notes</label><textarea id="field-payment-notes" name="notes" maxlength="2000" placeholder="Purpose or follow-up note">${escapeHtml(prefill.notes || "")}</textarea></div>
     </div>`;
@@ -2745,15 +3094,18 @@ function openModal(type, record = null) {
     title = record ? "Edit property" : "New property";
     subtitle = record ? "Update this estate listing." : "Register a new estate asset.";
     body = `<div class="form-grid">
-      <div class="field full"><label for="field-project">Project</label><select id="field-project" name="project_id"><option value="">Select project</option>${projectOptions(record?.project_id)}</select></div>
+      ${formSection("Property details")}
       <div class="field full"><label for="field-name">Property name</label><input id="field-name" name="name" required maxlength="120" value="${escapeHtml(record?.name || "")}" placeholder="e.g. Signature Residence · Phase 1"></div>
+      <div class="field full"><label for="field-project">Project</label><select id="field-project" name="project_id"><option value="">Select project</option>${projectOptions(record?.project_id)}</select></div>
+      <div class="field"><label for="field-location">Location</label><input id="field-location" name="location" required maxlength="120" value="${escapeHtml(record?.location || "")}" placeholder="City or area"></div>
       <div class="field"><label for="field-property-type">Type</label><select id="field-property-type" name="property_type"><option value="land" ${record?.property_type === "land" ? "selected" : ""}>Land</option><option value="house" ${record?.property_type === "house" ? "selected" : ""}>House</option><option value="apartment" ${record?.property_type === "apartment" ? "selected" : ""}>Apartment</option><option value="villa" ${record?.property_type === "villa" ? "selected" : ""}>Villa</option><option value="commercial" ${record?.property_type === "commercial" ? "selected" : ""}>Commercial</option><option value="penthouse" ${record?.property_type === "penthouse" ? "selected" : ""}>Penthouse</option></select></div>
       <div class="field"><label for="field-property-status">Status</label><select id="field-property-status" name="status"><option value="available" ${record?.status === "available" ? "selected" : ""}>Available</option><option value="reserved" ${record?.status === "reserved" ? "selected" : ""}>Reserved</option><option value="sold" ${record?.status === "sold" ? "selected" : ""}>Sold</option><option value="leased" ${record?.status === "leased" ? "selected" : ""}>Leased</option></select></div>
+      ${formSection("Price & size")}
       <div class="field"><label for="field-price">Price</label><input id="field-price" name="price" type="number" min="0" step="0.01" value="${escapeHtml(record?.price ?? "")}" placeholder="0"></div>
-      <div class="field"><label for="field-location">Location</label><input id="field-location" name="location" required maxlength="120" value="${escapeHtml(record?.location || "")}" placeholder="City or area"></div>
-      <div class="field"><label for="field-area">Area</label><input id="field-area" name="area" type="number" min="0" step="0.01" value="${escapeHtml(record?.area ?? "")}" placeholder="0"></div>
+      <div class="field"><label for="field-area">Area (m²)</label><input id="field-area" name="area" type="number" min="0" step="0.01" value="${escapeHtml(record?.area ?? "")}" placeholder="0"></div>
       <div class="field"><label for="field-bedrooms">Bedrooms</label><input id="field-bedrooms" name="bedrooms" type="number" min="0" value="${escapeHtml(record?.bedrooms ?? "")}" placeholder="0"></div>
       <div class="field"><label for="field-bathrooms">Bathrooms</label><input id="field-bathrooms" name="bathrooms" type="number" min="0" value="${escapeHtml(record?.bathrooms ?? "")}" placeholder="0"></div>
+      ${formSection("Listing & photos")}
       <div class="field full"><label for="field-description">Description</label><textarea id="field-description" name="description" maxlength="2000" placeholder="Property summary">${escapeHtml(record?.description || "")}</textarea></div>
       <div class="field"><label class="checkbox-field"><input type="checkbox" name="featured" ${record?.featured ? "checked" : ""}><span>Featured listing</span></label></div>
       ${record ? `<div class="field full"><label>Photos (optional)</label><div class="photo-strip" id="photo-strip" data-property-id="${record.id}">${renderPhotoStrip(record)}</div></div>` : ""}
@@ -2764,10 +3116,13 @@ function openModal(type, record = null) {
     title = record ? "Edit client" : "New client";
     subtitle = record ? "Update this contact." : "Add a new person or organization.";
     body = `<div class="form-grid">
-      <div class="field full"><label for="field-project">Project</label><select id="field-project" name="project_id"><option value="">Select project</option>${projectOptions(record?.project_id)}</select></div>
+      ${formSection("Client details", "A client can be saved as a lead or prospect without a contract.")}
       <div class="field full"><label for="field-client-name">Full name</label><input id="field-client-name" name="name" required maxlength="120" value="${escapeHtml(record?.name || "")}" placeholder="Client full name"></div>
+      <div class="field full"><label for="field-project">Project</label><select id="field-project" name="project_id"><option value="">Select project</option>${projectOptions(record?.project_id)}</select></div>
+      ${formSection("Contact")}
       <div class="field"><label for="field-email">Email</label><input id="field-email" name="email" type="email" maxlength="120" value="${escapeHtml(record?.email || "")}" placeholder="contact@example.com"></div>
       <div class="field"><label for="field-phone">Phone</label><input id="field-phone" name="phone" maxlength="120" value="${escapeHtml(record?.phone || "")}" placeholder="+255 700 000 000"></div>
+      ${formSection("Classification")}
       <div class="field"><label for="field-client-type">Type</label><select id="field-client-type" name="client_type"><option value="buyer" ${record?.client_type === "buyer" ? "selected" : ""}>Buyer</option><option value="seller" ${record?.client_type === "seller" ? "selected" : ""}>Seller</option><option value="landlord" ${record?.client_type === "landlord" ? "selected" : ""}>Landlord</option><option value="tenant" ${record?.client_type === "tenant" ? "selected" : ""}>Tenant</option></select></div>
       <div class="field"><label for="field-client-status">Status</label><select id="field-client-status" name="status"><option value="lead" ${record?.status === "lead" ? "selected" : ""}>Lead / prospect</option><option value="active" ${record?.status === "active" ? "selected" : ""}>Active client</option><option value="inactive" ${record?.status === "inactive" ? "selected" : ""}>Inactive</option></select></div>
       <div class="field full"><label for="field-notes">Notes</label><textarea id="field-notes" name="notes" maxlength="2000" placeholder="Relationship or preference note">${escapeHtml(record?.notes || "")}</textarea></div>
@@ -2779,12 +3134,15 @@ function openModal(type, record = null) {
     title = record ? "Edit appointment" : "New appointment";
     subtitle = record ? "Update this schedule entry." : "Book a new viewing, call, meeting, or inspection.";
     body = `<div class="form-grid">
+      ${formSection("Appointment")}
       <div class="field full"><label for="field-client">Client</label><select id="field-client" name="client_id" required><option value="">Select client</option>${clientOptions(record?.client_id)}</select></div>
       <div class="field full"><label for="field-title">Title</label><input id="field-title" name="title" required maxlength="120" value="${escapeHtml(record?.title || "")}" placeholder="e.g. Premium residence tour"></div>
+      ${formSection("Where")}
       <div class="field"><label for="field-property">Property</label><select id="field-property" name="property_id"><option value="">None</option>${propertyOptions(record?.property_id)}</select></div>
       <div class="field"><label for="field-project">Project</label><select id="field-project" name="project_id"><option value="">None</option>${projectOptions(record?.project_id)}</select></div>
       <div class="field"><label for="field-type">Type</label><select id="field-type" name="appointment_type"><option value="viewing" ${record?.appointment_type === "viewing" ? "selected" : ""}>Viewing</option><option value="call" ${record?.appointment_type === "call" ? "selected" : ""}>Call</option><option value="meeting" ${record?.appointment_type === "meeting" ? "selected" : ""}>Meeting</option><option value="inspection" ${record?.appointment_type === "inspection" ? "selected" : ""}>Inspection</option></select></div>
       <div class="field"><label for="field-status">Status</label><select id="field-status" name="status"><option value="scheduled" ${record?.status === "scheduled" ? "selected" : ""}>Scheduled</option><option value="completed" ${record?.status === "completed" ? "selected" : ""}>Completed</option><option value="cancelled" ${record?.status === "cancelled" ? "selected" : ""}>Cancelled</option></select></div>
+      ${formSection("When")}
       <div class="field"><label for="field-start">Start</label><input id="field-start" name="starts_at" type="datetime-local" value="${escapeHtml(record?.starts_at ? record.starts_at.replace(" ", "T") : "")}"></div>
       <div class="field"><label for="field-end">End</label><input id="field-end" name="ends_at" type="datetime-local" value="${escapeHtml(record?.ends_at ? record.ends_at.replace(" ", "T") : "")}"></div>
       <div class="field full"><label for="field-notes">Notes</label><textarea id="field-notes" name="notes" maxlength="2000" placeholder="Agenda or preparation note">${escapeHtml(record?.notes || "")}</textarea></div>
@@ -2795,12 +3153,15 @@ function openModal(type, record = null) {
     subtitle = record ? "Update this document record." : "Upload a file and register the document.";
     const hasFile = record?.has_file;
     body = `<div class="form-grid">
+      ${formSection("Related records", "Optional links to the project, contract or client this document belongs to.")}
       <div class="field full"><label for="field-project">Project</label><select id="field-project" name="project_id"><option value="">Select project</option>${projectOptions(record?.project_id)}</select></div>
       <div class="field"><label for="field-contract">Contract</label><select id="field-contract" name="contract_id"><option value="">Select contract</option>${contractOptions(record?.contract_id)}</select></div>
       <div class="field"><label for="field-client">Client</label><select id="field-client" name="client_id"><option value="">Select client</option>${clientOptions(record?.client_id)}</select></div>
+      ${formSection("Document")}
       <div class="field full"><label for="field-title">Title</label><input id="field-title" name="title" required maxlength="120" value="${escapeHtml(record?.title || "")}" placeholder="Document title"></div>
       <div class="field"><label for="field-category">Category</label><select id="field-category" name="category"><option value="agreement" ${record?.category === "agreement" ? "selected" : ""}>Agreement</option><option value="title" ${record?.category === "title" ? "selected" : ""}>Title</option><option value="invoice" ${record?.category === "invoice" ? "selected" : ""}>Invoice</option><option value="receipt" ${record?.category === "receipt" ? "selected" : ""}>Receipt</option><option value="report" ${record?.category === "report" ? "selected" : ""}>Report</option><option value="permit" ${record?.category === "permit" ? "selected" : ""}>Permit</option><option value="other" ${record?.category === "other" ? "selected" : ""}>Other</option></select></div>
       <div class="field"><label for="field-status">Status</label><select id="field-status" name="status"><option value="pending" ${record?.status === "pending" ? "selected" : ""}>Pending</option><option value="approved" ${record?.status === "approved" ? "selected" : ""}>Approved</option><option value="archived" ${record?.status === "archived" ? "selected" : ""}>Archived</option></select></div>
+      ${formSection("File")}
       <div class="field full"><label for="field-file">File</label><input id="field-file" name="file" type="file" ${record ? "disabled" : ""}>${hasFile ? `<div class="field-help">Current file: <strong>${escapeHtml(record.original_filename || record.file_name || "attached")}</strong></div>` : record ? `<div class="field-help">Files can only be attached while creating a document.</div>` : ""}</div>
       <div class="field full"><label for="field-file-reference">File reference</label><input id="field-file-reference" name="file_reference" maxlength="120" value="${escapeHtml(record?.file_reference || "")}" placeholder="documents/onboarding-checklist.pdf"></div>
       <div class="field full"><label for="field-notes">Notes</label><textarea id="field-notes" name="notes" maxlength="2000" placeholder="Purpose or follow-up note">${escapeHtml(record?.notes || "")}</textarea></div>
@@ -2862,10 +3223,11 @@ function openModal(type, record = null) {
     ${type === "report-generate" ? `<button type="button" class="btn btn-soft" data-action="preview-report">Preview</button>` : ""}
     ${isReadOnly ? "" : `<button type="submit" class="btn btn-primary">${submitLabel}</button>`}
   </div>`;
-  const head = `<div class="modal-head"><div><h2 class="modal-title">${title}</h2><p class="modal-sub">${subtitle}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">×</button></div>`;
+  const head = `<div class="modal-head"><div><h2 class="modal-title" id="modal-title">${title}</h2><p class="modal-sub">${subtitle}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>`;
   modal.innerHTML = isReadOnly
-    ? `${head}${body}${actions}`
-    : `${head}<form id="record-form" data-id="${escapeHtml(record?.id || "")}">${body}${actions}</form>`;
+    ? `${head}<div class="modal-body">${body}</div>${actions}`
+    : `${head}<form id="record-form" data-id="${escapeHtml(record?.id || "")}"><div class="modal-body">${body}</div>${actions}</form>`;
+  markRequiredFields(modal);
   modalBackdrop.hidden = false;
   hydrateImages(modal);
   const contractSelect = document.getElementById("field-contract");
@@ -2925,6 +3287,10 @@ function openModal(type, record = null) {
   return;
 }
 
+function closeIcon() {
+  return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg>`;
+}
+
 function closeModal() {
   // A pending confirm dialog resolves as "no" so awaiting callers never hang.
   if (typeof state.confirmResolve === "function") {
@@ -2946,7 +3312,7 @@ function closeModal() {
 function confirmDialog({ title, message, confirmLabel = "Confirm", tone = "danger", noteLabel = null }) {
   return new Promise((resolve) => {
     modal.dataset.type = "confirm";
-    const head = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(title)}</h2><p class="modal-sub">${escapeHtml(message)}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">×</button></div>`;
+    const head = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(title)}</h2><p class="modal-sub">${escapeHtml(message)}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>`;
     // Optional note field: the confirm dialog doubles as the reason prompt for
     // workflow steps that must explain themselves.
     const noteField = noteLabel
@@ -3344,7 +3710,7 @@ async function showContractHistory(id) {
     const contract = (state.contracts || []).find((item) => String(item.id) === String(id));
     const rows = (revisions || []).map((entry) => `<tr><td>#${entry.revision}</td><td>${contractStatusBadge(entry.status)}</td><td>${escapeHtml(String(entry.action || "—").replace(/_/g, " "))}</td><td>${escapeHtml(entry.changed_by_name || entry.changed_by_display_name || "—")}</td><td class="cell-sub">${escapeHtml(entry.notes || "—")}</td><td class="align-right">${formatDateTime(entry.created_at)}</td></tr>`).join("");
     modal.dataset.type = "contract-history";
-    modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">Contract history</h2><p class="modal-sub">${escapeHtml(contract?.contract_number || `Contract #${id}`)} — every step, in order</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">×</button></div>
+    modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">Contract history</h2><p class="modal-sub">${escapeHtml(contract?.contract_number || `Contract #${id}`)} — every step, in order</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
       ${rows ? `<div class="table-wrap"><table><thead><tr><th>Rev</th><th>Status</th><th>Action</th><th>By</th><th>Notes</th><th class="align-right">When</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty">No history recorded yet.</div>`}
       <div class="form-actions"><button type="button" class="btn" data-action="close-modal">Close</button></div>`;
     modalBackdrop.hidden = false;
@@ -3369,7 +3735,7 @@ async function openContractDocumentEditor(contractId) {
     modal.dataset.type = "contract-document-editor";
     modal.dataset.contractId = String(contractId);
     modal.classList.add("modal-wide");
-    modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(document.title || "Contract document")}</h2><p class="modal-sub">${escapeHtml(document.original_filename || "Generated contract")}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">×</button></div>
+    modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(document.title || "Contract document")}</h2><p class="modal-sub">${escapeHtml(document.original_filename || "Generated contract")}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
       <div class="field"><label for="contract-document-body">Contract contents</label><textarea id="contract-document-body" class="contract-document-editor"${canEditDocument ? "" : " readonly aria-readonly=\"true\""}>${escapeHtml(document.body_text || "")}</textarea></div>
       <div class="row-actions"><button type="button" class="btn" data-action="close-modal">Close</button><button type="button" class="btn btn-soft" data-action="download-generated-document" data-id="${document.document_id}" data-filename="${escapeHtml(document.original_filename || "contract.docx")}">Download</button>${canEditDocument ? `<button type="button" class="btn btn-primary" data-action="save-contract-document" data-id="${contractId}">Save and close</button>` : ""}</div>`;
     modalBackdrop.hidden = false;
@@ -3387,7 +3753,7 @@ async function saveContractDocument(contractId) {
     await api(`/contracts/${contractId}/document-content`, { method: "PUT", body: JSON.stringify({ body_text: bodyText }) });
     closeModal();
     showToast("Contract document updated and replaced.");
-    loadWorkspace();
+    refresh();
   } catch (error) {
     if (button) button.disabled = false;
     showToast(error.message || "Unable to save contract changes.");
@@ -3401,6 +3767,8 @@ document.getElementById("primary-nav").addEventListener("click", (event) => {
   if (!item) return;
   state.view = item.dataset.view;
   state.filters = { project: "", type: "", status: "", debtStatus: "", propertyStatus: "", clientStatus: "", appointmentStatus: "", documentStatus: "", documentSearch: "", sort: "" };
+  // On a small screen the navigation is a drawer: choosing a destination closes it.
+  setNavOpen(false);
   // Re-render the nav so the active marker follows the new view.
   updateNavigation();
   render();
@@ -3430,7 +3798,7 @@ function viewContract(contractId) {
     const stateValue = debtState(debt);
     return `<tr><td><span class="cell-main">${escapeHtml(debt.notes || `Installment`)}</span></td><td>${formatDate(debt.due_date)}</td><td>${badgeVariant(debtStateLabel(stateValue), stateValue)}</td><td class="amount">${money(debt.amount)}</td></tr>`;
   }).join("");
-  const head = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(contract.contract_number || `Contract #${contract.id}`)}</h2><p class="modal-sub">${escapeHtml(contract.client_name || "")}${contract.project_name ? ` · ${escapeHtml(contract.project_name)}` : ""}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">×</button></div>`;
+  const head = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(contract.contract_number || `Contract #${contract.id}`)}</h2><p class="modal-sub">${escapeHtml(contract.client_name || "")}${contract.project_name ? ` · ${escapeHtml(contract.project_name)}` : ""}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>`;
   modal.innerHTML = `${head}
     <div class="form-grid">
       <div class="field"><span class="muted">Status</span><div>${contractStatusBadge(contract.status)}</div></div>
@@ -3451,14 +3819,54 @@ function viewContract(contractId) {
   modalBackdrop.hidden = false;
 }
 
+/** Opens or closes the small-screen navigation drawer. */
+function setNavOpen(open) {
+  state.navOpen = Boolean(open);
+  document.getElementById("primary-nav")?.classList.toggle("nav-open", state.navOpen);
+  document.querySelector('[data-action="toggle-menu"]')?.setAttribute("aria-expanded", String(state.navOpen));
+}
+
 document.addEventListener("click", async (event) => {
+  // Any click outside an open row menu closes it.
+  if (!event.target.closest?.(".row-menu")) closeRowMenus();
+  // A tap outside the open drawer closes it (the menu button toggles itself).
+  if (state.navOpen && !event.target.closest?.(".sidebar") && !event.target.closest?.('[data-action="toggle-menu"]')) setNavOpen(false);
   const target = event.target.closest("[data-action]");
   if (!target) return;
   const action = target.dataset.action;
   const id = target.dataset.id;
+  if (action === "toggle-row-menu") {
+    // The list is positioned against the viewport so a table's scroll container
+    // can never clip it. Opening one menu closes any other.
+    const list = target.parentElement?.querySelector(".row-menu-list");
+    if (!list) return;
+    const opening = list.hidden;
+    closeRowMenus(opening ? list : null);
+    list.hidden = !opening;
+    target.setAttribute("aria-expanded", String(opening));
+    if (opening) {
+      const rect = target.getBoundingClientRect();
+      list.style.top = `${Math.round(rect.bottom + 6)}px`;
+      list.style.right = `${Math.max(8, Math.round(window.innerWidth - rect.right))}px`;
+      const menuHeight = list.offsetHeight || 0;
+      if (rect.bottom + 6 + menuHeight > window.innerHeight - 8) list.style.top = `${Math.max(8, Math.round(rect.top - 6 - menuHeight))}px`;
+      list.querySelector("button")?.focus();
+    }
+    return;
+  }
+  // Choosing an entry closes its menu before the action runs.
+  if (target.closest(".row-menu-list")) closeRowMenus();
   if (action === "new-project") openModal("project");
   if (action === "edit-project") openModalFor("projects", id, "project");
   if (action === "delete-project") deleteRecord("project", id);
+  if (action === "project-properties" && allowedViewFor("properties") !== false) {
+    // A shortcut into the existing Properties filter; nothing new is fetched
+    // beyond the register's own scoped page.
+    state.view = "properties";
+    state.filters = { ...state.filters, project: String(id || ""), propertyStatus: "", type: "" };
+    updateNavigation();
+    render();
+  }
   if (action === "new-property") openModal("property");
   if (action === "edit-property") openModalFor("properties", id, "property");
   if (action === "delete-property") deleteRecord("property", id);
@@ -3771,7 +4179,21 @@ modal.addEventListener("change", (event) => {
   }
 });
 modalBackdrop.addEventListener("click", (event) => { if (event.target === modalBackdrop) closeModal(); });
-document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !modalBackdrop.hidden) closeModal(); });
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  // An open row menu is the innermost layer, so Escape closes it first.
+  const openMenu = document.querySelector(".row-menu-list:not([hidden])");
+  if (openMenu) {
+    const toggle = openMenu.parentElement?.querySelector('[data-action="toggle-row-menu"]');
+    closeRowMenus();
+    toggle?.focus();
+    return;
+  }
+  if (!modalBackdrop.hidden) closeModal();
+});
+// A fixed-position menu would drift away from its row on scroll; close it.
+window.addEventListener("scroll", () => closeRowMenus(), { passive: true, capture: true });
+window.addEventListener("resize", () => closeRowMenus());
 
 // Topbar search filters the rows already on screen. It re-applies after every
 // render so a filter survives navigation within the same term.

@@ -74,41 +74,41 @@
   </section>
 
   <div class="workspace" id="workspace" hidden>
-    <aside class="sidebar">
+    <aside class="sidebar" aria-label="Workspace navigation">
       <div class="brand">
-        <div class="brand-logo">M</div>
+        <div class="brand-logo" aria-hidden="true">M</div>
         <div class="brand-text"><div class="brand-name">MKUYU</div><div class="brand-sub" id="brand-sub">Staff Portal</div></div>
-      </div>
-      <div class="user-chip">
-        <div class="user-avatar" id="user-avatar">V</div>
-        <div class="user-copy"><strong id="user-name">Office</strong><span id="user-email">Private workspace</span></div>
       </div>
       <nav class="nav" id="primary-nav" aria-label="Primary"></nav>
       <div class="sidebar-footer">
         <div class="side-links">
-          <button class="side-link" data-action="show-alerts" id="side-alerts"><span>Notifications</span><span class="side-link-count" id="side-alert-count" hidden>0</span></button>
-          <button class="side-link" data-action="show-profile"><span>Profile</span></button>
-          <button class="side-link" data-action="logout"><span>Logout</span></button>
+          <button class="side-link" data-action="show-alerts" id="side-alerts"><svg class="ic" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2H4.5z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/></svg><span>Notifications</span><span class="side-link-count" id="side-alert-count" hidden>0</span></button>
+          <button class="side-link" data-action="backup-now" data-admin-only title="Create a consistent copy of the database and download it"><svg class="ic" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5"/><path d="M4.5 16.5V19a1.5 1.5 0 0 0 1.5 1.5h12a1.5 1.5 0 0 0 1.5-1.5v-2.5"/></svg><span>Backup workspace</span></button>
         </div>
-        <button class="btn btn-soft btn-block" data-action="backup-now" data-admin-only title="Create a consistent copy of the database and download it">Backup workspace</button>
-        <div class="system-line"><span>MKUYU workspace</span></div>
+        <div class="user-chip">
+          <div class="user-avatar" id="user-avatar" aria-hidden="true">V</div>
+          <div class="user-copy"><strong id="user-name">Office</strong><span id="user-email">Private workspace</span></div>
+          <button class="user-chip-btn" data-action="show-profile" title="My profile" aria-label="My profile"><svg class="ic" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="8.5" r="3.8"/><path d="M4.5 20.5a7.5 7.5 0 0 1 15 0"/></svg></button>
+          <button class="user-chip-btn" data-action="logout" title="Sign out" aria-label="Sign out"><svg class="ic" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 16l-4-4 4-4M6 12h10"/></svg></button>
+        </div>
       </div>
     </aside>
 
     <main class="main">
       <header class="topbar">
-        <div class="mobile-menu"><button class="icon-btn" data-action="toggle-menu" aria-label="Open navigation" aria-expanded="false">☰</button></div>
+        <div class="mobile-menu"><button class="icon-btn" data-action="toggle-menu" aria-label="Open navigation" aria-expanded="false"><svg class="ic" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button></div>
         <div>
           <h1 class="page-title" id="page-title">Dashboard</h1>
           <p class="page-sub" id="page-sub">Your portfolio at a glance.</p>
         </div>
         <div class="topbar-actions">
           <div class="topbar-search">
+            <svg class="ic" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg>
             <input id="global-search" type="search" placeholder="Search properties, clients, contracts…" aria-label="Search this page" autocomplete="off" />
             <kbd>⌘K</kbd>
           </div>
           <button class="icon-btn bell-btn" id="bell-btn" data-action="show-alerts" title="Notifications" aria-label="Notifications">
-            <span aria-hidden="true">◔</span>
+            <svg class="ic" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2H4.5z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/></svg>
             <span class="bell-dot" id="bell-dot" hidden></span>
           </button>
           <div class="topbar-commands" id="topbar-actions"></div>
@@ -118,8 +118,8 @@
     </main>
   </div>
 
-  <div class="modal-backdrop" id="modal-backdrop" hidden><div class="modal glass" id="modal"></div></div>
-  <div class="toast" id="toast" hidden></div>
+  <div class="modal-backdrop" id="modal-backdrop" hidden><div class="modal" id="modal" role="dialog" aria-modal="true"></div></div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <script src="/js/app.js"></script>
 </body>
 </html>
