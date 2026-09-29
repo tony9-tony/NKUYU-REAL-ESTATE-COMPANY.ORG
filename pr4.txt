@@ -1,8 +1,0 @@
-
-ProcessId CommandLine                                                                                            
---------- -----------                                                                                            
-    19636 "C:\Program Files\nodejs\\node.exe"  "C:\Program Files\nodejs\\node_modules\npm\bin\npm-cli.js" run dev
-     2672 node  backend/src/server.js                                                                            
-
-
-

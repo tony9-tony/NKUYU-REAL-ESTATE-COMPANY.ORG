@@ -1,4 +1,0 @@
-[guard] using existing test database "mkuyu_org_test"
-[guard] live database    : mkuyu_org  (never written to)
-[guard] test database    : mkuyu_org_test
-UNIT_TESTS_PASSED

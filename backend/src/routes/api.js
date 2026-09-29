@@ -66,6 +66,7 @@ import {
   renderContractDocument,
 } from "../contracts/generation.js";
 import { CONTRACT_PLACEHOLDERS, placeholdersUsed, unknownPlaceholders } from "../contracts/workflow.js";
+import { shareContractWithHandoverDesks } from "../contracts/handover.js";
 
 const router = Router();
 const execFileAsync = promisify(execFile);
@@ -735,7 +736,9 @@ router.post("/contracts/:id/transition", route(async (req, res) => {
     actorName: req.user.display_name,
     signedBy,
   });
-  await audit(req, `contract_${name}`, "contract", id, { from: contract.status, to: action.to });
+  // The desk that now holds the contract must be able to open it (see handover.js).
+  const sharedWith = await shareContractWithHandoverDesks(id, req.user.id);
+  await audit(req, `contract_${name}`, "contract", id, { from: contract.status, to: action.to, shared_with: sharedWith });
   res.json(contractResponse(await Contract.get(id), req));
 }));
 

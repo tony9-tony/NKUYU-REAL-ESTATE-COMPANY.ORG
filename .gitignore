@@ -42,3 +42,6 @@ desktop.ini
 
 # AI tooling worktrees
 .kilo/
+
+# Leftover output from earlier test runs
+_old-test-output/

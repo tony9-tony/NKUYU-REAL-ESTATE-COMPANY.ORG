@@ -1909,3 +1909,8 @@ td .row-actions { flex-wrap: nowrap; }
     animation: fade-in .16s ease;
   }
 }
+.plan-missing { color: var(--warning); font-weight: 600; }
+.add-panel > summary { display: flex; align-items: center; gap: 8px; padding: 14px 20px; color: var(--green); font-size: 14px; font-weight: 700; cursor: pointer; list-style: none; }
+.add-panel > summary::-webkit-details-marker { display: none; }
+.add-panel[open] > summary { border-bottom: 1px solid var(--border); }
+.add-panel > form { padding: 18px 20px 20px; }

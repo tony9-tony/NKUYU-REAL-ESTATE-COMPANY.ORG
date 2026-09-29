@@ -41,7 +41,7 @@ async function withAvailableImages(propertyRows) {
 const propertySelect = `SELECT p.*,pr.name AS project_name,(SELECT COUNT(*)::int FROM property_images pi WHERE pi.property_id=p.id) AS image_count,(SELECT id FROM property_images pi WHERE pi.property_id=p.id ORDER BY pi.id LIMIT 1) AS cover_image_id FROM properties p LEFT JOIN projects pr ON pr.id=p.project_id`;
 const clientSelect = "SELECT c.*,pr.name AS project_name FROM clients c LEFT JOIN projects pr ON pr.id=c.project_id";
 const appointmentSelect = "SELECT a.*,c.name AS client_name,c.phone AS client_phone,p.name AS property_name,pr.name AS project_name FROM appointments a JOIN clients c ON c.id=a.client_id LEFT JOIN properties p ON p.id=a.property_id LEFT JOIN projects pr ON pr.id=a.project_id";
-const documentSelect = "SELECT d.*,c.name AS client_name,co.client_name AS contract_client,pr.name AS project_name FROM documents d LEFT JOIN clients c ON c.id=d.client_id LEFT JOIN contracts co ON co.id=d.contract_id LEFT JOIN projects pr ON pr.id=d.project_id";
+const documentSelect = "SELECT d.*,c.name AS client_name,co.client_name AS contract_client,pr.name AS project_name,ub.display_name AS uploaded_by_name FROM documents d LEFT JOIN clients c ON c.id=d.client_id LEFT JOIN contracts co ON co.id=d.contract_id LEFT JOIN projects pr ON pr.id=d.project_id LEFT JOIN users ub ON ub.id=COALESCE(d.created_by,d.owner_id)";
 
 async function list(sql, alias, entity, values, conditions, order = "") {
   const access = await currentAccess();

@@ -1,5 +1,6 @@
 import { query, queryOne, withTransaction } from "./db.js";
 import { migrateContractWorkflow } from "./contracts/workflow.js";
+import { backfillHandoverShares } from "./contracts/handover.js";
 import { ROLE_DUTIES, ROLE_REPLACEMENTS } from "./org/duties.js";
 import { LEGACY_ACCOUNTS, demoPasswordFor, legacyPasswordFor } from "./org/demoCredentials.js";
 import { organizationId } from "./org/rbac.js";
@@ -449,6 +450,8 @@ export async function runMigrations() {
   await seedDemoAccounts();
   await rotateLegacyPasswords();
   await repairRetiredRoleDisplayNames();
+  // Contracts already past Sales get the hand-over shares they were missing.
+  await backfillHandoverShares();
 }
 
 /**

@@ -283,7 +283,12 @@ async function scopedCounts({ financial, has }) {
     columns.push(`(SELECT COUNT(*)::int FROM ${body}) AS ${key}`);
     allValues.push(...values.slice(1));
   });
-  const row = await queryOne(`SELECT ${columns.join(", ")}`, allValues);
+  // A caller holding none of these modules gets only NULL columns, and a
+  // statement with no placeholder must be sent no parameters - binding the
+  // organization id anyway made PostgreSQL reject it and the whole workspace
+  // (ICTO, IT support) failed to load with a 500.
+  const usesParameters = columns.some((column) => column.includes("$"));
+  const row = await queryOne(`SELECT ${columns.join(", ")}`, usesParameters ? allValues : []);
   for (const [key] of COUNT_MODULES) if (row[key] !== null && row[key] !== undefined) counts[key] = Number(row[key]);
   return counts;
 }
@@ -373,6 +378,15 @@ router.get("/workspace", async (req, res, next) => {
           : [],
       can(access, "approve") ? rows("SELECT * FROM approvals WHERE organization_id=$1 ORDER BY created_at DESC LIMIT 100", [org]) : [],
     ]);
+    // Payment-plan presence per contract, for callers who may see money only, so
+    // the register can flag contracts Finance still has to plan. One grouped
+    // query over the contracts already on this page.
+    let planCounts = null;
+    if (can(req.access, "view_financial") && contractsPage.rows.length) {
+      const ids = contractsPage.rows.map((contract) => contract.id);
+      const counted = await query("SELECT contract_id, COUNT(*)::int AS n FROM debts WHERE contract_id = ANY($1::int[]) GROUP BY contract_id", [ids]);
+      planCounts = new Map(counted.rows.map((row) => [row.contract_id, row.n]));
+    }
     res.set("Cache-Control", "private, no-store");
     res.json({
       me,
@@ -385,7 +399,7 @@ router.get("/workspace", async (req, res, next) => {
       // Legal desk shows review buttons a Sales officer will never see. Applied
       // to the page rather than to a separate key, so the contract register keeps
       // working exactly as it did when the array was complete.
-      contracts: contractsPage.rows.map((contract) => ({ ...contract, available_actions: contractActionsFor(contract, req) })),
+      contracts: contractsPage.rows.map((contract) => ({ ...contract, available_actions: contractActionsFor(contract, req), ...(planCounts ? { installments_recorded: planCounts.get(contract.id) || 0 } : {}) })),
       clients: clientsPage.rows,
       properties: propertiesPage.rows,
       appointments: appointmentsPage.rows,

@@ -190,6 +190,13 @@ try {
 
   // === 8. Search cannot widen the caller's scope ==========================
   console.log("\n=== 8. search does not bypass the record scope ===");
+  // The seeded rows carry no owner, which by design puts them in the office-wide
+  // pool that every sector may see. To test that search cannot widen a scope,
+  // the target must actually be outside Sales' scope: give it a private owner.
+  await query(
+    "UPDATE clients SET owner_id = u.id, created_by = u.id, visibility = 'own' FROM users u WHERE u.email = 'admin@mkuyu.local' AND clients.id = $1",
+    [offPage.id],
+  );
   const salesSearch = await call(`/clients?search=${encodeURIComponent(term)}`, { token: salesToken });
   check(salesSearch.status === 200, "a search for the same term succeeds for sales");
   check((salesSearch.body.data || []).every((r) => r.id !== offPage.id),

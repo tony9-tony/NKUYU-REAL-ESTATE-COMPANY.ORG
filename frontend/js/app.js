@@ -174,6 +174,9 @@ function endSession(message = "") {
   document.getElementById("primary-nav")?.classList.remove("nav-open");
   workspace.hidden = true;
   authScreen.hidden = false;
+  // The next person to sign in on this computer starts with an empty form.
+  authForm.reset();
+  if (authRemember) authRemember.checked = true;
   if (message) showAuthMessage(message);
 }
 
@@ -224,6 +227,7 @@ const viewMeta = {
   contracts: ["Contracts", "Every agreement and where it sits in the approval workflow"],
   debts: ["Payments & debts", "Installments, balances, recorded payments and reminders"],
   appointments: ["Appointments", "Viewings, calls, meetings and inspections"],
+  leads: ["Leads", "Enquiries and prospects, before they become clients"],
   documents: ["Documents", "Agreements, titles, receipts, reports and permits"],
   reports: ["Reports", "Generated and uploaded management reports"],
   "admin-dashboard": ["Admin overview", "Staff access, privileges and organization health"],
@@ -946,6 +950,7 @@ const NAV_ITEMS = [
   { view: "properties", label: "Properties", icon: "home", module: "properties", permission: "view", group: "Business" },
   { view: "projects", label: "Projects", icon: "building", module: "projects", permission: "view", group: "Business" },
   { view: "clients", label: "Clients", icon: "users", module: "clients", permission: "view", group: "Business" },
+  { view: "leads", label: "Leads", icon: "spark", module: "leads", permission: "view", group: "Business" },
   { view: "appointments", label: "Appointments", icon: "calendar", module: "appointments", permission: "view", group: "Business" },
   { view: "contracts", label: "Contracts", icon: "contract", module: "contracts", permission: "view", group: "Contracts & records" },
   { view: "documents", label: "Documents", icon: "folder", module: "documents", permission: "view", group: "Contracts & records" },
@@ -980,7 +985,7 @@ function updateNavigation() {
       // this caller a step to take on it (`available_actions`), ignoring the
       // withdraw-anytime "cancel". A register of 40 open deals nobody here can
       // move shows no number at all.
-      contracts: canModule("contracts") ? contractsAwaitingCaller().length : 0,
+      contracts: canModule("contracts") ? new Set([...contractsAwaitingCaller(), ...contractsNeedingPlan()].map((contract) => contract.id)).size : 0,
       debts: canModule("debts") && canSeeFinancial() ? (state.debts || []).filter((debt) => debtState(debt) === "overdue").length : 0,
       documents: canModule("documents") && can("edit") ? (state.documents || []).filter((doc) => doc.status === "pending").length : 0,
       // The attention badge is the SERVER's count of items that need this user
@@ -1008,10 +1013,28 @@ function updateNavigation() {
   if (allowedViewFor(state.view) === false) state.view = "dashboard";
 }
 
+/** Withdrawing, sending back and rejecting are always on offer; they are not "your turn". */
+const NON_FORWARD_STEPS = new Set(["cancel", "request_changes", "reject", "management_reject"]);
+function isForwardContractStep(action) {
+  return !NON_FORWARD_STEPS.has(action);
+}
+
 /** Contracts on which the server offers this caller a real workflow step. */
 function contractsAwaitingCaller() {
   return (state.contracts || []).filter((contract) =>
-    (contract.available_actions || []).some((entry) => entry && entry.action !== "cancel"));
+    (contract.available_actions || []).some((entry) => entry && isForwardContractStep(entry.action)));
+}
+
+/**
+ * Contracts past Sales that still have no installments. `installments_recorded`
+ * is only sent to callers who may see money, so for anyone else this is empty.
+ */
+const PLAN_NOT_EXPECTED = new Set(["draft", "changes_requested", "rejected", "cancelled", "completed"]);
+function contractNeedsPaymentPlan(contract) {
+  return contract.installments_recorded === 0 && !PLAN_NOT_EXPECTED.has(contract.status);
+}
+function contractsNeedingPlan() {
+  return canSeeFinancial() ? (state.contracts || []).filter(contractNeedsPaymentPlan) : [];
 }
 
 /** The authorized views, used both for navigation and to reject a forced view. */
@@ -2105,6 +2128,8 @@ function renderDashboard() {
   if (canModule("contracts")) {
     const awaiting = contractsAwaitingCaller().length;
     if (awaiting) attentionRow(awaiting, `${awaiting === 1 ? "Contract awaits" : "Contracts await"} your step`, "Workflow actions are available to you", "contracts", "contract");
+    const unplanned = contractsNeedingPlan().length;
+    if (unplanned) attentionRow(unplanned, `${unplanned === 1 ? "Contract needs" : "Contracts need"} a payment plan`, "Create the deposit and installments from the final price", "contracts", "wallet", "amber");
   }
   if (financial && canModule("debts") && Number(overdue.count || 0) > 0) attentionRow(Number(overdue.count), `Overdue ${Number(overdue.count) === 1 ? "installment" : "installments"}`, `${money(overdue.total || 0)} past due`, "debts", "alert", "red");
   // Reminders are derived from installments, so they only count once the
@@ -2298,9 +2323,12 @@ function renderContracts() {
     ? `<button class="btn btn-soft btn-small" data-action="view-generated-contract" data-id="${contract.id}">Open contract</button>` : "";
   const rows = state.contracts.filter((contract) => (!filters.project || String(contract.project_id) === filters.project) && (!filters.type || contract.contract_type === filters.type) && (!filters.status || contract.status === filters.status)).map((contract) => {
     const actions = (contract.available_actions || []).filter(Boolean);
-    const forward = actions.filter((entry) => entry.action !== "cancel");
-    const primary = forward[0] ? workflowButton(contract, forward[0], true) : "";
-    const secondary = [...forward.slice(1), ...actions.filter((entry) => entry.action === "cancel")].map((entry) => workflowButton(contract, entry, false));
+    const forward = actions.filter((entry) => isForwardContractStep(entry.action));
+    const needsPlan = contractNeedsPaymentPlan(contract);
+    // With no workflow step of its own, a financial caller's main job on an
+    // unplanned contract is the payment schedule, so that becomes the button.
+    const primary = forward[0] ? workflowButton(contract, forward[0], true) : (needsPlan ? `<button class="btn btn-primary btn-small" data-action="generate-schedule" data-id="${contract.id}">Create payment plan</button>` : "");
+    const secondary = [...forward.slice(1), ...actions.filter((entry) => !isForwardContractStep(entry.action))].map((entry) => workflowButton(contract, entry, false));
     const stage = contractStageInfo(contract.status);
     const menu = rowMenu([
       ...secondary,
@@ -2312,7 +2340,7 @@ function renderContracts() {
     ]);
     return `<tr data-searchable>
       <td><button class="cell-link" data-action="view-contract" data-id="${contract.id}"><span class="cell-main">${escapeHtml(contract.client_name)}</span></button><span class="cell-sub">${escapeHtml(contract.contract_number || "No number yet")}${contract.project_name ? ` · ${escapeHtml(contract.project_name)}` : ""}</span></td>
-      <td>${contractStatusBadge(contract.status)}${stage ? `<span class="cell-sub stage-note" title="Department currently holding the contract">Stage ${stage.number} of ${stage.total} · Held by ${escapeHtml(titleCase(stage.owner))}</span>` : ""}</td>
+      <td>${contractStatusBadge(contract.status)}${stage ? `<span class="cell-sub stage-note" title="Department currently holding the contract">Stage ${stage.number} of ${stage.total} · Held by ${escapeHtml(titleCase(stage.owner))}</span>` : ""}${needsPlan ? `<span class="cell-sub plan-missing">No payment plan yet</span>` : ""}</td>
       <td>${badge(contract.contract_type, "neutral")}</td>
       <td><span class="cell-main cell-plain">${formatDate(contract.start_date)}</span><span class="cell-sub">to ${formatDate(contract.end_date)}</span></td>
       <td class="amount">${money(contract.value)}${Number(contract.discount_pct || 0) > 0 ? `<span class="cell-sub">${numberValue(contract.discount_pct)}% discount</span>` : ""}</td>
@@ -2600,6 +2628,40 @@ function renderClients() {
         : emptyState("No clients yet", "A client can be registered as a lead or prospect before any contract exists.", { iconName: "users", action: mayCreate ? `<button class="btn btn-primary" data-action="new-client">${icon("plus")}Add your first client</button>` : "" })}</div>`}`;
 }
 
+// Leads: the enquiry queue. Uses the existing /org/leads endpoints and the
+// existing #lead-form submit and convert-lead handlers, so nothing new is
+// authorized here - the view is only offered to holders of the leads module.
+function renderLeads() {
+  const leads = state.organization.leads || [];
+  const status = state.filters.status || "";
+  const statuses = [...new Set(leads.map((lead) => lead.status).filter(Boolean))].sort();
+  const rows = leads.filter((lead) => !status || lead.status === status);
+  const mayCreate = can("create");
+  const list = rows.map((lead) => `<tr data-searchable>
+      <td><span class="cell-main">${escapeHtml(lead.name)}</span><span class="cell-sub">${escapeHtml([lead.email, lead.phone].filter(Boolean).join(" · ") || "No contact details")}</span></td>
+      <td>${escapeHtml(lead.source || "Direct")}</td>
+      <td>${lead.client_id ? badge("Converted", "converted") : badge(lead.status || "new", lead.status === "new" ? "open" : lead.status)}</td>
+      <td>${formatDate(lead.created_at)}</td>
+      <td class="cell-note">${escapeHtml(lead.notes || "")}</td>
+      <td><div class="row-actions">${lead.client_id ? `<span class="muted cell-plain">Now a client</span>` : (mayCreate ? `<button class="btn btn-small btn-primary" data-action="convert-lead" data-id="${lead.id}" title="Register this person as a client (prospect)">Convert to client</button>` : "")}</div></td>
+    </tr>`).join("");
+  const form = mayCreate ? `<details class="panel add-panel"${leads.length ? "" : " open"}><summary>${icon("plus")}Add a lead</summary>
+      <form id="lead-form" class="form-grid">
+        <div class="field"><label for="lead-name">Name</label><input id="lead-name" name="name" required maxlength="120" placeholder="Person or company"></div>
+        <div class="field"><label for="lead-source">Source</label><input id="lead-source" name="source" maxlength="120" placeholder="Website, referral, walk-in…"></div>
+        <div class="field"><label for="lead-contact">Email</label><input id="lead-contact" name="email" type="email" maxlength="120" placeholder="customer@example.com"></div>
+        <div class="field"><label for="lead-phone">Phone</label><input id="lead-phone" name="phone" maxlength="40" placeholder="+255 700 000 000"></div>
+        <div class="field full"><label for="lead-notes">Interest / notes</label><textarea id="lead-notes" name="notes" maxlength="2000" placeholder="What are they looking for?"></textarea></div>
+        <div class="full row-actions"><button class="btn btn-primary" type="submit">Save lead</button></div>
+      </form></details>` : "";
+  content.innerHTML = `
+    <div class="toolbar"><div class="toolbar-filters"><span class="toolbar-label">${icon("search")}Filter</span><select class="filter-input" data-filter="status" aria-label="Filter by lead status"><option value="">All statuses</option>${statuses.map((value) => `<option value="${escapeHtml(value)}" ${status === value ? "selected" : ""}>${escapeHtml(humanize(value))}</option>`).join("")}</select></div><div class="toolbar-end"><span class="toolbar-count">${rows.length} lead${rows.length === 1 ? "" : "s"}</span></div></div>
+    ${form}
+    ${rows.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Lead</th><th>Source</th><th>Status</th><th>Received</th><th>Interest</th><th class="align-right">Next step</th></tr></thead><tbody>${list}</tbody></table></div>` : `<div class="panel">${emptyState(status ? "No leads with this status" : "No leads yet", status ? "Try another status." : "Enquiries from the website, referrals and walk-ins are recorded here, then converted into clients.", { iconName: "spark" })}</div>`}`;
+  const lead = document.getElementById("lead-form");
+  if (lead) markRequiredFields(lead);
+}
+
 function renderAppointments() {
   const filters = state.filters;
   const rows = (state.appointments || []).filter((apt) =>
@@ -2698,6 +2760,7 @@ function renderDocuments() {
           ${related.map((entry) => `<span>${escapeHtml(entry)}</span>`).join("")}
           ${hasFile ? `<span>${escapeHtml(fileName)}${doc.file_size ? ` · ${formatBytes(doc.file_size)}` : ""}</span>` : `<span class="muted">No file attached</span>`}
           ${doc.file_reference ? `<span>Ref · ${escapeHtml(doc.file_reference)}</span>` : ""}
+          ${doc.uploaded_by_name ? `<span>By ${escapeHtml(doc.uploaded_by_name)}</span>` : ""}
         </div>
         ${doc.notes ? `<p class="doc-notes">${escapeHtml(doc.notes)}</p>` : ""}
       </div>
@@ -2781,6 +2844,7 @@ function render() {
   if (state.view === "contracts") renderContracts();
   if (state.view === "debts") renderDebts();
   if (state.view === "appointments") renderAppointments();
+  if (state.view === "leads") renderLeads();
   if (state.view === "documents") renderDocuments();
   if (state.view === "reports") renderReports();
   if (state.view === "organization") content.innerHTML = renderOrganization();
@@ -3679,24 +3743,42 @@ async function downloadReportById(id) {
  * Runs a contract workflow step. Notes are optional except for the steps that
  * exist precisely to explain themselves (changes requested, rejections).
  */
+// Plain-language wording for each workflow step's confirmation. The server
+// still decides whether the step is allowed; this only explains it.
+const CONTRACT_STEP_TEXT = {
+  submit: { question: "Submit this contract to Legal for review?", confirm: "Submit to Legal", done: "Contract submitted to Legal." },
+  start_review: { question: "Start the legal review of this contract?", confirm: "Start review", done: "Legal review started." },
+  legal_approve: { question: "Give legal approval to this contract?", confirm: "Approve legally", done: "Legal approval recorded." },
+  finance_validate: { question: "Confirm the price, deposit and payment plan are correct?", confirm: "Validate financial terms", done: "Financial terms validated." },
+  submit_management: { question: "Send this contract to the Managing Director for approval?", confirm: "Send for approval", done: "Sent for management approval." },
+  management_approve: { question: "Approve this contract on behalf of management?", confirm: "Approve", done: "Management approval recorded." },
+  send_to_customer: { question: "Release this approved contract to the customer for signature?", confirm: "Send to customer", done: "Contract sent to the customer." },
+  record_signature: { question: "Record that the customer has signed? The contract becomes active.", confirm: "Record signature", done: "Signature recorded; the contract is active.", note: "Signed by (customer's full name)", noteField: "signed_by", required: true },
+  complete: { question: "Mark this contract as completed?", confirm: "Mark completed", done: "Contract completed." },
+  cancel: { question: "Cancel this contract? It will be withdrawn from the workflow.", confirm: "Cancel contract", done: "Contract cancelled.", tone: "danger" },
+  request_changes: { question: "Send this contract back for corrections. The reason is stored permanently in the contract history.", confirm: "Request changes", done: "Changes requested.", note: "Reason / required corrections", required: true },
+  reject: { question: "Reject this contract? The reason is stored permanently in the contract history.", confirm: "Reject contract", done: "Contract rejected.", note: "Reason for rejection", required: true, tone: "danger" },
+  management_reject: { question: "Reject this contract on behalf of management? The reason is stored permanently.", confirm: "Reject contract", done: "Contract rejected by management.", note: "Reason for rejection", required: true, tone: "danger" },
+};
+
 async function runContractTransition(id, action) {
-  const needsNotes = ["request_changes", "reject", "management_reject"].includes(action);
+  const text = CONTRACT_STEP_TEXT[action] || { question: `Move this contract to the next step?`, confirm: "Continue", done: "Contract updated." };
   state.transitionNotes = "";
   const confirmed = await confirmDialog({
-    title: "Contract workflow",
-    message: needsNotes
-      ? `Explain why you are requesting changes. The reason is stored permanently in the contract history.`
-      : `Move this contract to "${action.replace(/_/g, " ")}"?`,
-    confirmLabel: needsNotes ? "Request changes" : "Continue",
-    tone: "primary",
-    noteLabel: needsNotes ? "Reason / required corrections" : null,
+    title: text.confirm,
+    message: text.question,
+    confirmLabel: text.confirm,
+    tone: text.tone || "primary",
+    noteLabel: text.note || null,
   });
   if (!confirmed) return;
+  const note = String(state.transitionNotes || "").trim();
+  if (text.required && !note) { showToast(`${text.note} is required.`); return; }
   try {
     const payload = { action };
-    if (needsNotes && state.transitionNotes) payload.notes = state.transitionNotes;
+    if (note) payload[text.noteField || "notes"] = note;
     await api(`/contracts/${id}/transition`, { method: "POST", body: JSON.stringify(payload) });
-    showToast(`Contract moved to ${action.replace(/_/g, " ")}.`);
+    showToast(text.done);
     state.transitionNotes = "";
     await refresh();
   } catch (error) {

@@ -127,12 +127,3 @@ try {
 
 console.log(failures ? `\n${failures} IMAGE CHECK(S) FAILED` : "\nPROPERTY_IMAGES_ALL_PASSED");
 if (failures) process.exitCode = 1;
-
-  // left the record behind. Nothing is deleted to produce this state.
-  const orphanStored = `orphan-${Date.now()}.png`;
-  const org = (await query("SELECT id FROM organizations ORDER BY id LIMIT 1")).rows[0].id;
-  const inserted = (await query(
-    "INSERT INTO property_images (organization_id, property_id, original_filename, stored_name, file_size, mime_type) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
-    [org, propertyId, "gone.png", orphanStored, PNG.length, "image/png"],
-  )).rows[0];
-  check(!fs.existsSync(path.join(propertyUploadsDir, orphanStored)), "the orphan picture's file genuinely does not exist");

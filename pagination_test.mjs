@@ -265,7 +265,10 @@ try {
     for (const row of res.body.data || []) { seen += 1; if (row.id === legalContract) leaked = true; }
   }
   check(!leaked, `the private contract appears on none of the ${pages} swept Sales pages`);
-  check(seen === pages * 200, `the sweep retrieved every requested row (${seen} of ${pages * 200})`);
+  // The last swept page is naturally partial, so the expectation is every row
+  // the caller is entitled to within the swept window - not `pages * 200`.
+  const expected = Math.min(salesTotal, pages * 200);
+  check(seen === expected, `the sweep retrieved every requested row (${seen} of ${expected})`);
 
   // === 7. Financial gating is unchanged =====================================
   console.log("\n=== 7. financial and department gates survive pagination ===");
