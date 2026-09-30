@@ -315,10 +315,14 @@ Signed by the Buyer: ____________________`;
   const financeLogin = await call("/auth/login", { method: "POST", body: { email: "finance@demo.mkuyu.local", password: (await import("./backend/src/org/demoCredentials.js")).legacyPasswordFor("finance@demo.mkuyu.local") } });
   token = financeLogin.payload.token || "";
   assert(Boolean(token), "Finance Officer signs in for template RBAC checks");
-  const templateListDenied = await call("/contract-templates");
-  assert(templateListDenied.status === 403, "Finance Officer without Documents access cannot list templates");
-  const templateUseDenied = await call("/contracts/generate", { method: "POST", body: common });
-  assert(templateUseDenied.status === 403, "Finance Officer with contract access cannot use a shared template without Documents access");
+  // Templates are USED by everyone who generates contracts, but only the MD,
+  // ICT, the sales officers and Legal Officers may change them.
+  const templateList = await call("/contract-templates");
+  assert(templateList.status === 200, "Finance Officer with contract access can read the shared template list");
+  const templateChangeDenied = await call(`/contract-templates/${templateId}`, { method: "PUT", body: { is_default: true } });
+  assert(templateChangeDenied.status === 403, "Finance Officer cannot change contract templates");
+  const templateDeleteDenied = await call(`/contract-templates/${templateId}`, { method: "DELETE" });
+  assert(templateDeleteDenied.status === 403, "Finance Officer cannot delete contract templates");
   token = savedToken;
 
   const unknownGeneration = await call("/contracts/generate", { method: "POST", body: { ...common, template_document_id: malformed.rows[0].id } });

@@ -672,6 +672,9 @@ router.post("/profile/photo", uploadProfileImageFile, route(async (req, res) => 
 router.use(accessMiddleware());
 router.use((req, res, next) => {
   if (req.path.startsWith("/org/")) return next();
+  // Contract templates carry their own authority (`upload_contract_templates`),
+  // checked on every route below, rather than the generic create/edit/delete.
+  if (req.path.startsWith("/contract-templates")) return next();
   return requirePermissionForMethod()(req, res, next);
 });
 router.use((req, res, next) => {
@@ -847,14 +850,14 @@ router.post("/contracts/generate", route(async (req, res) => {
   // means "use the organization's default template", when one is set and the
   // caller may use templates.
   let useTemplateId = hasSelectedTemplate ? parseId(body.template_document_id, "template_document_id") : null;
-  if (body.template_document_id === undefined && can(req.access, "access_documents")) {
+  // The default template applies to every contract, whoever generates it.
+  if (body.template_document_id === undefined) {
     const fallback = await queryOne("SELECT id FROM documents WHERE organization_id=$1 AND category='template' AND is_default_template=TRUE LIMIT 1", [await organizationId()]);
     if (fallback) useTemplateId = fallback.id;
   }
   if (useTemplateId) {
     templateId = useTemplateId;
-    const template = requireRecord(await Document.get(templateId), "Template");
-    if (String(template.category) !== "template") throw new HttpError(400, "the selected document is not a contract template");
+    const template = await templateRecord(templateId);
     if (!String(template.body_text || "").trim()) throw new HttpError(400, "the selected template has no body text");
     templateBody = String(template.body_text);
     templateTitle = template.title || "Sale Agreement";
@@ -965,11 +968,24 @@ router.post("/contracts/generate", route(async (req, res) => {
 }));
 
 // Contract templates are documents of category 'template'. They are SHARED:
-// every caller who may use documents may use every template, which is why the
-// list is deliberately not filtered by who uploaded it. Management follows the
-// existing document RBAC - there is no separate template permission system.
+// everyone who generates contracts uses them, so the list is not filtered by
+// who uploaded it. Changing them - upload, default, delete - is reserved to
+// holders of `upload_contract_templates` (MD, ICT administration, Sales
+// Officer, Legal Officer, and the System Administrator).
+const mayUseTemplates = (access) => can(access, "upload_contract_templates") || can(access, "access_contracts") || can(access, "access_documents");
+function requireTemplateAuthority(access) {
+  if (!can(access, "upload_contract_templates")) throw new HttpError(403, "only the MD, ICT administration, sales officers and Legal Officers may change contract templates");
+}
+/** A template by id, organization-wide (templates are shared, not scoped). */
+async function templateRecord(id) {
+  const template = await queryOne("SELECT * FROM documents WHERE id=$1 AND organization_id=$2", [id, await organizationId()]);
+  if (!template) throw new HttpError(404, "Template not found");
+  if (String(template.category) !== "template") throw new HttpError(400, "that document is not a contract template");
+  return template;
+}
+
 router.get("/contract-templates", route(async (req, res) => {
-  if (!can(req.access, "access_documents")) throw new HttpError(403, "permission denied");
+  if (!mayUseTemplates(req.access)) throw new HttpError(403, "permission denied");
   const templates = (await query(
     `SELECT d.id, d.title, d.body_text, d.category, d.original_filename, d.stored_name, d.created_at, d.uploaded_at, d.is_default_template AS is_default,
         u.display_name AS uploaded_by_name,
@@ -989,8 +1005,7 @@ router.get("/contract-templates", route(async (req, res) => {
 }));
 
 router.post("/contract-templates", route(async (req, res) => {
-  if (!can(req.access, "access_documents")) throw new HttpError(403, "permission denied");
-  if (!can(req.access, "create")) throw new HttpError(403, "creating a template requires the create permission");
+  requireTemplateAuthority(req.access);
   const title = requiredText(req.body?.title, "title", 160);
   const bodyText = requiredText(req.body?.body_text, "body_text", 100000);
   // A typo'd placeholder would render literally onto a customer's signed copy,
@@ -1007,11 +1022,9 @@ router.post("/contract-templates", route(async (req, res) => {
 }));
 
 router.put("/contract-templates/:id", route(async (req, res) => {
-  if (!can(req.access, "access_documents")) throw new HttpError(403, "permission denied");
-  if (!can(req.access, "edit")) throw new HttpError(403, "editing a template requires the edit permission");
+  requireTemplateAuthority(req.access);
   const id = parseId(req.params.id);
-  const template = requireRecord(await Document.get(id), "Template");
-  if (String(template.category) !== "template") throw new HttpError(400, "that document is not a contract template");
+  const template = await templateRecord(id);
   const bodyText = req.body?.body_text === undefined ? template.body_text : requiredText(req.body.body_text, "body_text", 100000);
   const title = req.body?.title === undefined ? template.title : requiredText(req.body.title, "title", 160);
   const unknown = unknownPlaceholders(bodyText);
@@ -1041,7 +1054,7 @@ async function setDefaultTemplate(id) {
 // A ready-made Word template containing every placeholder, for staff to
 // download, adapt in Word and upload back.
 router.get("/contract-templates/starter", route(async (req, res) => {
-  if (!can(req.access, "access_documents")) throw new HttpError(403, "permission denied");
+  requireTemplateAuthority(req.access);
   const tmp = path.join(os.tmpdir(), `mkuyu-starter-${crypto.randomUUID()}.docx`);
   // The starter shows where the lawyer's signature will be placed.
   const starterText = DEFAULT_CONTRACT_TEMPLATE.replace("Signed for and on behalf of the Seller: ______________________", "Signed for and on behalf of the Seller (Legal): {{LAWYER_SIGNATURE}}");
@@ -1058,8 +1071,7 @@ router.get("/contract-templates/starter", route(async (req, res) => {
 // creating a template by typing it.
 router.post("/contract-templates/upload", uploadDocumentFile, route(async (req, res) => {
   try {
-    if (!can(req.access, "access_documents")) throw new HttpError(403, "permission denied");
-    if (!can(req.access, "create")) throw new HttpError(403, "creating a template requires the create permission");
+    requireTemplateAuthority(req.access);
     const fileInfo = validateUploadedFile(req.file, documentExtensions);
     if (fileInfo.extension !== ".docx") throw new HttpError(400, "upload the contract template as a Word .docx file");
     const bodyText = templateTextFromUpload(fs.readFileSync(req.file.path), ".docx");
@@ -1082,12 +1094,19 @@ router.post("/contract-templates/upload", uploadDocumentFile, route(async (req, 
   }
 }));
 
+// The template's own Word file, for the people who maintain templates.
+router.get("/contract-templates/:id/file", route(async (req, res) => {
+  requireTemplateAuthority(req.access);
+  const template = await templateRecord(parseId(req.params.id));
+  const file = resolveStoredFile(documentUploadsDir, template.stored_name);
+  if (!file) throw new HttpError(404, "this template has no Word file (it was typed in)");
+  res.download(file, template.original_filename || `${template.title}.docx`);
+}));
+
 router.delete("/contract-templates/:id", route(async (req, res) => {
-  if (!can(req.access, "access_documents")) throw new HttpError(403, "permission denied");
-  if (!can(req.access, "delete")) throw new HttpError(403, "deleting a template requires the delete permission");
+  requireTemplateAuthority(req.access);
   const id = parseId(req.params.id);
-  const template = requireRecord(await Document.get(id), "Template");
-  if (String(template.category) !== "template") throw new HttpError(400, "that document is not a contract template");
+  await templateRecord(id);
   // A template a contract was generated from is history, not clutter: refuse
   // rather than orphan a contract's reference to a document that no longer exists.
   const inUse = Number((await queryOne("SELECT COUNT(*) AS n FROM contracts WHERE template_document_id=$1", [id])).n);

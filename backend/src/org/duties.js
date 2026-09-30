@@ -76,6 +76,7 @@ export const ROLE_DUTIES = {
     { key: "audit_accountability", label: "Maintain audit accountability", description: "Keeps the audit trail and backup discipline intact, and holds the only unrestricted view of it.", permissions: ["view", "view_reports", "view_audit", "export"] },
     { key: "business_oversight", label: "Unrestricted business oversight", description: "Break-glass access to every module when the system is misconfigured.", permissions: ["access_projects", "access_properties", "access_clients", "access_leads", "access_contracts", "access_documents", "access_appointments", "access_debts", "access_payments", "access_reminders", "access_reports", "access_follow_ups", "approve", "view_financial", "submit_contract", "review_legal", "request_changes", "approve_legal", "validate_finance", "approve_management"] },
     { key: "task_assignment_administration", label: "Administer task assignment", description: "Break-glass: may assign and review organization-wide when the configured authority is unavailable.", permissions: ["assign_tasks", "review_tasks"] },
+    { key: "contract_templates", label: "Maintain contract templates", description: "Uploads the Word templates contracts are generated on and chooses the default.", permissions: ["upload_contract_templates"] },
   ],
   "Managing Director": [
     { key: "business_direction", label: "Set business direction", description: "Owns strategy across every business module.", permissions: ["access_projects", "access_properties", "access_clients", "access_leads", "access_contracts", "access_documents", "access_appointments", "access_follow_ups", "view", "create", "edit", "delete", "approve", "view_reports", "export"] },
@@ -83,6 +84,7 @@ export const ROLE_DUTIES = {
     { key: "work_assignment", label: "Assign organization work", description: "Directs work to any department and gives the final decision on work routed up to management.", permissions: ["assign_tasks", "review_tasks"] },
     { key: "financial_oversight", label: "Oversee financial performance", description: "Sees income, outstanding balances and financial reporting.", permissions: ["access_debts", "access_payments", "access_reminders", "view_financial", "view_reports", "export"] },
     { key: "management_reporting", label: "Receive management reporting", description: "Reviews organization-wide performance across departments.", permissions: ["view_reports", "export"] },
+    { key: "contract_templates", label: "Maintain contract templates", description: "Uploads the Word templates contracts are generated on and chooses the default.", permissions: ["upload_contract_templates"] },
   ],
   "ICTO": [
     { key: "account_administration", label: "Manage staff accounts", description: "Creates, activates and deactivates staff accounts.", permissions: ["manage_users", "view"] },
@@ -90,6 +92,7 @@ export const ROLE_DUTIES = {
     { key: "system_settings", label: "Maintain system settings", description: "Owns organization configuration and security settings.", permissions: ["manage_settings", "view"] },
     { key: "security_and_audit", label: "Own security and audit logs", description: "Reads the system audit trail to investigate access and security incidents. Read-only: it grants no ability to change, delete or decide anything.", permissions: ["view_audit", "view_reports"] },
     { key: "technical_support", label: "Provide technical support", description: "Resolves incidents for staff. Deliberately holds no business authority.", permissions: ["view"] },
+    { key: "contract_templates", label: "Maintain contract templates", description: "Uploads the Word templates contracts are generated on and chooses the default.", permissions: ["upload_contract_templates"] },
   ],
   "Administration & IT Support Officer": [
     { key: "staff_support", label: "Provide staff support", description: "First-line help for accounts, access requests and device issues.", permissions: ["view"] },
@@ -113,6 +116,7 @@ export const ROLE_DUTIES = {
     { key: "legal_documents", label: "Manage legal documents", description: "Attaches and maintains agreements, titles and legal records.", permissions: ["access_documents", "view", "create", "edit"] },
     { key: "revision_history", label: "Maintain contract history", description: "Keeps revisions, clauses and the final record traceable.", permissions: ["access_contracts", "access_reports", "view", "view_reports"] },
     { key: "customer_verification", label: "Verify customer and project detail", description: "Confirms the parties and property named on the contract.", permissions: ["access_clients", "access_projects", "view"] },
+    { key: "contract_templates", label: "Maintain contract templates", description: "Uploads the Word templates contracts are generated on and chooses the default.", permissions: ["upload_contract_templates"] },
   ],
   "Finance Manager": [
     { key: "financial_operations", label: "Run day-to-day finance", description: "Owns payments, installments, receipts and the collection register.", permissions: ["access_debts", "access_payments", "access_reminders", "view", "create", "edit", "delete", "view_financial"] },
@@ -144,6 +148,7 @@ export const ROLE_DUTIES = {
     { key: "marketing_material", label: "Maintain marketing and listing material", description: "Keeps property listings and supporting documents current.", permissions: ["access_documents", "view", "create", "edit"] },
     { key: "customer_follow_up", label: "Follow up on customers", description: "Schedules and closes follow-ups so deals do not go cold.", permissions: ["access_follow_ups", "view", "create", "edit"] },
     { key: "sales_reporting", label: "Report on sales activity", description: "Reports pipeline and conversion for management.", permissions: ["access_reports", "view_reports"] },
+    { key: "contract_templates", label: "Maintain contract templates", description: "Uploads the Word templates contracts are generated on and chooses the default.", permissions: ["upload_contract_templates"] },
   ],
   "Sales Officer": [
     { key: "deal_initiation", label: "Initiate the deal", description: "Creates the customer, property and project detail a contract needs.", permissions: ["access_clients", "access_properties", "access_projects", "view", "create", "edit"] },
@@ -152,6 +157,7 @@ export const ROLE_DUTIES = {
     { key: "viewings_and_appointments", label: "Coordinate viewings and appointments", description: "Schedules site visits, calls and inspections with customers.", permissions: ["access_appointments", "view", "create", "edit"] },
     { key: "customer_follow_up", label: "Follow up on customers", description: "Schedules and closes follow-ups so deals do not go cold.", permissions: ["access_follow_ups", "view", "create", "edit"] },
     { key: "sales_reporting", label: "Report on sales activity", description: "Reports pipeline and conversion for management.", permissions: ["access_reports", "view_reports"] },
+    { key: "contract_templates", label: "Maintain contract templates", description: "Uploads the Word templates contracts are generated on and chooses the default.", permissions: ["upload_contract_templates"] },
   ],
   "Marketing Officer": [
     { key: "lead_generation", label: "Generate leads", description: "Runs campaigns and captures enquiries from the market.", permissions: ["access_leads", "view", "create", "edit"] },

@@ -163,6 +163,11 @@ const permissions = [
   // scope, never by hiding a button.
   ["assign_tasks", "Assign work to staff within authorized scope"],
   ["review_tasks", "Review and approve submitted work"],
+  // Contract templates decide the wording of every contract the company issues,
+  // so uploading, replacing and choosing the default is a named authority of
+  // its own (MD, ICT administration, the sales officers, Legal Officer), not
+  // something every document user can do.
+  ["upload_contract_templates", "Upload and manage contract templates"],
   ...MODULES.map((module) => [`access_${module}`, `Access ${MODULE_LABELS[module] || module}`]),
 ];
 const businessAccess = MODULES.map((module) => `access_${module}`);
@@ -191,18 +196,18 @@ const taskWorkflow = ["assign_tasks", "review_tasks"];
 //   validate_finance   -> FINANCE & ACCOUNTS
 //   approve_management -> MANAGEMENT
 export const defaultRoles = [
-  ["System Administrator", "Full organization administration and documented break-glass business access", 100, "organization", [...administrationAccess, "view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "view_audit", ...contractLifecycle, ...taskWorkflow]],
+  ["System Administrator", "Full organization administration and documented break-glass business access", 100, "organization", [...administrationAccess, "view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "view_audit", ...contractLifecycle, ...taskWorkflow, "upload_contract_templates"]],
 
   // MANAGEMENT. Approves where the business rules require it. Deliberately has
   // no system administration and no authority to review or rewrite legal terms.
-  ["Managing Director", "Organization-wide business authority and management approval. No system administration.", 80, "organization", ["access_projects", "access_properties", "access_clients", "access_leads", "access_contracts", "access_documents", "access_appointments", "access_follow_ups", "access_debts", "access_payments", "access_reminders", "access_reports", "view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "approve_management", "request_changes", ...taskWorkflow]],
+  ["Managing Director", "Organization-wide business authority and management approval. No system administration.", 80, "organization", ["access_projects", "access_properties", "access_clients", "access_leads", "access_contracts", "access_documents", "access_appointments", "access_follow_ups", "access_debts", "access_payments", "access_reminders", "access_reports", "view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "approve_management", "request_changes", ...taskWorkflow, "upload_contract_templates"]],
 
   // LEGAL. Owns the contract lifecycle and the final contract record.
   ["Legal Manager", "Owns the contract record and supervises the legal desk", 45, "department", ["access_contracts", "access_documents", "access_clients", "access_projects", "access_reports", "view", "create", "edit", "delete", "approve", "export", "view_reports", "review_legal", "request_changes", "approve_legal", ...taskWorkflow]],
-  ["Legal Officer", "Prepares, reviews and controls contract records", 35, "department", ["access_contracts", "access_documents", "access_clients", "access_projects", "access_reports", "view", "create", "edit", "delete", "approve", "view_reports", "review_legal", "request_changes", "approve_legal"]],
+  ["Legal Officer", "Prepares, reviews and controls contract records", 35, "department", ["access_contracts", "access_documents", "access_clients", "access_projects", "access_reports", "view", "create", "edit", "delete", "approve", "view_reports", "review_legal", "request_changes", "approve_legal", "upload_contract_templates"]],
 
   // ICT & ADMINISTRATION. Controls the system, never the business.
-  ["ICTO", "Controls accounts, roles, permissions, settings, security and audit. No business authority.", 35, "organization", [...systemAccess]],
+  ["ICTO", "Controls accounts, roles, permissions, settings, security and audit. No business authority.", 35, "organization", [...systemAccess, "upload_contract_templates"]],
   ["Administration & IT Support Officer", "Staff support, staff records and technical support. No business authority.", 20, "department", ["manage_users", "view", "view_reports", "export"]],
 
   // FINANCE & ACCOUNTS. Owns money and validates the financial terms.
@@ -211,8 +216,8 @@ export const defaultRoles = [
 
   // SALES, MARKETING & OPERATIONS. Initiates deals, never approves them.
   ["Department Manager", "Department-wide operational management and team supervision", 40, "department", ["access_projects", "access_properties", "access_clients", "access_leads", "access_appointments", "access_documents", "access_follow_ups", "access_reports", "access_contracts", "view", "create", "edit", "delete", "approve", "export", "view_reports", "submit_contract", "request_changes", ...taskWorkflow]],
-  ["Sales, Marketing & Operations Officer", "Initiates deals and supplies customer, property and project detail", 20, "own", ["access_leads", "access_clients", "access_properties", "access_projects", "access_contracts", "access_appointments", "access_documents", "access_follow_ups", "access_reports", "view", "create", "edit", "view_reports", "submit_contract", "request_changes"]],
-  ["Sales Officer", "Leads, clients, viewings and deal initiation", 15, "own", ["access_leads", "access_clients", "access_properties", "access_projects", "access_contracts", "access_appointments", "access_follow_ups", "access_reports", "view", "create", "edit", "view_reports", "submit_contract"]],
+  ["Sales, Marketing & Operations Officer", "Initiates deals and supplies customer, property and project detail", 20, "own", ["access_leads", "access_clients", "access_properties", "access_projects", "access_contracts", "access_appointments", "access_documents", "access_follow_ups", "access_reports", "view", "create", "edit", "view_reports", "submit_contract", "request_changes", "upload_contract_templates"]],
+  ["Sales Officer", "Leads, clients, viewings and deal initiation", 15, "own", ["access_leads", "access_clients", "access_properties", "access_projects", "access_contracts", "access_appointments", "access_follow_ups", "access_reports", "view", "create", "edit", "view_reports", "submit_contract", "upload_contract_templates"]],
   ["Marketing Officer", "Campaign leads, listings and marketing documents", 15, "own", ["access_leads", "access_clients", "access_properties", "access_projects", "access_documents", "access_appointments", "access_reports", "view", "create", "edit", "view_reports"]],
   ["Property Officer", "Estate inventory, listings and viewings", 15, "own", ["access_properties", "access_projects", "access_clients", "access_appointments", "access_documents", "view", "create", "edit"]],
 

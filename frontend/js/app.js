@@ -251,6 +251,7 @@ const viewMeta = {
   appointments: ["Appointments", "Viewings, calls, meetings and inspections"],
   leads: ["Leads", "Enquiries and prospects, before they become clients"],
   documents: ["Documents", "Agreements, titles, receipts, reports and permits"],
+  templates: ["Contract templates", "The Word files every new contract is produced on"],
   reports: ["Reports", "Generated and uploaded management reports"],
   "admin-dashboard": ["Admin overview", "Staff access, privileges and organization health"],
   duties: ["Duties & approvals", "The approval path, and every duty on every department"],
@@ -977,6 +978,9 @@ const NAV_ITEMS = [
   { view: "appointments", label: "Appointments", icon: "calendar", module: "appointments", permission: "view", group: "Business" },
   { view: "contracts", label: "Contracts", icon: "contract", module: "contracts", permission: "view", group: "Contracts & records" },
   { view: "documents", label: "Documents", icon: "folder", module: "documents", permission: "view", group: "Contracts & records" },
+  // Reserved to the template maintainers (MD, ICT administration, Sales
+  // Officer, Legal Officer); not tied to a module, so ICT sees it too.
+  { view: "templates", label: "Contract templates", icon: "file", permission: "upload_contract_templates", group: "Contracts & records" },
   { view: "reports", label: "Reports", icon: "chart", module: "reports", permission: "view_reports", group: "Contracts & records" },
   { view: "debts", label: "Payments & debts", icon: "wallet", module: "debts", permission: "view_financial", group: "Finance" },
   // Reference view, not a module: every signed-in member may read the duty
@@ -988,7 +992,7 @@ const NAV_ITEMS = [
 /** Whether the caller is entitled to a navigation entry at all. */
 function canSeeNavItem(item) {
   if (item.adminOnly) return isAdmin();
-  if (!item.module) return true;
+  if (!item.module) return item.permission ? can(item.permission) : true;
   return canModule(item.module) && can(item.permission);
 }
 
@@ -1564,7 +1568,7 @@ function generateContractFormBody() {
 
     <fieldset class="gen-section"><legend>Contract</legend>
       <div class="field full"><label for="gc-template">Contract template</label><select id="gc-template" name="template_document_id">${contractTemplateOptions(data.template_choice)}</select></div>
-      ${canModule("documents") ? `<div class="field full"><div class="field-help">To add or change templates, go to <strong>Documents → Contract templates</strong>. New contracts use the default template automatically.</div></div>` : ""}
+      <div class="field full"><div class="field-help">New contracts use the default template automatically.${can("upload_contract_templates") ? " To add or change templates, open <strong>Contract templates</strong> in the sidebar." : " Templates are maintained by the MD, ICT, sales officers and Legal Officers."}</div></div>
       ${canModule("documents") && can("create") ? `<div class="field full"><label for="gc-attachment">Supporting document (optional)</label><input id="gc-attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.png,.jpg,.jpeg,.gif,.webp,.bmp">${state.contractGen?.attachment ? `<div class="field-help">Selected: ${escapeHtml(state.contractGen.attachment.name)}</div>` : `<div class="field-help">The uploaded file will be linked to this contract in Documents.</div>`}</div>` : ""}
       <div class="field full"><label for="gc-contract-number">Contract number</label><input id="gc-contract-number" value="${escapeHtml(data.contract_number || "")}" placeholder="Issued automatically when generated" readonly aria-readonly="true" tabindex="-1"></div>
       ${genField("gc-notes", "Notes", `<textarea id="gc-notes" name="notes" maxlength="2000" placeholder="Internal notes">${escapeHtml(data.notes)}</textarea>`)}
@@ -2782,15 +2786,15 @@ function renderAppointments() {
         : emptyState("No appointments scheduled", "Book viewings, calls, meetings and inspections with clients.", { iconName: "calendar", action: mayCreate ? `<button class="btn btn-primary" data-action="new-appointment">${icon("plus")}Schedule an appointment</button>` : "" })}</div>`}`;
 }
 
-/** Documents | Contract templates switch at the top of the Documents page. */
-function documentTabs() {
-  const tab = state.docTab || "documents";
-  return `<div class="segmented page-tabs" role="tablist" aria-label="Documents sections"><button class="seg-btn${tab === "documents" ? " active" : ""}" data-action="doc-tab" data-tab="documents" role="tab" aria-selected="${tab === "documents"}">Documents</button><button class="seg-btn${tab === "templates" ? " active" : ""}" data-action="doc-tab" data-tab="templates" role="tab" aria-selected="${tab === "templates"}">Contract templates</button></div>`;
+// Contract templates: the Word files contracts are generated on. Uploading a
+// template, choosing the default and removing unused ones are reserved to the
+// `upload_contract_templates` permission, which the server enforces.
+function renderTemplatesPage() {
+  content.innerHTML = renderTemplates();
+  const form = document.getElementById("template-upload-form");
+  if (form) markRequiredFields(form);
 }
 
-// Contract templates: the Word files contracts are generated from. Uploading a
-// template, choosing the default and removing unused ones all go through the
-// existing /contract-templates endpoints and document permissions.
 function renderTemplates() {
   if (!state.templatesLoaded && !state.templatesRequested) {
     state.templatesRequested = true;
@@ -2801,15 +2805,15 @@ function renderTemplates() {
       state.contractTemplates = templates;
       state.placeholders = placeholders;
       state.templatesLoaded = true;
-      if (state.view === "documents") render();
+      if (state.view === "templates") render();
     });
   }
   const templates = state.contractTemplates || [];
-  const mayCreate = can("create");
+  const mayCreate = can("upload_contract_templates");
   const rows = templates.map((template) => {
-    const download = template.has_file ? `<button class="btn btn-small" data-action="download-generated-document" data-id="${template.id}" data-filename="${escapeHtml(template.original_filename || `${template.title}.docx`)}">Download</button>` : "";
-    const makeDefault = !template.is_default && can("edit") ? `<button class="btn btn-small" data-action="template-default" data-id="${template.id}">Make default</button>` : "";
-    const remove = can("delete") && !template.used_by ? `<button class="btn btn-small btn-danger-ghost" data-action="template-delete" data-id="${template.id}">Delete template</button>` : "";
+    const download = template.has_file ? `<button class="btn btn-small" data-action="template-download" data-id="${template.id}" data-filename="${escapeHtml(template.original_filename || `${template.title}.docx`)}">Download</button>` : "";
+    const makeDefault = !template.is_default && mayCreate ? `<button class="btn btn-small" data-action="template-default" data-id="${template.id}">Make default</button>` : "";
+    const remove = mayCreate && !template.used_by ? `<button class="btn btn-small btn-danger-ghost" data-action="template-delete" data-id="${template.id}">Delete template</button>` : "";
     return `<tr>
       <td><span class="cell-main">${escapeHtml(template.title)}</span><span class="cell-sub">${escapeHtml(template.original_filename || "Typed template")}</span></td>
       <td>${template.is_default ? badge("Default", "approved") : `<span class="muted cell-plain">—</span>`}</td>
@@ -2848,12 +2852,6 @@ function renderTemplates() {
 }
 
 function renderDocuments() {
-  if (state.docTab === "templates") {
-    content.innerHTML = `${documentTabs()}${renderTemplates()}`;
-    const form = document.getElementById("template-upload-form");
-    if (form) markRequiredFields(form);
-    return;
-  }
   const filters = state.filters;
   const rows = (state.documents || []).filter((doc) =>
     (!filters.project || String(doc.project_id) === filters.project) &&
@@ -2896,7 +2894,7 @@ function renderDocuments() {
   }).join("");
   const mayCreate = canModule("documents") && can("create");
   const filtered = Boolean(filters.project || filters.documentStatus || filters.type || filters.documentSearch);
-  content.innerHTML = `${documentTabs()}
+  content.innerHTML = `
     <div class="toolbar">
       <div class="toolbar-filters">
         <label class="toolbar-search">${icon("search")}<input class="filter-input" data-filter="documentSearch" type="search" value="${escapeHtml(filters.documentSearch || "")}" placeholder="Search document titles" aria-label="Search documents"></label>
@@ -2971,6 +2969,7 @@ function render() {
   if (state.view === "appointments") renderAppointments();
   if (state.view === "leads") renderLeads();
   if (state.view === "documents") renderDocuments();
+  if (state.view === "templates") renderTemplatesPage();
   if (state.view === "reports") renderReports();
   if (state.view === "organization") content.innerHTML = renderOrganization();
   if (state.view === "assignments") {
@@ -4018,6 +4017,7 @@ document.getElementById("primary-nav").addEventListener("click", (event) => {
   const item = event.target.closest(".nav-item[data-view]");
   if (!item) return;
   state.view = item.dataset.view;
+  if (state.view === "templates") { state.templatesLoaded = false; state.templatesRequested = false; }
   state.filters = { project: "", type: "", status: "", debtStatus: "", propertyStatus: "", clientStatus: "", appointmentStatus: "", documentStatus: "", documentSearch: "", sort: "" };
   // On a small screen the navigation is a drawer: choosing a destination closes it.
   setNavOpen(false);
@@ -4152,10 +4152,8 @@ document.addEventListener("click", async (event) => {
   if (action === "generate-schedule") openModalFor("contracts", id, "schedule");
   if (action === "contract-transition") runContractTransition(id, target.dataset.transition);
   if (action === "contract-history") showContractHistory(id);
-  if (action === "doc-tab") {
-    state.docTab = target.dataset.tab;
-    if (state.docTab === "templates") state.templatesRequested = false;
-    render();
+  if (action === "template-download") {
+    downloadFile(`/contract-templates/${id}/file`, target.dataset.filename || "template.docx").catch((error) => showToast(error.message || "Download failed."));
   }
   if (action === "template-starter") {
     event.preventDefault();
