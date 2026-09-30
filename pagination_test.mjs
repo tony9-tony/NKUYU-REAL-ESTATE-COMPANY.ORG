@@ -24,7 +24,9 @@ const base = server.base;
 let failures = 0;
 const check = (ok, label) => { console.log(`${ok ? "ok  " : "FAIL"}  ${label}`); if (!ok) failures += 1; };
 
-const ADMIN = { email: "admin@mkuyu.local", password: legacyPasswordFor("admin@mkuyu.local") };
+// Business lists are read as the Managing Director (organization scope): the
+// System Administrator no longer has any business module.
+const ADMIN = { email: "md@demo.mkuyu.local", password: legacyPasswordFor("md@demo.mkuyu.local") };
 const SALES = { email: "sales@demo.mkuyu.local", password: demoPasswordFor("sales@demo.mkuyu.local") };
 const LEGAL = { email: "legal@demo.mkuyu.local", password: demoPasswordFor("legal@demo.mkuyu.local") };
 const FINANCE = { email: "finance@demo.mkuyu.local", password: demoPasswordFor("finance@demo.mkuyu.local") };

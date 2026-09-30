@@ -428,7 +428,9 @@ console.log("\n=== navigation contains only the authorized workspace ===");
 
 // role -> views that MUST be absent / MUST be present.
 const NAV_EXPECTATIONS = {
-  administrator: { absent: [], present: ["dashboard", "admin-dashboard", "projects", "properties", "clients", "contracts", "debts", "appointments", "documents", "reports", "duties", "organization"] },
+  // The System Administrator runs the system, not the business: one place
+    // (Administration), no business module, no business dashboard.
+    administrator: { absent: ["dashboard", "admin-dashboard", "projects", "properties", "clients", "contracts", "debts", "appointments", "documents", "reports", "requests", "leads"], present: ["organization", "assignments", "duties"] },
   // "duties" is the duty catalogue and the approval path. It is reference data,
   // not a module, so every role may read it - unlike the administration screens.
   director: { absent: ["admin-dashboard", "organization"], present: ["dashboard", "projects", "properties", "clients", "contracts", "debts", "appointments", "documents", "reports", "duties"] },
@@ -664,7 +666,7 @@ for (const [name, profile] of Object.entries(scenario)) {
   app.updateNavigation();
   const nav = getElement("primary-nav").innerHTML;
   if (isAdministrator) {
-    check(nav.includes('data-view="admin-dashboard"'), "administrator keeps the Admin overview item");
+    check(!nav.includes('data-view="admin-dashboard"') && nav.includes('data-view="organization"'), "the administrator works from one place: Administration (no separate overview)");
     check(nav.includes('data-view="organization"'), "administrator keeps the Administration item");
   } else {
     // Absence, not disabled: the markup must not contain the item at all.

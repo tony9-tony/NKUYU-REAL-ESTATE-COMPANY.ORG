@@ -125,8 +125,10 @@ try {
       const direct = await call(`/projects/${projectId}`, { token });
       check([403, 404].includes(direct.status), `${name} cannot read sales' private project by id (${direct.status})`);
     }
+    const byMd = await call(`/projects/${projectId}`, { token: mdToken });
+    check(byMd.status === 200, `the Managing Director (organization scope) still can (${byMd.status})`);
     const byAdmin = await call(`/projects/${projectId}`, { token: adminToken });
-    check(byAdmin.status === 200, `an administrator still can (${byAdmin.status})`);
+    check(byAdmin.status === 403, `the System Administrator cannot read business records (${byAdmin.status})`);
     // Enumeration must not leak it through a list either.
     for (const [name, token] of [["legal", legalToken], ["customer service", csToken]]) {
       const listed = await call("/projects", { token });
@@ -139,20 +141,20 @@ try {
   // === 6. Identifier validation ============================================
   console.log("\n=== 6. identifiers are validated, not blindly cast ===");
   for (const badId of ["0", "-1", "abc", "1 OR 1=1", "1;DROP TABLE users", "1.5", "999999999999"]) {
-    const res = await call(`/projects/${encodeURIComponent(badId)}`, { token: adminToken });
+    const res = await call(`/projects/${encodeURIComponent(badId)}`, { token: mdToken });
     check([400, 404].includes(res.status), `project id ${JSON.stringify(badId).slice(0, 18)} -> 400/404 (${res.status})`);
   }
 
   // === 7. SQL injection attempts ==========================================
   console.log("\n=== 7. injected input is treated as data, not SQL ===");
   for (const payload of ["'; DROP TABLE users; --", "1' OR '1'='1", "admin'--", "\\'; DELETE FROM clients; --"]) {
-    const res = await call("/projects", { token: adminToken, method: "POST", body: { name: payload, status: "active" } });
+    const res = await call("/projects", { token: mdToken, method: "POST", body: { name: payload, status: "active" } });
     check([201, 400].includes(res.status), `a project named ${JSON.stringify(payload).slice(0, 22)} is stored, not executed (${res.status})`);
   }
-  const stillThere = await call("/projects", { token: adminToken });
+  const stillThere = await call("/projects", { token: mdToken });
   check(stillThere.status === 200, "the endpoints still answer after the injection attempts");
   for (const payload of ["' OR 1=1 --", "%' OR '1'='1", "1; DELETE FROM users"]) {
-    const res = await call(`/projects?search=${encodeURIComponent(payload)}`, { token: adminToken });
+    const res = await call(`/projects?search=${encodeURIComponent(payload)}`, { token: mdToken });
     check(res.status === 200, `a search for ${JSON.stringify(payload).slice(0, 20)} returns 200 rather than erroring (${res.status})`);
   }
   // === 8. Path traversal on every file-serving endpoint ====================
@@ -169,7 +171,7 @@ try {
       `/documents/${encodeURIComponent(payload)}/file`,
       `/properties/${encodeURIComponent(payload)}/images/1/file`,
     ]) {
-      const res = await call(path, { token: adminToken });
+      const res = await call(path, { token: mdToken });
       check([400, 404].includes(res.status), `traversal in ${path.slice(0, 42)} -> 400/404 (${res.status})`);
     }
   }
@@ -181,14 +183,14 @@ try {
 
   // === 9. Error messages must not leak internals ==========================
   console.log("\n=== 9. errors do not leak internals ===");
-  const badId = await call("/projects/abc", { token: adminToken });
+  const badId = await call("/projects/abc", { token: mdToken });
   const badLogin = await call("/auth/login", { method: "POST", body: { email: "not-an-email", password: "x" } });
   for (const [label, res] of [["bad id", badId], ["bad login", badLogin]]) {
     const text = JSON.stringify(res.body);
     check(!/postgres|pg_|at Object|node_modules|SELECT |INSERT |stack|at .*\.js:/i.test(text),
       `${label} error carries no internals (${text.slice(0, 90)})`);
   }
-  const sqlErr = await call("/projects", { token: adminToken, method: "POST", body: { name: "x".repeat(60000), status: "active" } });
+  const sqlErr = await call("/projects", { token: mdToken, method: "POST", body: { name: "x".repeat(60000), status: "active" } });
   check([400, 413].includes(sqlErr.status), `an oversized payload is refused cleanly (${sqlErr.status})`);
 
   // === 10. Account enumeration ============================================
@@ -209,7 +211,7 @@ try {
     const back = await call(`/clients/${xssClient.body.id}`, { token: salesToken });
     check(back.body?.name === xss, "the API round-trips the name verbatim as a JSON string");
   }
-  const ct = (await call("/projects", { token: adminToken })).headers.get("content-type") || "";
+  const ct = (await call("/projects", { token: mdToken })).headers.get("content-type") || "";
   check(/application\/json/.test(ct), `API responses are served as application/json (${ct})`);
 
   // === 12. Mass assignment on contracts (forged money/status) =============
@@ -271,9 +273,9 @@ try {
 
   // === 14. Malformed JSON must not 500 ====================================
   console.log("\n=== 14. malformed input fails safely ===");
-  const badJson = await call("/projects", { token: adminToken, method: "POST", body: "{not json", raw: true, headers: { "Content-Type": "application/json" } });
+  const badJson = await call("/projects", { token: mdToken, method: "POST", body: "{not json", raw: true, headers: { "Content-Type": "application/json" } });
   check(badJson.status >= 400 && badJson.status < 500, `malformed JSON -> 4xx, not 500 (${badJson.status})`);
-  const wrongType = await call("/projects", { token: adminToken, method: "POST", body: { name: { nested: true }, status: ["x"] } });
+  const wrongType = await call("/projects", { token: mdToken, method: "POST", body: { name: { nested: true }, status: ["x"] } });
   check([201, 400].includes(wrongType.status), `wrong field types are validated (${wrongType.status})`);
   const health = await call("/health");
   check(health.status === 200, "the service is still healthy after every probe above");

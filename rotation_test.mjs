@@ -104,7 +104,8 @@ console.log("\n=== administrator unchanged ===");
 const adminToken = (await signIn("admin@mkuyu.local", legacyPasswordFor("admin@mkuyu.local"))).body.token;
 const adminMe = (await call("/org/me", adminToken)).body;
 check(adminMe.user?.role === "admin", `admin@mkuyu.local is still an administrator (role=${adminMe.user?.role})`);
-check((adminMe.permissions || []).length > 20, `admin retains its full permission set (${(adminMe.permissions || []).length})`);
+check(!["access_clients", "access_contracts", "submit_contract", "approve_legal", "view_financial"].some((key) => (adminMe.permissions || []).includes(key)) && (adminMe.modules || []).length === 0, `admin carries no business permission or module (${(adminMe.modules || []).length} modules)`);
+check(["manage_users", "manage_roles"].every((key) => (adminMe.permissions || []).includes(key)), "admin keeps staff and role administration");
 check((await call("/org/users", adminToken)).status === 200, "admin can still administer staff");
 
 console.log("\n=== TASK 5: admin password reset preserves history ===");

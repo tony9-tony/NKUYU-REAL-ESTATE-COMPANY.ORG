@@ -17,15 +17,26 @@ export function clearOrganizationCache() {
 
 // Permission predicates over a resolved access profile. Kept here (rather than in
 // access.js) so the middleware can use them without a circular import.
+// The System Administrator runs the SYSTEM (staff, departments, roles,
+// settings, audit), not the business: no business module and no business
+// decision, whatever the role table says. Business work belongs to the
+// departments that do it.
+export const BUSINESS_MODULES = ["projects", "properties", "clients", "leads", "contracts", "documents", "appointments", "debts", "payments", "reminders", "reports", "follow_ups"];
+export const BUSINESS_PERMISSIONS = new Set([
+  ...BUSINESS_MODULES.map((module) => `access_${module}`),
+  "submit_contract", "review_legal", "request_changes", "approve_legal", "validate_finance", "approve_management",
+  "view_financial", "approve",
+]);
+
 export function can(access, permission) {
   if (!access) return true;
-  if (access.isAdmin) return true;
+  if (access.isAdmin) return !BUSINESS_PERMISSIONS.has(permission);
   return access.permissions.includes(permission);
 }
 
 export function canAccessModule(access, module) {
   if (!access) return true;
-  if (access.isAdmin) return true;
+  if (access.isAdmin) return !BUSINESS_MODULES.includes(module);
   return access.permissions.includes(`access_${module}`);
 }
 

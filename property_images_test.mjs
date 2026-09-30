@@ -41,7 +41,7 @@ const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR
 
 console.log("=== property picture availability ===");
 try {
-  const login = await call("/auth/login", { method: "POST", body: { email: "admin@mkuyu.local", password: legacyPasswordFor("admin@mkuyu.local") } });
+  const login = await call("/auth/login", { method: "POST", body: { email: "md@demo.mkuyu.local", password: legacyPasswordFor("md@demo.mkuyu.local") } });
   check(login.status === 200 && Boolean(login.body.token), `signed in as the administrator (${login.status})`);
   token = login.body.token;
 

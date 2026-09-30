@@ -12,7 +12,7 @@ const base = server.base;
 const login = await fetch(`${base}/auth/login`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ email: "admin@mkuyu.local", password: legacyPasswordFor("admin@mkuyu.local") }),
+  body: JSON.stringify({ email: "md@demo.mkuyu.local", password: legacyPasswordFor("md@demo.mkuyu.local") }),
 });
 const session = await login.json();
 if (!session.token) { console.log("LOGIN FAILED", JSON.stringify(session).slice(0, 300)); process.exit(1); }

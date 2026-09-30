@@ -209,7 +209,7 @@ try {
   // against an ADMINISTRATOR-created contract, which is organization-visible:
   // a Sales-owned contract is department-scoped, so Finance and Legal correctly
   // cannot see it. The 404 that taught us this is the record-scope rule working.
-  const admin = await call("/auth/login", { method: "POST", body: { email: "admin@mkuyu.local", password: legacyPasswordFor("admin@mkuyu.local") } });
+  const admin = await call("/auth/login", { method: "POST", body: { email: "md@demo.mkuyu.local", password: legacyPasswordFor("md@demo.mkuyu.local") } });
   const adminContract = await call("/contracts", { token: admin.body.token, method: "POST", body: { ...baseBody, original_price: 120000000, discount_pct: 10 } });
   const adminContractId = adminContract.body.id;
   check(Number(adminContract.body.discount_amount) === 12000000, "the server calculates a 12,000,000 discount");

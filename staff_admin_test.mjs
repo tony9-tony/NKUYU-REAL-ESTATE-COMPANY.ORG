@@ -133,7 +133,21 @@ check((await call(`/org/users/${mdId}`, ictoToken, "PUT", { active: false })).st
 check((await call(`/org/users/${mdId}/departments`, ictoToken, "PUT", { department_ids: [department.body.id] })).status === 403, "ICTO cannot move the MD between departments");
 
 console.log("\n=== the ICTO's own account ===");
-check((await call(`/org/users/${ictoId}/roles`, ictoToken, "PUT", { role_ids: [roleId("ICTO"), roleId("Accountant")] })).status === 403, "ICTO cannot change their own roles");
+check((await call(`/org/users/${ictoId}/roles`, ictoToken, "PUT", { role_ids: [roleId("ICTO"), roleId("Accountant")] })).status === 403, "ICTO cannot give themselves a business role (Accountant)");
+
+console.log("\n=== administrators administer; they do no business ===");
+for (const path of ["/clients", "/contracts", "/properties", "/org/requests", "/payments"]) {
+  check((await call(path, adminToken)).status === 403, `the System Administrator is refused ${path}`);
+}
+const adminMeNow = (await call("/org/me", adminToken)).body;
+check((adminMeNow.modules || []).length === 0 && !(adminMeNow.permissions || []).includes("submit_contract"), "the System Administrator carries no business module or contract power");
+check((await call("/org/users", adminToken)).status === 200 && (await call("/org/departments", adminToken)).status === 200, "the System Administrator still runs staff and departments");
+check((await call("/org/departments", adminToken)).body.every((d) => typeof d.client_count === "number"), "each department reports its client count");
+const ictoRoleId = roleId("ICTO");
+check((await call(`/org/users/${ictoId}/roles`, ictoToken, "PUT", { role_ids: [roleId("ICT Officer")] })).status === 200, "ICTO can move themselves to another system-administration role");
+check((await call(`/org/users/${ictoId}/roles`, adminToken, "PUT", { role_ids: [ictoRoleId] })).status === 200, "(restored the ICTO role)");
+const ictDept = (await call("/org/departments", adminToken)).body.find((d) => d.name === "ICT & ADMINISTRATION");
+check((await call(`/org/users/${ictoId}/departments`, ictoToken, "PUT", { department_ids: [ictDept.id] })).status === 200, "ICTO can move themselves between departments");
 check((await call(`/org/users/${ictoId}`, ictoToken, "PUT", { active: false })).status === 403, "ICTO cannot deactivate themselves");
 const ictoRoles = (await query("SELECT r.name FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=$1", [ictoId])).rows.map((row) => row.name);
 check(ictoRoles.length === 1 && ictoRoles[0] === "ICTO", `the ICTO's roles are unchanged (${ictoRoles.join(",")})`);

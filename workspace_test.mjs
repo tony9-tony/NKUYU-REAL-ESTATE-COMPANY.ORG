@@ -100,7 +100,10 @@ try {
 
   // === 2. The payload is bounded, and says so ==============================
   console.log("\n=== 2. the workspace ships a page, and says so ===");
-  const admin = workspaces.admin;
+  // Business lists are checked as the MD (organization scope); the System
+  // Administrator gets none at all.
+  check((workspaces.admin.clients || []).length === 0 && (workspaces.admin.contracts || []).length === 0 && (workspaces.admin.projects || []).length === 0, "the System Administrator receives no business lists");
+  const admin = workspaces.md;
   check(Array.isArray(admin.clients) && admin.clients.length <= 50, `clients arrive as one bounded page (${admin.clients?.length} rows)`);
   check(Array.isArray(admin.properties) && admin.properties.length <= 50, `properties arrive as one bounded page (${admin.properties?.length} rows)`);
   check(admin.pages?.clients?.total >= 120, `pages.clients.total covers the whole seeded set plus whatever the shared test DB already held (${admin.pages?.clients?.total})`);
@@ -118,7 +121,7 @@ try {
   // === 3. Scoped counts, not array lengths ================================
   console.log("\n=== 3. dashboard counts are server-computed and scoped ===");
   check(typeof admin.counts === "object" && admin.counts !== null, "the workspace carries a counts block");
-  check(admin.counts.clients >= 120, `the administrator's client count covers the whole set (${admin.counts.clients})`);
+  check(admin.counts.clients >= 120, `the MD's client count covers the whole set (${admin.counts.clients})`);
   check(typeof admin.counts.contracts === "number", "contracts are counted");
   // A caller without view_financial must be told null, not 0, for the money
   // registers: "0" would read as "the office has no debts".
@@ -146,9 +149,9 @@ try {
   // The shared test database holds rows from other suites, so assert the shape
   // (full pages, then a short tail that covers the rest) rather than exact 120.
   const seededCount = 120;
-  const pageA = await call(`/clients?${Q}page=1&page_size=50`, { token: adminToken });
-  const pageB = await call(`/clients?${Q}page=2&page_size=50`, { token: adminToken });
-  const pageC = await call(`/clients?${Q}page=3&page_size=50`, { token: adminToken });
+  const pageA = await call(`/clients?${Q}page=1&page_size=50`, { token: mdToken });
+  const pageB = await call(`/clients?${Q}page=2&page_size=50`, { token: mdToken });
+  const pageC = await call(`/clients?${Q}page=3&page_size=50`, { token: mdToken });
   check(pageA.body.data.length === 50 && pageB.body.data.length === 50,
     `the first two project-scoped pages are full (${pageA.body.data.length}/${pageB.body.data.length})`);
   check(pageC.body.data.length === seededCount - 100,
@@ -166,7 +169,7 @@ try {
   console.log("\n=== 6. an off-page record can still be opened by id ===");
   const offPage = pageC.body.data[0];
   check(Boolean(offPage), "page 3 carries a record that is not on page 1");
-  const byId = await call(`/clients/${offPage.id}`, { token: adminToken });
+  const byId = await call(`/clients/${offPage.id}`, { token: mdToken });
   check(byId.status === 200 && byId.body.id === offPage.id, `GET /clients/${offPage.id} returns the off-page record (${byId.status})`);
   check(!idsA.has(offPage.id), "and it genuinely is not in page 1");
   // The same fetch must still be refused when it is out of scope.
@@ -178,14 +181,14 @@ try {
   // A name that only exists on the LAST page: a client-side filter of page 1
   // would have reported it as missing.
   const term = `Client ${String(offPage.name).match(/Client (\d+)/)?.[1] ?? ""}`;
-  const searched = await call(`/clients?${Q}search=${encodeURIComponent(term)}&page=1&page_size=50`, { token: adminToken });
+  const searched = await call(`/clients?${Q}search=${encodeURIComponent(term)}&page=1&page_size=50`, { token: mdToken });
   check(searched.status === 200, `GET /clients?search=... -> 200 (${searched.status})`);
   check(searched.body.pagination.total >= 1, `the search finds records on a later page (total ${searched.body.pagination.total})`);
   check(searched.body.data.some((r) => r.id === offPage.id), "the off-page record is returned by its name");
-  const none = await call(`/clients?${Q}search=zzzznomatchzzzz`, { token: adminToken });
+  const none = await call(`/clients?${Q}search=zzzznomatchzzzz`, { token: mdToken });
   check((none.body.data || []).length === 0 && none.body.pagination?.total === 0,
     `a non-matching search returns nothing (${(none.body.data || []).length} rows, total ${none.body.pagination?.total})`);
-  const tooLong = await call(`/clients?${Q}search=${"x".repeat(200)}`, { token: adminToken });
+  const tooLong = await call(`/clients?${Q}search=${"x".repeat(200)}`, { token: mdToken });
   check(tooLong.status === 400, `an absurd search term is rejected (${tooLong.status})`);
 
   // === 8. Search cannot widen the caller's scope ==========================

@@ -198,7 +198,7 @@ async function main() {
   res = await call(`/contracts/${salesContract.id}/schedule`, { token: sessions.finance_manager, method: "POST", body: { deposit: 0, installments: 2, first_due_date: "2027-01-05" } });
   check(res.status === 404, "finance cannot schedule a contract that is outside its scope");
   // An organization-visible contract is in Finance's scope, so it can be worked.
-  res = await call("/contracts", { token: sessions.admin, method: "POST", body: { project_id: salesProject.id, client_name: `Matrix Fin ${stamp}`, contract_type: "new", value: 750000, notes: `matrix-fin-${stamp}` } });
+  res = await call("/contracts", { token: sessions.director, method: "POST", body: { project_id: salesProject.id, client_name: `Matrix Fin ${stamp}`, contract_type: "new", value: 750000, notes: `matrix-fin-${stamp}` } });
   const financeContract = res.payload;
   res = await call(`/contracts/${financeContract.id}/schedule`, { token: sessions.finance_manager, method: "POST", body: { deposit: 0, installments: 2, first_due_date: "2027-01-05" } });
   check(res.status === 201, "the finance manager generates a payment schedule on an organization-visible contract");
@@ -223,7 +223,7 @@ async function main() {
   res = await call("/contracts", { token: sessions.director });
   check(res.payload.some((c) => c.id === salesContract.id), "managing director sees organization-wide records");
   res = await call("/contracts", { token: sessions.admin });
-  check(res.payload.some((c) => c.id === salesContract.id), "administrator sees organization-wide records");
+  check(res.status === 403, `the System Administrator does not see business records (${res.status})`);
   res = await call("/debts", { token: sessions.finance });
   check(Array.isArray(res.payload), "finance officer can list installments");
   res = await call("/debts", { token: sessions.sales2 });
@@ -238,7 +238,9 @@ async function main() {
   res = await call(`/contracts/${legalContract.id}`, { token: sessions.manager, method: "DELETE" });
   check(res.status === 404, "department manager cannot delete a record outside their department");
   res = await call(`/contracts/${legalContract.id}`, { token: sessions.admin, method: "DELETE" });
-  check(res.status === 200, "administrator can delete any record");
+  check(res.status === 403, `the System Administrator cannot delete business records (${res.status})`);
+  res = await call(`/contracts/${legalContract.id}`, { token: sessions.legal, method: "DELETE" });
+  check(res.status === 200, "Legal, which owns the final record, deletes it");
   res = await call("/contracts", { token: sessions.sales2 });
   check(!res.payload.some((c) => c.id === legalContract.id), "deleted record disappears from every list");
 
@@ -342,7 +344,7 @@ async function main() {
   // The full lifecycle, each step taken by the department that owns it. The
   // record is opened by the administrator so it is organization-visible, which is
   // what lets Finance and the MD act on a contract Legal owns.
-  res = await call("/contracts", { token: sessions.admin, method: "POST", body: { project_id: salesProject.id, client_name: `Matrix Flow ${stamp}`, contract_type: "new", value: 400000, requires_management_approval: true, notes: `matrix-flow-${stamp}` } });
+  res = await call("/contracts", { token: sessions.director, method: "POST", body: { project_id: salesProject.id, client_name: `Matrix Flow ${stamp}`, contract_type: "new", value: 400000, requires_management_approval: true, notes: `matrix-flow-${stamp}` } });
   check(res.status === 201, "an organization-visible contract can be opened");
   const flow = res.payload;
   const step = async (action, token, extra = {}) => call(`/contracts/${flow.id}/transition`, { token, method: "POST", body: { action, ...extra } });

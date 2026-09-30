@@ -98,7 +98,7 @@ async function call(path, options = {}) {
 }
 
 async function main() {
-  let res = await call("/auth/login", { method: "POST", body: JSON.stringify({ email: process.env.E2E_EMAIL || "admin@mkuyu.local", password: process.env.E2E_PASSWORD || (await import("./backend/src/org/demoCredentials.js")).legacyPasswordFor("admin@mkuyu.local") }) });
+  let res = await call("/auth/login", { method: "POST", body: JSON.stringify({ email: process.env.E2E_EMAIL || "md@mkuyu.local", password: process.env.E2E_PASSWORD || (await import("./backend/src/org/demoCredentials.js")).legacyPasswordFor("md@mkuyu.local") }) });
   assert(res.status === 200, "PostgreSQL admin login");
   token = res.payload.token;
   assert(Boolean(token), "has session token");
@@ -244,6 +244,11 @@ async function runPropertyAndBackupTests(projectId, clientId) {
   res = await call(`/properties/${propertyId}`);
   assert(res.payload.image_count === 0, "gallery empty after delete");
 
+  // Backups are system administration: taken as the System Administrator,
+  // who does no business. The business flow resumes as the MD afterwards.
+  const businessToken = token;
+  const adminLogin = await call("/auth/login", { method: "POST", body: JSON.stringify({ email: "admin@mkuyu.local", password: (await import("./backend/src/org/demoCredentials.js")).legacyPasswordFor("admin@mkuyu.local") }) });
+  token = adminLogin.payload.token;
   res = await call("/backups", { method: "POST", body: "{}" });
   assert(res.status === 201 && res.payload?.name, `backup created (${res.payload?.name})`);
   const backupName = res.payload.name;
@@ -261,6 +266,9 @@ async function runPropertyAndBackupTests(projectId, clientId) {
   assert(res.status === 404, "unknown but valid backup name 404s");
   res = await call("/backups/not-a-real-backup.db/download");
   assert(res.status === 400, "invalid backup name 400s");
+  res = await call("/clients");
+  assert(res.status === 403, "the System Administrator cannot read business records");
+  token = businessToken;
 
   res = await call("/reports/summary");
   assert(res.payload.income_all && res.payload.income_30d, "summary exposes income totals");

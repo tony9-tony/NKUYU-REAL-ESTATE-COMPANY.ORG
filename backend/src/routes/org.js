@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { query, queryOne, withTransaction } from "../db.js";
-import { organizationId, permissionKeys, requirePermission, requireAdmin, requireModuleAccess, requireScope } from "../org/rbac.js";
+import { BUSINESS_PERMISSIONS, organizationId, permissionKeys, requirePermission, requireAdmin, requireModuleAccess, requireScope } from "../org/rbac.js";
 import { addRecordShare, can, canAccessModule, clearAccessCache, currentAccess, isScope, isVisibility, listRecordShares, ownershipFields, removeRecordShare, scopeCondition } from "../org/access.js";
 import { audit } from "../org/audit.js";
 import { attentionCount } from "../tasks/tasks.js";
@@ -159,7 +159,9 @@ function recordTable(entity) {
 
 /** Authorization bootstrap payload: permissions, effective scope, allowed modules. */
 async function buildMe(req) {
-  const permissions = req.access?.permissions || (await permissionKeys(req.user.id));
+  const granted = req.access?.permissions || (await permissionKeys(req.user.id));
+  // The System Administrator never carries business permissions (see rbac.js).
+  const permissions = req.access?.isAdmin ? granted.filter((key) => !BUSINESS_PERMISSIONS.has(key)) : granted;
   // `modules` uses the same keys as the `access_<module>` permission keys.
   const modules = Object.entries(recordTables)
     .filter(([, entry]) => canAccessModule(req.access, entry.module))
@@ -598,7 +600,8 @@ async function assertUniqueDepartment(org, name, exceptId = null) {
 }
 const DEPARTMENT_SELECT = `SELECT d.*,
   (SELECT COUNT(*) FROM user_departments ud JOIN users u ON u.id=ud.user_id WHERE ud.department_id=d.id AND u.active)::int AS active_members,
-  (SELECT COUNT(*) FROM user_departments ud WHERE ud.department_id=d.id)::int AS all_members
+  (SELECT COUNT(*) FROM user_departments ud WHERE ud.department_id=d.id)::int AS all_members,
+  (SELECT COUNT(*) FROM clients c WHERE c.department_id=d.id)::int AS client_count
   FROM departments d`;
 const withCore = (row) => row && ({ ...row, core: CORE_DEPARTMENTS.has(row.name) });
 
@@ -766,7 +769,11 @@ router.put("/users/:id", requirePermission("manage_users"), async (req,res,next)
     // are dropped so a token minted against the old password cannot outlive it.
     if(req.body?.password){if(String(req.body.password).length<8)return res.status(400).json({error:"password must be at least 8 characters"});await query("UPDATE users SET password_hash=$1 WHERE id=$2",[hashPassword(req.body.password),userId]);await query("DELETE FROM sessions WHERE user_id=$1",[userId]);clearAccessCache();await audit(req,"password_reset","user",userId,{email:target.email,sessions_invalidated:true});}
     if(!r)return res.status(404).json({error:"user not found"});clearAccessCache();await audit(req,"updated","user",userId);res.json(r);}catch(e){next(e);}});
-router.put("/users/:id/roles", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");const org=await organizationId();await guardTargetUser(req,userId,org,{allowSelf:false});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map((roleId)=>id(roleId,"role_id")))];if(roleIds.length)await assignableRoles(req,roleIds,org);await withTransaction(async(c)=>{await c.query("DELETE FROM user_roles WHERE user_id=$1",[userId]);for(const roleId of roleIds)await c.query("INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE id=$2 AND organization_id=$3 ON CONFLICT DO NOTHING",[userId,roleId,org]);});clearAccessCache();await audit(req,"changed_role","user",userId);res.json({ok:true});}catch(e){next(e);}});
+router.put("/users/:id/roles", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");const org=await organizationId();await guardTargetUser(req,userId,org,{allowSelf:true});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map((roleId)=>id(roleId,"role_id")))];if(roleIds.length)await assignableRoles(req,roleIds,org);
+    // An administrator may move THEMSELVES only between system-administration
+    // roles (no business permission), so nobody can hand themselves Finance,
+    // Legal or Sales powers; another administrator must do that.
+    if(userId===req.user.id){if(!roleIds.length)return res.status(400).json({error:"you must keep a role"});const business=await rows("SELECT DISTINCT r.name FROM roles r JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE r.id=ANY($1::int[]) AND p.permission_key=ANY($2::text[])",[roleIds,[...BUSINESS_PERMISSIONS]]);if(business.length)return res.status(403).json({error:`you can move yourself only between system-administration roles; "${business[0].name}" carries business access, so another administrator must assign it`});}await withTransaction(async(c)=>{await c.query("DELETE FROM user_roles WHERE user_id=$1",[userId]);for(const roleId of roleIds)await c.query("INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE id=$2 AND organization_id=$3 ON CONFLICT DO NOTHING",[userId,roleId,org]);});clearAccessCache();await audit(req,"changed_role","user",userId);res.json({ok:true});}catch(e){next(e);}});
 router.put("/users/:id/departments", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");await guardTargetUser(req,userId,await organizationId());
     const wanted=[...new Set((Array.isArray(req.body?.department_ids)?req.body.department_ids:[]).map((value)=>id(value,"department_id")))];
     if(!wanted.length)return res.status(400).json({error:"a staff member must belong to at least one department"});
