@@ -27,6 +27,7 @@
     "test:clientflow": "node --import ./test_support/guard.mjs client_workflow_test.mjs",
     "test:images": "node --import ./test_support/guard.mjs property_images_test.mjs",
     "test:tasks": "node --import ./test_support/guard.mjs task_assignment_test.mjs",
+    "test:staffadmin": "node --import ./test_support/guard.mjs staff_admin_test.mjs",
     "test:isolated": "node --import ./test_support/guard.mjs test_support/verify_isolation.mjs",
     "test:audit": "node --import ./test_support/guard.mjs ui_audit_regression.mjs",
     "test": "npm run test:unit && npm run test:access && npm run test:frontend && npm run test:e2e"

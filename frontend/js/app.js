@@ -900,6 +900,7 @@ function applyWorkspace(payload) {
   state.organization.departments = admin.departments || [];
   state.organization.roles = admin.roles || [];
   state.organization.users = admin.users || [];
+  state.organization.permissions = admin.permissions || [];
   state.organization.audit = admin.audit || [];
   state.organization.approvals = admin.approvals || [];
   state.organization.dashboard = admin.dashboard || null;
@@ -986,12 +987,16 @@ const NAV_ITEMS = [
   // Reference view, not a module: every signed-in member may read the duty
   // catalogue and the approval path. It exposes no record and no way to act.
   { view: "duties", label: "Duties & approvals", icon: "scale", group: "Organization" },
-  { view: "organization", label: "Administration", icon: "settings", adminOnly: true, group: "Organization" },
+  // Staff administration is a duty, not an account type: the ICT Officer holds
+  // manage_users / manage_roles and runs it day to day. The server still
+  // refuses anything above their own rank.
+  { view: "organization", label: "Administration", icon: "settings", anyOf: ["manage_users", "manage_roles"], group: "Organization" },
 ];
 
 /** Whether the caller is entitled to a navigation entry at all. */
 function canSeeNavItem(item) {
   if (item.adminOnly) return isAdmin();
+  if (item.anyOf) return item.anyOf.some((permission) => can(permission));
   if (!item.module) return item.permission ? can(item.permission) : true;
   return canModule(item.module) && can(item.permission);
 }
@@ -1036,7 +1041,8 @@ function updateNavigation() {
   document.querySelectorAll("[data-admin-only]").forEach((element) => {
     element.hidden = !isAdmin();
   });
-  if (!isAdmin() && (state.view === "admin-dashboard" || state.view === "organization")) state.view = "dashboard";
+  if (!isAdmin() && state.view === "admin-dashboard") state.view = "dashboard";
+  if (state.view === "organization" && !canSeeNavItem(NAV_ITEMS.find((item) => item.view === "organization"))) state.view = "dashboard";
   if (allowedViewFor(state.view) === false) state.view = "dashboard";
 }
 
@@ -1760,6 +1766,8 @@ function renderOrganization() {
   // heading, so "Legal Officer" can never be mistaken for a department. Grouping
   // is derived from each user's real `departments`, so the display can never
   // disagree with the access model.
+  // The six founding departments lead in this order; any department added later
+  // follows alphabetically, so a new one shows up without a code change.
   const DEPARTMENT_ORDER = [
     "MANAGEMENT",
     "FINANCE & ACCOUNTS",
@@ -1768,6 +1776,9 @@ function renderOrganization() {
     "LEGAL",
     "CUSTOMER SERVICE",
   ];
+  for (const department of [...org.departments].sort((a, b) => String(a.name).localeCompare(String(b.name)))) {
+    if (!DEPARTMENT_ORDER.includes(department.name)) DEPARTMENT_ORDER.push(department.name);
+  }
   // Display names, so a demo does not read as a shouty constant.
   const DEPARTMENT_LABELS = {
     "MANAGEMENT": "Management",
@@ -1778,7 +1789,11 @@ function renderOrganization() {
     "CUSTOMER SERVICE": "Customer Service",
   };
 
-  const userRow = (user) => `<tr><td><strong>${escapeHtml(user.display_name)}</strong><div class="table-sub">${escapeHtml(user.email)}</div></td><td>${user.roles?.map((role) => badge(role.name)).join(" ") || "No role"}</td><td>${user.active ? badge("Active", "approved") : badge("Inactive", "archived")}</td><td><div class="row-actions">${isAdmin() ? `<button class="btn btn-soft btn-small" data-action="reset-password" data-id="${user.id}" title="Set a new sign-in password without changing the account">Reset password</button>` : ""}<button class="btn btn-soft btn-small" data-action="toggle-user" data-id="${user.id}" data-active="${user.active ? 0 : 1}">${user.active ? "Deactivate" : "Activate"}</button></div></td></tr>`;
+  // Mirrors the server's account guard: a staff administrator never manages the
+  // administrator account, their own account, or anyone ranked above them.
+  const canManageAccount = (user) => isAdmin() || (user.role !== "admin" && user.id !== org.me?.user?.id
+    && Math.max(0, ...(user.roles || []).map((role) => Number(role.rank || 0))) <= Number(org.me?.rank || 0));
+  const userRow = (user) => `<tr><td><strong>${escapeHtml(user.display_name)}</strong><div class="table-sub">${escapeHtml(user.email)}</div></td><td>${user.roles?.map((role) => badge(role.name)).join(" ") || "No role"}</td><td>${user.active ? badge("Active", "approved") : badge("Inactive", "archived")}</td><td><div class="row-actions">${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="reset-password" data-id="${user.id}" title="Set a new sign-in password without changing the account">Reset password</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="toggle-user" data-id="${user.id}" data-active="${user.active ? 0 : 1}">${user.active ? "Deactivate" : "Activate"}</button>` : ""}</div></td></tr>`;
 
   const usersByDepartment = new Map(DEPARTMENT_ORDER.map((name) => [name, []]));
   const unassigned = [];
@@ -1813,10 +1828,17 @@ function renderOrganization() {
   const followUpRows = org.followUps.slice(0, 6).map((item) => `<tr><td>${escapeHtml(item.follow_up_type || "Follow-up")}</td><td>${formatDate(item.due_at)}</td><td>${badge(item.status)}</td><td>${escapeHtml(item.outcome || "Pending")}</td></tr>`).join("");
   const approvalRows = org.approvals.slice(0, 8).map((item) => `<tr><td><strong>${escapeHtml(item.module)}</strong><div class="table-sub">Requested by ${escapeHtml(item.requested_by_name || "System")}</div></td><td>#${item.record_id}</td><td>${badge(item.status)}</td><td>${item.decided_at ? `${escapeHtml(item.decided_by_name || "Reviewer")} · ${formatDate(item.decided_at, true)}` : "Awaiting decision"}</td><td>${item.status === "pending" && permissions.includes("approve") ? `<div class="row-actions"><button class="btn btn-soft btn-small" data-action="decide-approval" data-id="${item.id}" data-status="approved">Approve</button><button class="btn btn-danger btn-small" data-action="decide-approval" data-id="${item.id}" data-status="rejected">Reject</button></div>` : ""}</td></tr>`).join("");
   const roleRows = org.roles.map((role) => `<tr><td><strong>${escapeHtml(role.name)}</strong>${role.system_role ? `<div class="table-sub">System role</div>` : ""}</td><td>${badge(`Rank ${Number(role.rank || 0)}`, "neutral")}</td><td>${role.permission_count || 0} privileges</td><td>${(role.permissions || []).map((permission) => badge(permission, "approved")).join(" ")}</td></tr>`).join("");
-  const roleOptions = org.roles.map((role) => `<option value="${role.id}" data-rank="${Number(role.rank || 0)}" data-permissions="${escapeHtml(JSON.stringify(role.permissions || []))}">${escapeHtml(role.name)} · rank ${Number(role.rank || 0)} · ${role.permission_count || 0} privileges</option>`).join("");
-  const staffRoleOptions = org.roles.filter((role) => !role.system_role).map((role) => `<option value="${role.id}">${escapeHtml(role.name)} · rank ${Number(role.rank || 0)}</option>`).join("");
+  // Offer only what the server would accept from this caller. The administrator
+  // account may do anything; a staff administrator (ICT) works at or below their
+  // own rank, on custom roles only, and never hands out the reserved keys.
+  const myRank = Number(org.me?.rank || 0);
+  const assignable = (role) => role.active !== false && role.name !== "System Administrator" && (isAdmin() || Number(role.rank || 0) <= myRank);
+  const editableRole = (role) => isAdmin() || (!role.system_role && Number(role.rank || 0) <= myRank);
+  const RESERVED_KEYS = new Set(["manage_users", "manage_roles", "manage_permissions", "manage_settings", "view_audit", "approve_management", "approve_legal", "validate_finance"]);
+  const roleOptions = org.roles.filter(editableRole).map((role) => `<option value="${role.id}" data-rank="${Number(role.rank || 0)}" data-permissions="${escapeHtml(JSON.stringify(role.permissions || []))}">${escapeHtml(role.name)} · rank ${Number(role.rank || 0)} · ${role.permission_count || 0} privileges</option>`).join("");
+  const staffRoleOptions = org.roles.filter(assignable).map((role) => `<option value="${role.id}">${escapeHtml(role.name)} · rank ${Number(role.rank || 0)}</option>`).join("");
   const departmentOptions = org.departments.map((department) => `<option value="${department.id}">${escapeHtml(department.name)}</option>`).join("");
-  const permissionOptions = org.permissions.map((permission) => `<label class="check-field"><input type="checkbox" name="permissions" value="${escapeHtml(permission.permission_key)}">${escapeHtml(permission.permission_key)}</label>`).join("");
+  const permissionOptions = org.permissions.filter((permission) => isAdmin() || !RESERVED_KEYS.has(permission.permission_key)).map((permission) => `<label class="check-field"><input type="checkbox" name="permissions" value="${escapeHtml(permission.permission_key)}">${escapeHtml(permission.permission_key)}</label>`).join("");
   return `<div class="section-grid org-grid">
     <section class="card glass org-intro"><div><div class="eyebrow">Workspace governance</div><h2>Organization control center</h2><p>Keep people, access, approvals, and operational activity aligned across MKUYU.</p></div><div class="org-intro-stats"><span><strong>${permissions.length}</strong> permissions</span><span><strong>${org.users.filter((user) => user.active).length}</strong> active staff</span><span><strong>${org.approvals.filter((item) => item.status === "pending").length}</strong> pending approvals</span></div></section>
     <section class="card glass"><div class="section-head"><div><h2 class="section-title">Management overview</h2><div class="section-note">Live organization records and financial position</div></div></div><div class="metric-grid"><div class="metric"><span>Projects</span><strong>${metrics.projects ?? 0}</strong></div><div class="metric"><span>Properties</span><strong>${metrics.properties ?? 0}</strong></div><div class="metric"><span>Available</span><strong>${metrics.available_properties ?? 0}</strong></div><div class="metric"><span>Clients</span><strong>${metrics.clients ?? 0}</strong></div><div class="metric"><span>Leads</span><strong>${metrics.leads ?? 0}</strong></div><div class="metric"><span>Contracts</span><strong>${metrics.contracts ?? 0}</strong></div><div class="metric"><span>Income</span><strong>${money(metrics.payments)}</strong></div><div class="metric"><span>Outstanding</span><strong>${money(metrics.outstanding)}</strong></div><div class="metric"><span>Overdue</span><strong>${money(metrics.overdue)}</strong></div></div></section>
@@ -1827,7 +1849,7 @@ function renderOrganization() {
     ${permissions.includes("view_financial") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Collections pulse</h2><div class="section-note">Outstanding and due soon</div></div></div><div class="metric-grid"><div class="metric"><span>Outstanding</span><strong>${org.collections?.outstanding?.length || 0}</strong></div><div class="metric"><span>Overdue</span><strong>${org.collections?.overdue?.length || 0}</strong></div><div class="metric"><span>Due soon</span><strong>${org.collections?.due_soon?.length || 0}</strong></div><div class="metric"><span>Open follow-ups</span><strong>${org.collections?.follow_ups?.length || 0}</strong></div></div></section>` : ""}
     <section class="card glass"><div class="section-head"><div><h2 class="section-title">Activity</h2><div class="section-note">Recorded organization actions</div></div></div><div class="table-wrap"><table><thead><tr><th>User</th><th>Action</th><th>Module</th><th>When</th></tr></thead><tbody>${activityRows || `<tr><td colspan="4" class="empty">No activity recorded</td></tr>`}</tbody></table></div></section>
     ${permissions.includes("approve") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Approvals</h2><div class="section-note">Contracts, documents, and financial decisions</div></div></div><div class="table-wrap"><table><thead><tr><th>Module</th><th>Record</th><th>Status</th><th>Decision</th><th>Action</th></tr></thead><tbody>${approvalRows || `<tr><td colspan="5" class="empty">No approval requests</td></tr>`}</tbody></table></div></section>` : ""}
-    ${permissions.includes("manage_users") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Record allocation</h2><div class="section-note">Move records out of the office-wide pool into an owner and department</div></div><button class="btn btn-soft btn-small" data-action="reload-allocation">Refresh</button></div>${renderAllocation(state.allocationEntity || "client")}</section>` : ""}
+    ${isAdmin() ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Record allocation</h2><div class="section-note">Move records out of the office-wide pool into an owner and department</div></div><button class="btn btn-soft btn-small" data-action="reload-allocation">Refresh</button></div>${renderAllocation(state.allocationEntity || "client")}</section>` : ""}
   </div>`;
 }
 
@@ -2987,7 +3009,7 @@ function render() {
   // The record-allocation panel is administrator-only and loads on demand. The
   // `allocationRequested` guard means a failed load is not retried on every
   // render, which previously produced an unbounded request loop.
-  if (state.view === "organization" && can("manage_users") && !state.allocation && !state.allocationRequested) loadAllocation().then(() => { if (state.view === "organization") render(); });
+  if (state.view === "organization" && isAdmin() && !state.allocation && !state.allocationRequested) loadAllocation().then(() => { if (state.view === "organization") render(); });
   // Authenticated image blobs for property covers, etc.
   hydrateImages(content);
   applySearch();

@@ -142,11 +142,19 @@ check(resetActor?.role === "admin", `reset: the event is attributed to the actin
 const restore = await call(`/org/users/${beforeReset.id}`, resetToken, "PUT", { password: legacyPasswordFor(target) });
 check(restore.status === 200 && (await signIn(target, legacyPasswordFor(target))).status === 200, "restored the documented demo credential after the reset test");
 
-// MD protections must survive: only an administrator may reset a password.
+// The MD has no staff administration, so cannot reset a password.
 const mdToken = (await signIn("md@mkuyu.local", legacyPasswordFor("md@mkuyu.local"))).body.token;
 check((await call(`/org/users/${beforeReset.id}`, mdToken, "PUT", { password: "SneakyPassword123" })).status === 403, "the MD cannot reset a staff password");
+// The ICTO holds manage_users, so resets passwords for staff at or below their
+// rank, but never for the MD or the administrator account.
 const ictoToken = (await signIn("icto@demo.mkuyu.local", legacyPasswordFor("icto@demo.mkuyu.local"))).body.token;
-check((await call(`/org/users/${beforeReset.id}`, ictoToken, "PUT", { password: "SneakyPassword123" })).status === 403, "the ICTO cannot reset a staff password on this build");
+check((await call(`/org/users/${beforeReset.id}`, ictoToken, "PUT", { password: "IctoReset#amina2026" })).status === 200, "the ICTO can reset a sales officer's password");
+check((await call(`/org/users/${beforeReset.id}`, ictoToken, "PUT", { password: legacyPasswordFor(target) })).status === 200
+  && (await signIn(target, legacyPasswordFor(target))).status === 200, "restored the demo credential after the ICTO reset");
+const mdId = (await snapshot("md@mkuyu.local")).id;
+const adminId = (await snapshot("admin@mkuyu.local")).id;
+check((await call(`/org/users/${mdId}`, ictoToken, "PUT", { password: "SneakyPassword123" })).status === 403, "the ICTO cannot reset the MD's password");
+check((await call(`/org/users/${adminId}`, ictoToken, "PUT", { password: "SneakyPassword123" })).status === 403, "the ICTO cannot reset the administrator's password");
 
 console.log("\n=== TASK 3: reminders visibility and authorization ===");
 const financeToken = (await signIn("finance.manager@demo.mkuyu.local", legacyPasswordFor("finance.manager@demo.mkuyu.local"))).body.token;
@@ -188,11 +196,13 @@ for (const [email, expected] of Object.entries(EXPECTED_UI)) {
   for (const module of expected.has) check(modules.includes(module), `${email}: workspace shows ${module}`);
   for (const module of expected.lacks) check(!modules.includes(module), `${email}: workspace hides ${module}`);
 
-  // ICTO must not reach staff/role/department administration.
+  // The ICTO runs staff, role and department administration, but the access
+  // matrix audit stays with the administrator account.
   if (email === "icto@demo.mkuyu.local") {
-    for (const path of ["/org/users", "/org/roles", "/org/departments", "/org/permissions", "/org/access-matrix"]) {
-      check((await call(path, token)).status === 403, `ICTO is refused ${path}`);
+    for (const path of ["/org/users", "/org/roles", "/org/departments", "/org/permissions"]) {
+      check((await call(path, token)).status === 200, `ICTO can read ${path}`);
     }
+    check((await call("/org/access-matrix", token)).status === 403, "ICTO is refused /org/access-matrix");
     check(!permissions.some((key) => key.startsWith("access_")), "ICTO holds no business module access");
   }
   if (email === "md@demo.mkuyu.local") {

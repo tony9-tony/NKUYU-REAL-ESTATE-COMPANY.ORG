@@ -15,7 +15,7 @@ import { Report } from "../models/report.js";
 import { Appointment, Client, Document, Property } from "../models/catalog.js";
 import { REPORT_TYPES, PAYMENT_METHODS, reportTypeIsFinancial } from "../models/reportTypes.js";
 import { CONTRACT_ACTIONS, WORKFLOW_STAGES, WORKFLOW_EXCEPTIONS, availableActions, canTransition, workflowGraph, workflowStagePermissions } from "../contracts/workflow.js";
-import { ROLE_DUTIES, CONTRACT_OWNERSHIP, ROLE_HOME_DEPARTMENT, departmentDutyTree, checkRoleDuties, checkContractOwnership, checkNoSystemAdminLeak, checkDeadPermissions } from "../org/duties.js";
+import { ROLE_DUTIES, CONTRACT_OWNERSHIP, ROLE_HOME_DEPARTMENT, SYSTEM_PERMISSIONS, departmentDutyTree, checkRoleDuties, checkContractOwnership, checkNoSystemAdminLeak, checkDeadPermissions } from "../org/duties.js";
 import taskRoutes from "./tasks.js";
 import { cleanupUploadedFile, profileImageExtensions, profileUploadsDir, removeStoredFile, resolveStoredFile, uploadProfileImageFile, validateUploadedFile } from "../uploads.js";
 
@@ -35,10 +35,69 @@ const text = (value, field, max = 160) => { if (typeof value !== "string" || !va
 const rank = (value, fallback = 0) => { const n = value === undefined || value === null || value === "" ? fallback : Number(value); if (!Number.isInteger(n) || n < 0 || n > 100) { const e = new Error("rank must be an integer between 0 and 100"); e.status = 400; throw e; } return n; };
 const scope = (value, fallback = "own") => { const selected = value === undefined || value === null || value === "" ? fallback : String(value); if (!isScope(selected)) { const e = new Error("scope must be own, department or organization"); e.status = 400; throw e; } return selected; };
 const rows = async (sql, values = []) => (await query(sql, values)).rows;
+
+// ---------------------------------------------------------------------------
+// Staff administration by duty.
+//
+// The administrator account may do anything below. A staff member whose role
+// carries manage_users / manage_roles / manage_permissions (the ICT Officer)
+// runs staff, departments and roles day to day, but can never lift anyone,
+// themselves included, above their own standing:
+//   * never assign, edit or reset an account ranked above them, or the admin account
+//   * never change their own roles or deactivate themselves
+//   * only change custom roles: built-in roles are rewritten from the duty
+//     catalogue on every start, so an edit there would be silently lost anyway
+//   * never grant a role the contract decision points or system administration
+// ---------------------------------------------------------------------------
+const USER_ROLES_JSON = "COALESCE((SELECT json_agg(json_build_object('id',r.id,'name',r.name,'rank',r.rank) ORDER BY r.rank DESC) FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=u.id),'[]'::json)";
+const USER_DEPARTMENTS_JSON = "COALESCE((SELECT json_agg(json_build_object('id',d.id,'name',d.name)) FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=u.id),'[]'::json)";
+const RESERVED_ROLE_PERMISSIONS = new Set([...SYSTEM_PERMISSIONS, "view_audit", "approve_management", "approve_legal", "validate_finance"]);
+const isAdminAccount = (req) => req.user?.role === "admin";
+const callerRank = (req) => Number(req.access?.rank ?? 0);
+const refuse = (message, status = 403) => { const e = new Error(message); e.status = status; throw e; };
+
+/** Every role must exist, be active and, for a staff administrator, sit at or below their rank. */
+async function assignableRoles(req, roleIds, org) {
+  const found = await rows("SELECT id,name,rank FROM roles WHERE organization_id=$1 AND id=ANY($2::int[]) AND active=TRUE", [org, roleIds]);
+  if (found.length !== roleIds.length) refuse("one or more selected roles are invalid", 400);
+  if (!isAdminAccount(req)) {
+    for (const role of found) {
+      if (role.name === "System Administrator" || Number(role.rank) > callerRank(req)) refuse(`you cannot assign the "${role.name}" role: it is ranked above your own`);
+    }
+  }
+  return found;
+}
+
+/** The account a staff administrator is about to change must not outrank them. */
+async function guardTargetUser(req, userId, org, { allowSelf = true } = {}) {
+  const target = await queryOne("SELECT u.id,u.email,u.role,COALESCE((SELECT MAX(r.rank) FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=u.id),0)::int AS rank FROM users u WHERE u.id=$1 AND u.organization_id=$2", [userId, org]);
+  if (!target) refuse("user not found", 404);
+  if (isAdminAccount(req)) return target;
+  if (!allowSelf && target.id === req.user.id) refuse("you cannot change your own access; ask the System Administrator");
+  if (target.role === "admin" || target.rank > callerRank(req)) refuse("this account is ranked above your own");
+  return target;
+}
+
+/** A staff administrator may only change custom roles at or below their rank that they do not hold. */
+async function guardRoleChange(req, roleId, org) {
+  const role = await queryOne("SELECT id,name,rank,system_role FROM roles WHERE id=$1 AND organization_id=$2", [roleId, org]);
+  if (!role) refuse("role not found", 404);
+  if (isAdminAccount(req)) return role;
+  if (role.system_role) refuse(`"${role.name}" is a built-in role; its permissions come from the duty catalogue`);
+  if (Number(role.rank) > callerRank(req)) refuse(`"${role.name}" is ranked above your own`);
+  if (await queryOne("SELECT 1 FROM user_roles WHERE user_id=$1 AND role_id=$2", [req.user.id, roleId])) refuse("you cannot change a role you hold yourself");
+  return role;
+}
+
+function guardRank(req, value) {
+  if (!isAdminAccount(req) && value > callerRank(req)) refuse("a role cannot be ranked above your own");
+  return value;
+}
 // Express 4 does not catch rejected promises from async middleware, so this
 // wrapper must always funnel errors into next() or the process dies.
 const requireAnyPermission = (...permissions) => async (req, res, next) => {
   try {
+    if (req.access?.isAdmin) return next();
     const granted = await permissionKeys(req.user.id);
     if (!permissions.some((permission) => granted.includes(permission))) return res.status(403).json({ error: "permission denied" });
     next();
@@ -341,6 +400,7 @@ router.get("/workspace", async (req, res, next) => {
     const access = req.access;
     const financial = can(access, "view_financial");
     const admin = req.user?.role === "admin";
+    const staffAdmin = can(access, "manage_users") || can(access, "manage_roles");
     const has = (module) => canAccessModule(access, module);
     const org = await organizationId();
     const empty = { rows: [], pagination: { page: 1, page_size: WORKSPACE_PAGE_SIZE, total: 0, total_pages: 0, has_next: false, has_previous: false } };
@@ -352,7 +412,7 @@ router.get("/workspace", async (req, res, next) => {
     // The heavy administration extras (organization counters and collections) are
     // deliberately left out: they are only used on the Administration screen and
     // would otherwise dominate the time-to-first-paint.
-    const [projects, contractsPage, clientsPage, propertiesPage, appointmentsPage, documentsPage, debtsPage, paymentsPage, reminders, summary, projectReports, reportTypes, reportHistory, me, leadsPage, followUpsPage, counts, departments, roles, users, audit, approvals] = await Promise.all([
+    const [projects, contractsPage, clientsPage, propertiesPage, appointmentsPage, documentsPage, debtsPage, paymentsPage, reminders, summary, projectReports, reportTypes, reportHistory, me, leadsPage, followUpsPage, counts, departments, roles, users, permissions, audit, approvals] = await Promise.all([
       has("projects") ? Project.all() : [],
       gated(has("contracts"), () => Contract.paged()),
       gated(has("clients"), () => Client.paged()),
@@ -370,9 +430,12 @@ router.get("/workspace", async (req, res, next) => {
       gated(has("leads"), () => scopedListPaged("leads", "l", "lead", "l.created_at DESC")),
       gated(has("follow_ups"), () => scopedListPaged("follow_ups", "f", "follow_up", "f.due_at")),
       scopedCounts({ financial, has }),
-      admin ? rows("SELECT * FROM departments WHERE organization_id=$1 ORDER BY name", [org]) : [],
-      admin ? rows("SELECT r.*, COALESCE((SELECT json_agg(p.permission_key ORDER BY p.permission_key) FROM role_permissions rpx JOIN permissions p ON p.id=rpx.permission_id WHERE rpx.role_id=r.id),'[]'::json) AS permissions FROM roles r WHERE r.organization_id=$1 ORDER BY r.rank DESC, r.name", [org]) : [],
-      admin ? rows("SELECT u.id,u.email,u.display_name,u.role,u.active FROM users u WHERE u.organization_id=$1 ORDER BY u.display_name", [org]) : [],
+      // Staff administration data goes to whoever holds the duty for it (the
+      // administrator account, or the ICT Officer), not only to the admin account.
+      staffAdmin ? rows("SELECT * FROM departments WHERE organization_id=$1 ORDER BY name", [org]) : [],
+      staffAdmin ? rows("SELECT r.*, COALESCE((SELECT json_agg(p.permission_key ORDER BY p.permission_key) FROM role_permissions rpx JOIN permissions p ON p.id=rpx.permission_id WHERE rpx.role_id=r.id),'[]'::json) AS permissions FROM roles r WHERE r.organization_id=$1 ORDER BY r.rank DESC, r.name", [org]) : [],
+      can(access, "manage_users") ? rows(`SELECT u.id,u.email,u.display_name,u.role,u.active,${USER_ROLES_JSON} AS roles,${USER_DEPARTMENTS_JSON} AS departments FROM users u WHERE u.organization_id=$1 ORDER BY u.display_name`, [org]) : [],
+      can(access, "manage_permissions") ? rows("SELECT permission_key, label FROM permissions ORDER BY permission_key") : [],
       // The full audit trail is administrator-only. A `view_audit` holder such as
       // the ICTO receives only system/security events, never business activity.
       admin
@@ -427,7 +490,7 @@ router.get("/workspace", async (req, res, next) => {
       // which would now be a page size rather than a record count.
       counts,
       summary, projectReports, reportTypes, reportHistory,
-      admin: { departments, roles, users, audit, approvals, dashboard: null, collections: null },
+      admin: { departments, roles, users, permissions, audit, approvals, dashboard: null, collections: null },
     });
   } catch (error) { next(error); }
 });
@@ -518,13 +581,13 @@ router.get("/users/:id/photo", async (req, res, next) => {
 router.get("/me", async (req, res, next) => {
   try { res.json(await buildMe(req)); } catch (error) { next(error); }
 });
-router.get("/departments", requireAdmin(), async (req,res,next)=>{try{res.json(await rows("SELECT * FROM departments WHERE organization_id=$1 ORDER BY name",[await organizationId()]));}catch(e){next(e);}});
-router.post("/departments", requireAdmin(), async (req,res,next)=>{try{const org=await organizationId();const r=await queryOne("INSERT INTO departments (organization_id,name,description) VALUES ($1,$2,$3) RETURNING *",[org,text(req.body?.name,"name"),req.body?.description||null]);await audit(req,"created","department",r.id);res.status(201).json(r);}catch(e){next(e);}});
-router.put("/departments/:id", requireAdmin(), async (req,res,next)=>{try{const r=await queryOne("UPDATE departments SET name=COALESCE($1,name),description=COALESCE($2,description),active=COALESCE($3,active) WHERE id=$4 AND organization_id=$5 RETURNING *",[req.body?.name||null,req.body?.description||null,req.body?.active===undefined?null:Boolean(req.body.active),id(req.params.id,"department_id"),await organizationId()]);if(!r)return res.status(404).json({error:"department not found"});clearAccessCache();await audit(req,"updated","department",r.id);res.json(r);}catch(e){next(e);}});
-router.get("/roles", requireAdmin(), async (req,res,next)=>{try{res.json(await rows("SELECT r.*,COUNT(rp.permission_id)::int AS permission_count,COALESCE((SELECT json_agg(p.permission_key ORDER BY p.permission_key) FROM role_permissions rpx JOIN permissions p ON p.id=rpx.permission_id WHERE rpx.role_id=r.id),'[]'::json) AS permissions FROM roles r LEFT JOIN role_permissions rp ON rp.role_id=r.id WHERE r.organization_id=$1 GROUP BY r.id ORDER BY r.rank DESC, r.name",[await organizationId()]));}catch(e){next(e);}});
-router.post("/roles", requireAdmin(), async (req,res,next)=>{try{const r=await queryOne("INSERT INTO roles (organization_id,name,description,rank,scope) VALUES ($1,$2,$3,$4,$5) RETURNING *",[await organizationId(),text(req.body?.name,"name"),req.body?.description||null,rank(req.body?.rank),scope(req.body?.scope)]);await audit(req,"created","role",r.id);res.status(201).json(r);}catch(e){next(e);}});
-router.put("/roles/:id", requireAdmin(), async (req,res,next)=>{try{const r=await queryOne("UPDATE roles SET name=COALESCE($1,name),description=COALESCE($2,description),rank=COALESCE($3,rank),scope=COALESCE($4,scope),active=COALESCE($5,active) WHERE id=$6 AND organization_id=$7 RETURNING *",[req.body?.name||null,req.body?.description||null,req.body?.rank===undefined?null:rank(req.body.rank),req.body?.scope===undefined?null:scope(req.body.scope),req.body?.active===undefined?null:Boolean(req.body.active),id(req.params.id,"role_id"),await organizationId()]);if(!r)return res.status(404).json({error:"role not found"});clearAccessCache();await audit(req,"updated","role",r.id);res.json(r);}catch(e){next(e);}});
-router.get("/permissions", requireAdmin(), async (req,res,next)=>{try{res.json(await rows("SELECT * FROM permissions ORDER BY permission_key"));}catch(e){next(e);}});
+router.get("/departments", requireAnyPermission("manage_users", "manage_roles"), async (req,res,next)=>{try{res.json(await rows("SELECT * FROM departments WHERE organization_id=$1 ORDER BY name",[await organizationId()]));}catch(e){next(e);}});
+router.post("/departments", requirePermission("manage_roles"), async (req,res,next)=>{try{const org=await organizationId();const r=await queryOne("INSERT INTO departments (organization_id,name,description) VALUES ($1,$2,$3) RETURNING *",[org,text(req.body?.name,"name"),req.body?.description||null]);await audit(req,"created","department",r.id);res.status(201).json(r);}catch(e){next(e);}});
+router.put("/departments/:id", requirePermission("manage_roles"), async (req,res,next)=>{try{const r=await queryOne("UPDATE departments SET name=COALESCE($1,name),description=COALESCE($2,description),active=COALESCE($3,active) WHERE id=$4 AND organization_id=$5 RETURNING *",[req.body?.name||null,req.body?.description||null,req.body?.active===undefined?null:Boolean(req.body.active),id(req.params.id,"department_id"),await organizationId()]);if(!r)return res.status(404).json({error:"department not found"});clearAccessCache();await audit(req,"updated","department",r.id);res.json(r);}catch(e){next(e);}});
+router.get("/roles", requireAnyPermission("manage_users", "manage_roles"), async (req,res,next)=>{try{res.json(await rows("SELECT r.*,COUNT(rp.permission_id)::int AS permission_count,COALESCE((SELECT json_agg(p.permission_key ORDER BY p.permission_key) FROM role_permissions rpx JOIN permissions p ON p.id=rpx.permission_id WHERE rpx.role_id=r.id),'[]'::json) AS permissions FROM roles r LEFT JOIN role_permissions rp ON rp.role_id=r.id WHERE r.organization_id=$1 GROUP BY r.id ORDER BY r.rank DESC, r.name",[await organizationId()]));}catch(e){next(e);}});
+router.post("/roles", requirePermission("manage_roles"), async (req,res,next)=>{try{const r=await queryOne("INSERT INTO roles (organization_id,name,description,rank,scope) VALUES ($1,$2,$3,$4,$5) RETURNING *",[await organizationId(),text(req.body?.name,"name"),req.body?.description||null,guardRank(req,rank(req.body?.rank)),scope(req.body?.scope)]);await audit(req,"created","role",r.id);res.status(201).json(r);}catch(e){next(e);}});
+router.put("/roles/:id", requirePermission("manage_roles"), async (req,res,next)=>{try{await guardRoleChange(req,id(req.params.id,"role_id"),await organizationId());if(req.body?.rank!==undefined)guardRank(req,rank(req.body.rank));const r=await queryOne("UPDATE roles SET name=COALESCE($1,name),description=COALESCE($2,description),rank=COALESCE($3,rank),scope=COALESCE($4,scope),active=COALESCE($5,active) WHERE id=$6 AND organization_id=$7 RETURNING *",[req.body?.name||null,req.body?.description||null,req.body?.rank===undefined?null:rank(req.body.rank),req.body?.scope===undefined?null:scope(req.body.scope),req.body?.active===undefined?null:Boolean(req.body.active),id(req.params.id,"role_id"),await organizationId()]);if(!r)return res.status(404).json({error:"role not found"});clearAccessCache();await audit(req,"updated","role",r.id);res.json(r);}catch(e){next(e);}});
+router.get("/permissions", requirePermission("manage_permissions"), async (req,res,next)=>{try{res.json(await rows("SELECT * FROM permissions ORDER BY permission_key"));}catch(e){next(e);}});
 
 /**
  * The access matrix: Department -> Role -> Duty -> Permission -> Scope.
@@ -636,17 +699,17 @@ router.get("/access-matrix", requireAdmin(), async (req, res, next) => {
     });
   } catch (error) { next(error); }
 });
-router.put("/roles/:id/permissions", requireAdmin(), async (req,res,next)=>{try{const roleId=id(req.params.id,"role_id");const role=await queryOne("SELECT id FROM roles WHERE id=$1 AND organization_id=$2",[roleId,await organizationId()]);if(!role)return res.status(404).json({error:"role not found"});await withTransaction(async(client)=>{await client.query("DELETE FROM role_permissions WHERE role_id=$1",[roleId]);for(const key of (Array.isArray(req.body?.permissions)?req.body.permissions:[]))await client.query("INSERT INTO role_permissions(role_id,permission_id) SELECT $1,id FROM permissions WHERE permission_key=$2 ON CONFLICT DO NOTHING",[roleId,String(key)]);});clearAccessCache();await audit(req,"updated","role_permissions",roleId);res.json({ok:true});}catch(e){next(e);}});
-router.get("/users", requireAdmin(), async (req,res,next)=>{try{const result=await rows("SELECT u.id,u.email,u.display_name,u.role,u.active,u.created_at,COALESCE((SELECT json_agg(json_build_object('id',r.id,'name',r.name,'rank',r.rank) ORDER BY r.rank DESC) FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=u.id),'[]'::json) AS roles,COALESCE((SELECT json_agg(json_build_object('id',d.id,'name',d.name)) FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=u.id),'[]'::json) AS departments FROM users u WHERE u.organization_id=$1 ORDER BY u.display_name",[await organizationId()]);res.json(result);}catch(e){next(e);}});
-router.post("/users", requireAdmin(), async (req,res,next)=>{try{const password=String(req.body?.password||"");if(password.length<8)return res.status(400).json({error:"password must be at least 8 characters"});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map(Number))];const departmentIds=[...new Set((Array.isArray(req.body?.department_ids)?req.body.department_ids:[]).map(Number))].filter(Boolean);if(!roleIds.length)return res.status(400).json({error:"select at least one role for the staff member"});const org=await organizationId();const roles=await rows("SELECT id FROM roles WHERE organization_id=$1 AND id=ANY($2::int[]) AND active=TRUE",[org,roleIds]);if(roles.length!==new Set(roleIds.map(Number)).size)return res.status(400).json({error:"one or more selected roles are invalid"});const r=await queryOne("INSERT INTO users(organization_id,email,password_hash,display_name,role) VALUES($1,$2,$3,$4,'staff') RETURNING id,email,display_name,role,active,created_at",[org,text(req.body?.email,"email").toLowerCase(),hashPassword(password),text(req.body?.display_name,"display_name",80)]);for(const roleId of roleIds)await query("INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE id=$2 AND organization_id=$3",[r.id,id(roleId,"role_id"),org]);for(const departmentId of departmentIds)await query("INSERT INTO user_departments(user_id,department_id) SELECT $1,id FROM departments WHERE id=$2 AND organization_id=$3",[r.id,id(departmentId,"department_id"),org]);clearAccessCache();await audit(req,"created","user",r.id,{role_ids:roleIds});res.status(201).json(r);}catch(e){next(e);}});
-router.put("/users/:id", requireAdmin(), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");const org=await organizationId();const target=await queryOne("SELECT id,email FROM users WHERE id=$1 AND organization_id=$2",[userId,org]);if(!target)return res.status(404).json({error:"user not found"});const r=await queryOne("UPDATE users SET display_name=COALESCE($1,display_name),active=COALESCE($2,active) WHERE id=$3 AND organization_id=$4 RETURNING id,email,display_name,role,active,created_at",[req.body?.display_name||null,req.body?.active===undefined?null:Boolean(req.body.active),userId,org]);
+router.put("/roles/:id/permissions", requirePermission("manage_permissions"), async (req,res,next)=>{try{const roleId=id(req.params.id,"role_id");await guardRoleChange(req,roleId,await organizationId());const keys=(Array.isArray(req.body?.permissions)?req.body.permissions:[]).map(String);if(!isAdminAccount(req)){const reserved=keys.filter((key)=>RESERVED_ROLE_PERMISSIONS.has(key));if(reserved.length)return res.status(403).json({error:`only the System Administrator can grant ${reserved.join(", ")}`});}await withTransaction(async(client)=>{await client.query("DELETE FROM role_permissions WHERE role_id=$1",[roleId]);for(const key of keys)await client.query("INSERT INTO role_permissions(role_id,permission_id) SELECT $1,id FROM permissions WHERE permission_key=$2 ON CONFLICT DO NOTHING",[roleId,String(key)]);});clearAccessCache();await audit(req,"updated","role_permissions",roleId);res.json({ok:true});}catch(e){next(e);}});
+router.get("/users", requirePermission("manage_users"), async (req,res,next)=>{try{const result=await rows(`SELECT u.id,u.email,u.display_name,u.role,u.active,u.created_at,${USER_ROLES_JSON} AS roles,${USER_DEPARTMENTS_JSON} AS departments FROM users u WHERE u.organization_id=$1 ORDER BY u.display_name`,[await organizationId()]);res.json(result);}catch(e){next(e);}});
+router.post("/users", requirePermission("manage_users"), async (req,res,next)=>{try{const password=String(req.body?.password||"");if(password.length<8)return res.status(400).json({error:"password must be at least 8 characters"});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map(Number))];const departmentIds=[...new Set((Array.isArray(req.body?.department_ids)?req.body.department_ids:[]).map(Number))].filter(Boolean);if(!roleIds.length)return res.status(400).json({error:"select at least one role for the staff member"});if(roleIds.some((roleId)=>!Number.isInteger(roleId)||roleId<1))return res.status(400).json({error:"one or more selected roles are invalid"});const org=await organizationId();await assignableRoles(req,roleIds,org);const r=await queryOne("INSERT INTO users(organization_id,email,password_hash,display_name,role) VALUES($1,$2,$3,$4,'staff') RETURNING id,email,display_name,role,active,created_at",[org,text(req.body?.email,"email").toLowerCase(),hashPassword(password),text(req.body?.display_name,"display_name",80)]);for(const roleId of roleIds)await query("INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE id=$2 AND organization_id=$3",[r.id,id(roleId,"role_id"),org]);for(const departmentId of departmentIds)await query("INSERT INTO user_departments(user_id,department_id) SELECT $1,id FROM departments WHERE id=$2 AND organization_id=$3",[r.id,id(departmentId,"department_id"),org]);clearAccessCache();await audit(req,"created","user",r.id,{role_ids:roleIds});res.status(201).json(r);}catch(e){next(e);}});
+router.put("/users/:id", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");const org=await organizationId();const target=await guardTargetUser(req,userId,org,{allowSelf:false});const r=await queryOne("UPDATE users SET display_name=COALESCE($1,display_name),active=COALESCE($2,active) WHERE id=$3 AND organization_id=$4 RETURNING id,email,display_name,role,active,created_at",[req.body?.display_name||null,req.body?.active===undefined?null:Boolean(req.body.active),userId,org]);
     // A password reset changes the credential and nothing else: the user id, role,
     // department, permissions and every owned record are untouched. Live sessions
     // are dropped so a token minted against the old password cannot outlive it.
     if(req.body?.password){if(String(req.body.password).length<8)return res.status(400).json({error:"password must be at least 8 characters"});await query("UPDATE users SET password_hash=$1 WHERE id=$2",[hashPassword(req.body.password),userId]);await query("DELETE FROM sessions WHERE user_id=$1",[userId]);clearAccessCache();await audit(req,"password_reset","user",userId,{email:target.email,sessions_invalidated:true});}
     if(!r)return res.status(404).json({error:"user not found"});clearAccessCache();await audit(req,"updated","user",userId);res.json(r);}catch(e){next(e);}});
-router.put("/users/:id/roles", requireAdmin(), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");await withTransaction(async(c)=>{await c.query("DELETE FROM user_roles WHERE user_id=$1",[userId]);for(const roleId of(req.body?.role_ids||[]))await c.query("INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE id=$2 AND organization_id=$3 ON CONFLICT DO NOTHING",[userId,id(roleId,"role_id"),await organizationId()]);});clearAccessCache();await audit(req,"changed_role","user",userId);res.json({ok:true});}catch(e){next(e);}});
-router.put("/users/:id/departments", requireAdmin(), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");await withTransaction(async(c)=>{await c.query("DELETE FROM user_departments WHERE user_id=$1",[userId]);for(const departmentId of(req.body?.department_ids||[]))await c.query("INSERT INTO user_departments(user_id,department_id) SELECT $1,id FROM departments WHERE id=$2 AND organization_id=$3 ON CONFLICT DO NOTHING",[userId,id(departmentId,"department_id"),await organizationId()]);});clearAccessCache();await audit(req,"changed_department","user",userId);res.json({ok:true});}catch(e){next(e);}});
+router.put("/users/:id/roles", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");const org=await organizationId();await guardTargetUser(req,userId,org,{allowSelf:false});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map((roleId)=>id(roleId,"role_id")))];if(roleIds.length)await assignableRoles(req,roleIds,org);await withTransaction(async(c)=>{await c.query("DELETE FROM user_roles WHERE user_id=$1",[userId]);for(const roleId of roleIds)await c.query("INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE id=$2 AND organization_id=$3 ON CONFLICT DO NOTHING",[userId,roleId,org]);});clearAccessCache();await audit(req,"changed_role","user",userId);res.json({ok:true});}catch(e){next(e);}});
+router.put("/users/:id/departments", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");await guardTargetUser(req,userId,await organizationId());await withTransaction(async(c)=>{await c.query("DELETE FROM user_departments WHERE user_id=$1",[userId]);for(const departmentId of(req.body?.department_ids||[]))await c.query("INSERT INTO user_departments(user_id,department_id) SELECT $1,id FROM departments WHERE id=$2 AND organization_id=$3 ON CONFLICT DO NOTHING",[userId,id(departmentId,"department_id"),await organizationId()]);});clearAccessCache();await audit(req,"changed_department","user",userId);res.json({ok:true});}catch(e){next(e);}});
 /**
  * Audit log.
  *

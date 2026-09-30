@@ -126,11 +126,15 @@ check(adminAudit.status === 200 && Array.isArray(adminAudit.body), "admin still 
 const adminModules = new Set((adminAudit.body || []).map((entry) => entry.module));
 check(adminModules.size >= 0 && Array.isArray(adminAudit.body), "the admin payload is the complete trail, not the filtered object");
 
-// Least privilege: view_audit is read-only and grants no administration.
-for (const path of ["/org/users", "/org/roles", "/org/departments", "/org/permissions", "/org/access-matrix"]) {
-  const denied = await call(path, icto.token);
-  check(denied.status === 403, `ICTO is refused ${path} (${denied.status})`);
+// The ICTO runs staff administration through manage_users / manage_roles; the
+// limits on it are covered in staff_admin_test.mjs. The access-matrix audit
+// stays with the administrator account.
+for (const path of ["/org/users", "/org/roles", "/org/departments", "/org/permissions"]) {
+  const allowed = await call(path, icto.token);
+  check(allowed.status === 200, `ICTO can read ${path} (${allowed.status})`);
 }
+const matrixDenied = await call("/org/access-matrix", icto.token);
+check(matrixDenied.status === 403, `ICTO is refused /org/access-matrix (${matrixDenied.status})`);
 
 // The MD holds no view_audit and no manage_settings, so the trail stays closed.
 const md = (await signIn("md@demo.mkuyu.local", demoPasswordFor("md@demo.mkuyu.local"))).session;
