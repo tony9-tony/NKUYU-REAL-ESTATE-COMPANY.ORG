@@ -1976,3 +1976,6 @@ label.btn { cursor: pointer; }
 .placeholder-list ul { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 16px; margin: 10px 0 0; padding: 0; list-style: none; }
 .placeholder-list li { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
 .template-upload .panel-body { padding-top: 14px; }
+
+/* Informational note inside a modal (e.g. a contract produced on a Word template). */
+.notice { margin-bottom: 12px; padding: 10px 12px; border-radius: var(--radius); background: var(--info-soft); color: var(--info); font-size: 13px; line-height: 1.5; }

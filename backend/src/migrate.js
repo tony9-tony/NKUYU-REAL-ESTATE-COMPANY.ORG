@@ -466,6 +466,9 @@ export async function runMigrations() {
   await query("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS legal_signed_at TIMESTAMPTZ");
   // One contract template may be the organization's default.
   await query("ALTER TABLE documents ADD COLUMN IF NOT EXISTS is_default_template BOOLEAN NOT NULL DEFAULT FALSE");
+  // The placeholder values a contract was generated with, when it was produced
+  // on an uploaded Word template, so the same file can be re-filled at signing.
+  await query("ALTER TABLE documents ADD COLUMN IF NOT EXISTS fill_values JSONB");
   // Contracts already past Sales get the hand-over shares they were missing.
   await backfillHandoverShares();
 }

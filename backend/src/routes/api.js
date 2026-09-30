@@ -72,6 +72,7 @@ import {
 import { CONTRACT_PLACEHOLDERS, placeholdersUsed, unknownPlaceholders, writeContractDocx } from "../contracts/workflow.js";
 import { shareContractWithHandoverDesks } from "../contracts/handover.js";
 import { templateTextFromUpload } from "../contracts/docxText.js";
+import { generateFromWordTemplate, templateFileUnknownPlaceholders, templateWordFile } from "../contracts/docxFill.js";
 import { contractSignature, signContractDocument } from "../contracts/signature.js";
 
 const router = Router();
@@ -840,6 +841,8 @@ router.post("/contracts/generate", route(async (req, res) => {
   let templateId = null;
   let templateBody = DEFAULT_CONTRACT_TEMPLATE;
   let templateTitle = "Sale Agreement";
+  // An uploaded Word template is filled in place, keeping its own design.
+  let templateWordPath = null;
   // No template field at all (as opposed to an explicit "built-in" choice)
   // means "use the organization's default template", when one is set and the
   // caller may use templates.
@@ -855,8 +858,11 @@ router.post("/contracts/generate", route(async (req, res) => {
     if (!String(template.body_text || "").trim()) throw new HttpError(400, "the selected template has no body text");
     templateBody = String(template.body_text);
     templateTitle = template.title || "Sale Agreement";
+    templateWordPath = templateWordFile(template);
   }
-  const unknownTemplateTokens = unknownPlaceholders(templateBody);
+  const unknownTemplateTokens = templateWordPath
+    ? await templateFileUnknownPlaceholders(fs.readFileSync(templateWordPath))
+    : unknownPlaceholders(templateBody);
   if (unknownTemplateTokens.length) {
     throw new HttpError(400, `the selected template has unknown placeholder(s): ${unknownTemplateTokens.join(", ")}`);
   }
@@ -889,7 +895,9 @@ router.post("/contracts/generate", route(async (req, res) => {
     plan: plan || {},
   });
   const renderedContractText = renderContractDocument(templateBody, values);
-  const file = await produceContractDocument({ templateBody, values, title: templateTitle, contractNumber: contract.contract_number });
+  const file = templateWordPath
+    ? await generateFromWordTemplate({ templatePath: templateWordPath, values, title: templateTitle, contractNumber: contract.contract_number })
+    : await produceContractDocument({ templateBody, values, title: templateTitle, contractNumber: contract.contract_number });
   const documentRow = await Document.create({
     project_id: contract.project_id,
     contract_id: contract.id,
@@ -904,7 +912,7 @@ router.post("/contracts/generate", route(async (req, res) => {
     mime_type: file.mime_type,
     uploaded_at: new Date().toISOString().slice(0, 19).replace("T", " "),
   });
-  await query("UPDATE documents SET body_text=$1 WHERE id=$2 AND organization_id=$3", [renderedContractText, documentRow.id, await organizationId()]);
+  await query("UPDATE documents SET body_text=$1, fill_values=$2 WHERE id=$3 AND organization_id=$4", [renderedContractText, templateWordPath ? JSON.stringify(values) : null, documentRow.id, await organizationId()]);
   // The contract points at the document it generated, which is what the contract
   // screen's Documents section and its Open/Download actions read.
   await query("UPDATE contracts SET generated_document_id=$1, template_document_id=$2 WHERE id=$3", [documentRow.id, templateId, contract.id]);
@@ -1035,7 +1043,9 @@ async function setDefaultTemplate(id) {
 router.get("/contract-templates/starter", route(async (req, res) => {
   if (!can(req.access, "access_documents")) throw new HttpError(403, "permission denied");
   const tmp = path.join(os.tmpdir(), `mkuyu-starter-${crypto.randomUUID()}.docx`);
-  await writeContractDocx({ text: DEFAULT_CONTRACT_TEMPLATE, targetPath: tmp, title: "MKUYU contract template", contractNumber: "" });
+  // The starter shows where the lawyer's signature will be placed.
+  const starterText = DEFAULT_CONTRACT_TEMPLATE.replace("Signed for and on behalf of the Seller: ______________________", "Signed for and on behalf of the Seller (Legal): {{LAWYER_SIGNATURE}}");
+  await writeContractDocx({ text: starterText, targetPath: tmp, title: "MKUYU contract template", contractNumber: "" });
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
   res.setHeader("Content-Disposition", 'attachment; filename="MKUYU-contract-template.docx"');
   res.send(fs.readFileSync(tmp));
@@ -1054,7 +1064,8 @@ router.post("/contract-templates/upload", uploadDocumentFile, route(async (req, 
     if (fileInfo.extension !== ".docx") throw new HttpError(400, "upload the contract template as a Word .docx file");
     const bodyText = templateTextFromUpload(fs.readFileSync(req.file.path), ".docx");
     if (!bodyText) throw new HttpError(400, "the Word document is empty");
-    const unknown = unknownPlaceholders(bodyText);
+    // Headers and footers count too: the whole file is filled at generation.
+    const unknown = await templateFileUnknownPlaceholders(fs.readFileSync(req.file.path));
     if (unknown.length) throw new HttpError(400, `unknown placeholder(s): ${unknown.join(", ")}. Use only the placeholders listed on the Templates screen.`);
     const title = optionalText(req.body?.title, "title", 160) || fileInfo.displayName.replace(/\.docx$/i, "");
     const created = await queryOne(
@@ -1108,7 +1119,7 @@ router.get("/contracts/:id/document-content", route(async (req, res) => {
     const client = contract.client_id ? await Client.get(contract.client_id) : null;
     bodyText = renderContractDocument(templateBody, buildContractValues({ contract, project, property, client, companyName: organization?.name || "MKUYU" }));
   }
-  res.json({ contract_id: contract.id, document_id: document.id, title: document.title, original_filename: document.original_filename, body_text: bodyText, can_edit: can(req.access, "edit") });
+  res.json({ contract_id: contract.id, document_id: document.id, title: document.title, original_filename: document.original_filename, body_text: bodyText, word_template: Boolean(document.fill_values), can_edit: can(req.access, "edit") && !document.fill_values });
 }));
 
 router.put("/contracts/:id/document-content", route(async (req, res) => {
@@ -1118,6 +1129,9 @@ router.put("/contracts/:id/document-content", route(async (req, res) => {
   if (!contract.generated_document_id) throw new HttpError(404, "This contract has no generated document");
   const document = requireRecord(await Document.get(contract.generated_document_id), "Generated document");
   if (Number(document.contract_id) !== Number(contract.id) || document.category !== "agreement") throw new HttpError(404, "The generated document is not linked to this contract");
+  // A contract produced on an uploaded Word template carries that template's
+  // design; retyping it here would throw the design away.
+  if (document.fill_values) throw new HttpError(409, "This contract was produced on your Word template. To change its wording, download it, edit it in Word and attach the revised copy with Upload document.");
   const bodyText = requiredText(req.body?.body_text, "body_text", 100000);
   if (/\{\{\s*[A-Z0-9_]+\s*\}\}/.test(bodyText)) throw new HttpError(400, "replace every unresolved {{PLACEHOLDER}} before saving the contract");
 

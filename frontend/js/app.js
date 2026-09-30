@@ -2825,16 +2825,16 @@ function renderTemplates() {
       <div class="panel-head"><div><h2 class="panel-title">How contract templates work</h2><div class="panel-note">Every new contract is generated from the default template, unless another is chosen.</div></div><a class="btn btn-small" href="#" data-action="template-starter">${icon("file")}Download starter template</a></div>
       <div class="panel-body">
         <ol class="guide-steps">
-          <li><strong>Download</strong> the starter template (or use your own Word agreement).</li>
-          <li><strong>Edit it in Word.</strong> Where client or price details go, type a placeholder such as <code>{{CLIENT_NAME}}</code> or <code>{{FINAL_PRICE}}</code>.</li>
+          <li><strong>Open your company's Word agreement</strong> (with your letterhead and logo), or download the starter template.</li>
+          <li><strong>Type placeholders</strong> where the contract details go, e.g. <code>{{CLIENT_NAME}}</code>, <code>{{PROPERTY_NAME}}</code>, <code>{{FINAL_PRICE}}</code>. Put <code>{{LAWYER_SIGNATURE}}</code> where the lawyer signs.</li>
           <li><strong>Upload</strong> the .docx below and tick <em>Use as default</em>.</li>
-          <li>When anyone generates a contract, the placeholders are filled in automatically, and Legal's signature is added at Legal approval.</li>
+          <li>Every new contract is produced <strong>on your Word file</strong>: same design, with the client, property and price details filled in. At Legal approval the lawyer's signature is placed on the <code>{{LAWYER_SIGNATURE}}</code> spot.</li>
         </ol>
         ${placeholders ? `<details class="placeholder-list"><summary>Placeholders you can use (${(state.placeholders || []).length})</summary><ul>${placeholders}</ul></details>` : ""}
       </div>
     </div>
     ${mayCreate ? `<form id="template-upload-form" class="panel template-upload">
-      <div class="panel-head"><div><h2 class="panel-title">Upload a template</h2><div class="panel-note">Word .docx only. Wording and headings are kept; the document is produced in the MKUYU style.</div></div></div>
+      <div class="panel-head"><div><h2 class="panel-title">Upload a template</h2><div class="panel-note">Word .docx only. Your layout is kept exactly: letterhead, logo, fonts, tables, headers and footers. Only the <code>{{PLACEHOLDERS}}</code> are filled in.</div></div></div>
       <div class="panel-body form-grid">
         <div class="field full"><label for="template-file">Template file (.docx)</label><input id="template-file" name="file" type="file" accept=".docx" required></div>
         <div class="field"><label for="template-title">Template name</label><input id="template-title" name="title" maxlength="160" placeholder="e.g. MKUYU Sale Agreement 2026"></div>
@@ -3987,7 +3987,8 @@ async function openContractDocumentEditor(contractId) {
     modal.dataset.contractId = String(contractId);
     modal.classList.add("modal-wide");
     modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(document.title || "Contract document")}</h2><p class="modal-sub">${escapeHtml(document.original_filename || "Generated contract")}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
-      <div class="field"><label for="contract-document-body">Contract contents</label><textarea id="contract-document-body" class="contract-document-editor"${canEditDocument ? "" : " readonly aria-readonly=\"true\""}>${escapeHtml(document.body_text || "")}</textarea></div>
+      ${document.word_template ? `<div class="notice">This contract was produced on your Word template, so its design is kept in the downloaded file. To change the wording, download it, edit it in Word, then attach the revised copy with <strong>Upload document</strong>.</div>` : ""}
+      <div class="field"><label for="contract-document-body">${document.word_template ? "Contract wording (preview)" : "Contract contents"}</label><textarea id="contract-document-body" class="contract-document-editor"${canEditDocument ? "" : " readonly aria-readonly=\"true\""}>${escapeHtml(document.body_text || "")}</textarea></div>
       <div class="row-actions"><button type="button" class="btn" data-action="close-modal">Close</button><button type="button" class="btn btn-soft" data-action="download-generated-document" data-id="${document.document_id}" data-filename="${escapeHtml(document.original_filename || "contract.docx")}">Download</button>${canEditDocument ? `<button type="button" class="btn btn-primary" data-action="save-contract-document" data-id="${contractId}">Save and close</button>` : ""}</div>`;
     modalBackdrop.hidden = false;
     modal.querySelector("#contract-document-body")?.focus();

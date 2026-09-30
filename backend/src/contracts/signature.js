@@ -15,6 +15,7 @@ import fs from "node:fs";
 import { query, queryOne } from "../db.js";
 import { documentUploadsDir, profileUploadsDir, removeStoredFile, resolveStoredFile } from "../uploads.js";
 import { generateContractDocument, formatDocumentDate } from "./workflow.js";
+import { generateFromWordTemplate, templateWordFile } from "./docxFill.js";
 
 /** The signature block for a contract, or null when it has none. */
 export async function contractSignature(contract) {
@@ -46,9 +47,20 @@ export async function signContractDocument(contractId, userId) {
   );
   if (!contract?.generated_document_id) return false;
   const document = await queryOne("SELECT * FROM documents WHERE id=$1 AND category='agreement'", [contract.generated_document_id]);
-  if (!document?.body_text) return false;
   const signature = await contractSignature(contract);
-  const file = await generateContractDocument({ text: document.body_text, title: document.title || "Sale Agreement", contractNumber: contract.contract_number, signature });
+  // Produced on an uploaded Word template: re-fill that same file with the
+  // same values, now with the signature in the {{LAWYER_SIGNATURE}} spot.
+  const template = document?.fill_values && contract.template_document_id
+    ? await queryOne("SELECT stored_name, original_filename FROM documents WHERE id=$1 AND category='template'", [contract.template_document_id])
+    : null;
+  const templatePath = templateWordFile(template);
+  let file;
+  if (templatePath) {
+    file = await generateFromWordTemplate({ templatePath, values: document.fill_values, title: document.title || "Sale Agreement", contractNumber: contract.contract_number, signature });
+  } else {
+    if (!document?.body_text) return false;
+    file = await generateContractDocument({ text: document.body_text, title: document.title || "Sale Agreement", contractNumber: contract.contract_number, signature });
+  }
   await query(
     "UPDATE documents SET original_filename=$1, stored_name=$2, file_size=$3, mime_type=$4, uploaded_at=NOW() WHERE id=$5",
     [file.original_filename, file.stored_name, file.file_size, file.mime_type, document.id],

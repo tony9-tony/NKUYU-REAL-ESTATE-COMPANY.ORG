@@ -7,10 +7,9 @@
 // a placeholder Word split across formatting runs ("{{CLIENT_" + "NAME}}")
 // is reassembled before the placeholders are checked.
 //
-// Headings are kept as Markdown-style "#"/"##" lines, which is the format the
-// contract document writer already understands. Other formatting (fonts,
-// tables, logos) is not carried over: the template supplies the WORDING, and
-// the system produces the finished document in the MKUYU house style.
+// This text is the template's searchable wording and the on-screen preview.
+// The contract itself is produced on the uploaded Word file (see docxFill.js),
+// so the template's own design - letterhead, logo, fonts, tables - is kept.
 // ---------------------------------------------------------------------------
 import zlib from "node:zlib";
 
