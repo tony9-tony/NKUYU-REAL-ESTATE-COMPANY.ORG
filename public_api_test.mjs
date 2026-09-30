@@ -160,6 +160,34 @@ try {
   const csTasks = (await call("/org/tasks?box=mine", { as: cs })).body;
   check(csTasks.some((t) => t.id === handoff.body.id), "Customer Service sees the assignment in their Assignments");
 
+  console.log("\n=== Requests: one request followed from arrival to client ===");
+  const leadId = Number(sent.body.reference.slice(2));
+  const stageOf = async () => (await call("/org/requests", { as: officer })).body.find((r) => r.id === leadId);
+  const requests = (await call("/org/requests", { as: officer })).body;
+  check(Array.isArray(requests) && requests.some((r) => r.id === leadId), "the website request is listed under Requests");
+  check(requests.every((r) => r.source === "website"), "Requests holds only Buy/Rent website requests (no contact enquiries)");
+  check((await stageOf())?.property_name === `Villa ${tag}` && !(await stageOf())?.task_id, "it names the property and has no hand-off yet");
+  const officerId = created.body.id;
+  const task = await call("/org/tasks", { method: "POST", as: officer, body: { title: "Contact Asha Test (buy request)", assigned_to: csId, reviewer_id: officerId, priority: "high" } });
+  check(task.status === 201, `assigned Customer Service with Sales as reviewer (${task.status})`);
+  check((await call(`/org/requests/${leadId}/handed-off`, { method: "POST", as: officer, body: { task_id: 999999 } })).status === 400, "a hand-off cannot point at an unknown task");
+  check((await call(`/org/requests/${enquiryLead.id}/handed-off`, { method: "POST", as: officer, body: { task_id: task.body.id } })).status === 404, "a contact enquiry is not a request");
+  const linked = await call(`/org/requests/${leadId}/handed-off`, { method: "POST", as: officer, body: { task_id: task.body.id } });
+  check(linked.status === 200 && linked.body.status === "handed_off", `the request is tied to its Customer Service task (${linked.status})`);
+  let row = await stageOf();
+  check(row?.task_status === "assigned" && row?.task_assignee && Number(row?.task_assignee_id) === Number(csId), "Requests shows who in Customer Service has it");
+  const act = (who, action) => call(`/org/tasks/${task.body.id}/actions`, { method: "POST", as: who, body: { action } });
+  check((await act(cs, "start")).status === 200 && (await act(cs, "submit")).status === 200, "Customer Service contacts the customer and reports back");
+  check((await stageOf())?.task_status === "submitted", "Requests shows the report waiting for Sales");
+  check((await act(officer, "begin_review")).status === 200 && (await act(officer, "approve")).status === 200, "Sales reviews and approves the report");
+  check((await stageOf())?.task_status === "approved", "Requests shows the customer as contacted");
+  const client = await call(`/org/leads/${leadId}/convert`, { method: "POST", as: officer, body: {} });
+  check(client.status === 201, `Sales converts the request into a client (${client.status})`);
+  row = await stageOf();
+  check(Number(row?.client_id) === Number(client.body.id), "Requests shows it became a client");
+  check((await call(`/org/requests/${leadId}/handed-off`, { method: "POST", as: officer, body: { task_id: task.body.id } })).status === 409, "a request that is already a client cannot be handed off again");
+  check((await call("/org/requests", { as: await signIn("finance@demo.mkuyu.local") })).status === 403, "staff without the Leads module (Finance) cannot read Requests");
+
   console.log("\n=== boundaries ===");
   const cors = await call("/public/properties", { auth: false, headers: { Origin: "http://localhost:5500" } });
   check(cors.status === 200 && cors.headers.get("access-control-allow-origin") === "http://localhost:5500", "the public website's origin may read the public API");

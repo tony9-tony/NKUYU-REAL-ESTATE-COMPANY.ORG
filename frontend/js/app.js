@@ -249,6 +249,7 @@ const viewMeta = {
   contracts: ["Contracts", "Every agreement and where it sits in the approval workflow"],
   debts: ["Payments & debts", "Installments, balances, recorded payments and reminders"],
   appointments: ["Appointments", "Viewings, calls, meetings and inspections"],
+  requests: ["Requests", "Buy and Rent requests from the website, from arrival to client"],
   leads: ["Leads", "Enquiries and prospects, before they become clients"],
   documents: ["Documents", "Agreements, titles, receipts, reports and permits"],
   templates: ["Contract templates", "The Word files every new contract is produced on"],
@@ -873,6 +874,8 @@ async function refresh() {
   updateNavigation();
   render();
   refreshAttention();
+  // Keeps the Requests count in the navigation current.
+  if (canModule("leads") && can("view")) reloadRequests().then(() => { updateNavigation(); if (state.view === "requests") render(); });
 }
 
 function applyWorkspace(payload) {
@@ -975,6 +978,9 @@ const NAV_ITEMS = [
   { view: "properties", label: "Properties", icon: "home", module: "properties", permission: "view", group: "Business" },
   { view: "projects", label: "Projects", icon: "building", module: "projects", permission: "view", group: "Business" },
   { view: "clients", label: "Clients", icon: "users", module: "clients", permission: "view", group: "Business" },
+  // Website Buy/Rent requests, followed from arrival to client. Same module
+  // and permission as Leads: it is a narrower view of the same records.
+  { view: "requests", label: "Requests", icon: "inbox", module: "leads", permission: "view", group: "Business" },
   { view: "leads", label: "Leads", icon: "spark", module: "leads", permission: "view", group: "Business" },
   { view: "appointments", label: "Appointments", icon: "calendar", module: "appointments", permission: "view", group: "Business" },
   { view: "contracts", label: "Contracts", icon: "contract", module: "contracts", permission: "view", group: "Contracts & records" },
@@ -1025,6 +1031,8 @@ function updateNavigation() {
       // It is never derived from a list the browser happens to hold, so it is
       // correct after a refresh and cannot include another department's work.
       assignments: Number((state.attention || {}).total || 0),
+      // New requests and reports waiting for Sales.
+      requests: (state.requests || []).filter((row) => ["new", "reported"].includes(requestStage(row))).length,
     };
     let lastGroup = null;
     nav.innerHTML = allowed.map((item) => {
@@ -1340,6 +1348,8 @@ const TASK_LINK_CHOICES = [
  * means no reviewer is offered; the assignee list is the one that must succeed.
  */
 async function openTaskModal(prefill = {}) {
+  // A hand-off remembers its request, so the new task is tied to it on save.
+  state.pendingHandOff = prefill.requestId || null;
   // Only people the SERVER considers assignable may be offered. A failed or
   // malformed list is treated as "nobody", never as "everybody".
   const loadList = async (path) => {
@@ -1381,7 +1391,7 @@ async function openTaskModal(prefill = {}) {
       <div class="form-actions full"><button type="button" class="btn" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="submit">Assign work</button></div>
     </form>`;
   // Hand-offs (e.g. a website lead to Customer Service) arrive pre-filled.
-  if (Object.keys(prefill).length) {
+  if (prefill.title || prefill.description) {
     const form = document.getElementById("task-form");
     const set = (name, value) => { const el = form?.querySelector(`[name="${name}"]`); if (el && value) el.value = value; };
     set("title", prefill.title);
@@ -1397,7 +1407,7 @@ async function openTaskModal(prefill = {}) {
 
 /** A website lead handed to Customer Service to contact the customer. */
 function handOffLead(leadId) {
-  const lead = (state.organization.leads || []).find((row) => String(row.id) === String(leadId));
+  const lead = [...(state.requests || []), ...(state.organization.leads || [])].find((row) => String(row.id) === String(leadId));
   if (!lead) return;
   const means = { phone: "Phone call", whatsapp: "WhatsApp", email: "Email" }[lead.preferred_contact] || "Phone call";
   const lines = [
@@ -1414,6 +1424,7 @@ function handOffLead(leadId) {
     `Please contact the customer by ${means.toLowerCase()} and report back. (Lead W-${lead.id})`,
   ].filter((line) => line !== null);
   openTaskModal({
+    requestId: lead.source === "website" ? lead.id : null,
     heading: "Hand to Customer Service",
     title: `Contact ${lead.name}${lead.service ? ` (${lead.service === "rent" ? "rent" : "buy"} request)` : ""}`,
     description: lines.join("\n"),
@@ -2786,7 +2797,8 @@ function renderClients() {
 // existing #lead-form submit and convert-lead handlers, so nothing new is
 // authorized here - the view is only offered to holders of the leads module.
 function renderLeads() {
-  const leads = state.organization.leads || [];
+  // Website Buy/Rent requests have their own view (Requests).
+  const leads = (state.organization.leads || []).filter((lead) => lead.source !== "website");
   const status = state.filters.status || "";
   const statuses = [...new Set(leads.map((lead) => lead.status).filter(Boolean))].sort();
   const rows = leads.filter((lead) => !status || lead.status === status);
@@ -2824,6 +2836,79 @@ function renderLeads() {
     ${rows.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Lead</th><th>Source</th><th>Status</th><th>Received</th><th>Interest</th><th class="align-right">Next step</th></tr></thead><tbody>${list}</tbody></table></div>` : `<div class="panel">${emptyState(status ? "No leads with this status" : "No leads yet", status ? "Try another status." : "Enquiries from the website, referrals and walk-ins are recorded here, then converted into clients.", { iconName: "spark" })}</div>`}`;
   const lead = document.getElementById("lead-form");
   if (lead) markRequiredFields(lead);
+}
+
+// Requests: every Buy/Rent request from the website. Its stage follows the
+// Customer Service task it was handed to, so the list shows at a glance what
+// is new, who is contacting the customer, and which reports wait for Sales.
+const REQUEST_STAGES = [
+  ["new", "New", "open"],
+  ["with_cs", "With Customer Service", "task-in-progress"],
+  ["reported", "Report waiting for you", "submitted"],
+  ["contacted", "Customer contacted", "approved"],
+  ["client", "Became a client", "converted"],
+];
+
+function requestStage(row) {
+  if (row.client_id) return "client";
+  if (!row.task_id || row.task_status === "cancelled") return "new";
+  if (["submitted", "under_review"].includes(row.task_status)) return "reported";
+  if (["approved", "completed"].includes(row.task_status)) return "contacted";
+  return "with_cs";
+}
+
+async function loadRequests() {
+  state.requestsRequested = true;
+  try { state.requests = await api("/org/requests"); }
+  catch (error) { state.requests = []; if (state.view === "requests") showToast(error.message || "Unable to load requests."); }
+}
+
+function reloadRequests() {
+  state.requests = null;
+  state.requestsRequested = false;
+  return loadRequests();
+}
+
+function renderRequests() {
+  if (!state.requests) { content.innerHTML = `<div class="panel">${emptyState("Loading requests", "", { iconName: "inbox", compact: true })}</div>`; return; }
+  const all = state.requests;
+  const stage = state.requestStage || "";
+  const rows = all.filter((row) => !stage || requestStage(row) === stage);
+  const mayHandOff = can("assign_tasks");
+  const mayCreate = can("create");
+  const means = { phone: "Phone", whatsapp: "WhatsApp", email: "Email" };
+  const count = (key) => all.filter((row) => requestStage(row) === key).length;
+  const tabs = [["", "All", all.length], ...REQUEST_STAGES.map(([key, label]) => [key, label, count(key)])]
+    .map(([key, label, n]) => `<button class="seg-btn${stage === key ? " active" : ""}" data-action="request-stage" data-stage="${key}" aria-pressed="${stage === key}">${escapeHtml(label)} (${n})</button>`).join("");
+  const list = rows.map((row) => {
+    const key = requestStage(row);
+    const [, label, tone] = REQUEST_STAGES.find(([k]) => k === key);
+    const who = row.task_assignee && key !== "new" && key !== "client" ? `<span class="cell-sub">Customer Service: ${escapeHtml(row.task_assignee)}</span>` : "";
+    const cancelled = !row.client_id && row.task_status === "cancelled" ? `<span class="cell-sub">The last hand-off was cancelled</span>` : "";
+    const openTaskBtn = (primary) => row.task_id ? `<button class="btn btn-small${primary ? " btn-primary" : ""}" data-action="open-task" data-id="${row.task_id}">${primary ? "Review report" : "Open assignment"}</button>` : "";
+    const handOff = mayHandOff ? `<button class="btn btn-small btn-primary" data-action="hand-off-lead" data-id="${row.id}">Hand to Customer Service</button>` : "";
+    const convert = (primary) => mayCreate ? `<button class="btn btn-small${primary ? " btn-primary" : ""}" data-action="convert-lead" data-id="${row.id}" title="Register this customer as a client (prospect)">Convert to client</button>` : "";
+    const next = {
+      new: handOff + convert(false),
+      with_cs: openTaskBtn(false),
+      reported: openTaskBtn(true),
+      contacted: convert(true) + openTaskBtn(false),
+      client: `<span class="muted cell-plain">Continue under Clients</span>`,
+    }[key];
+    return `<tr data-searchable>
+      <td><span class="cell-main">${escapeHtml(row.name)}</span><span class="cell-sub">${escapeHtml([row.phone, row.email].filter(Boolean).join(" · ") || "No contact details")}</span><span class="cell-sub">W-${row.id}</span></td>
+      <td>${row.service ? badge(row.service === "rent" ? "Rent" : "Buy", "open") : ""}<span class="cell-sub">${escapeHtml(row.property_name || "Property no longer listed")}</span></td>
+      <td>${row.budget ? `TZS ${escapeHtml(Number(row.budget).toLocaleString("en-US"))}` : "—"}<span class="cell-sub">Contact by ${escapeHtml(means[row.preferred_contact] || "Phone")}</span></td>
+      <td>${formatDate(row.created_at)}</td>
+      <td>${badge(label, tone)}${who}${cancelled}</td>
+      <td class="cell-note">${escapeHtml(String(row.notes || "").replace(/^Website request to [^\n]*\n*/, "") || "—")}</td>
+      <td class="align-right"><div class="row-actions">${next}</div></td>
+    </tr>`;
+  }).join("");
+  content.innerHTML = `
+    <div class="toolbar"><div class="toolbar-filters"><div class="segmented" role="group" aria-label="Request stages">${tabs}</div></div><div class="toolbar-end"><span class="toolbar-count">${rows.length} request${rows.length === 1 ? "" : "s"}</span></div></div>
+    ${rows.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Customer</th><th>Wants</th><th>Budget</th><th>Received</th><th>Stage</th><th>Message</th><th class="align-right">Next step</th></tr></thead><tbody>${list}</tbody></table></div>`
+      : `<div class="panel">${emptyState(stage ? "No requests at this stage" : "No requests yet", stage ? "Try another stage." : "When a visitor asks to buy or rent a property on the website, the request arrives here.", { iconName: "inbox" })}</div>`}`;
 }
 
 function renderAppointments() {
@@ -3074,6 +3159,10 @@ function render() {
   if (state.view === "debts") renderDebts();
   if (state.view === "appointments") renderAppointments();
   if (state.view === "leads") renderLeads();
+  if (state.view === "requests") {
+    renderRequests();
+    if (!state.requests && !state.requestsRequested) loadRequests().then(() => { updateNavigation(); if (state.view === "requests") render(); });
+  }
   if (state.view === "documents") renderDocuments();
   if (state.view === "templates") renderTemplatesPage();
   if (state.view === "reports") renderReports();
@@ -3704,9 +3793,17 @@ async function handleFormSubmit(event) {
       payload.linked_record_id = Number(data.linked_record_id);
     }
     try {
-      await api("/org/tasks", { method: "POST", body: JSON.stringify(payload) });
+      const created = await api("/org/tasks", { method: "POST", body: JSON.stringify(payload) });
       modalBackdrop.hidden = true;
-      showToast("Work assigned.");
+      const requestId = state.pendingHandOff;
+      state.pendingHandOff = null;
+      if (requestId && created?.id) {
+        try { await api(`/org/requests/${requestId}/handed-off`, { method: "POST", body: JSON.stringify({ task_id: created.id }) }); }
+        catch (error) { showToast(error.message || "Assigned, but the request could not be updated."); }
+        await reloadRequests();
+        if (state.view === "requests") render();
+      }
+      showToast(requestId ? "Handed to Customer Service." : "Work assigned.");
     } catch (error) {
       showToast(error.message || "Unable to assign that work.");
       return;
@@ -4126,6 +4223,7 @@ document.getElementById("primary-nav").addEventListener("click", (event) => {
   if (!item) return;
   state.view = item.dataset.view;
   if (state.view === "templates") { state.templatesLoaded = false; state.templatesRequested = false; }
+  if (state.view === "requests") { state.requests = null; state.requestsRequested = false; }
   state.filters = { project: "", type: "", status: "", debtStatus: "", propertyStatus: "", clientStatus: "", appointmentStatus: "", documentStatus: "", documentSearch: "", sort: "" };
   // On a small screen the navigation is a drawer: choosing a destination closes it.
   setNavOpen(false);
@@ -4412,6 +4510,7 @@ document.addEventListener("click", async (event) => {
   // task and person; a rejected call simply reports the refusal.
   if (action === "new-task") openTaskModal();
   if (action === "hand-off-lead") handOffLead(target.dataset.id);
+  if (action === "request-stage") { state.requestStage = target.dataset.stage || ""; render(); }
   if (action === "open-task") openTask(id);
   if (action === "task-action") submitTaskAction(id, target.dataset.taskAction);
   if (action === "task-box") {
@@ -4451,7 +4550,7 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "reset-password") resetPassword(id);
   if (action === "convert-lead") {
-    try { await api(`/org/leads/${id}/convert`, { method: "POST", body: "{}" }); await refresh(); showToast("Lead converted to client."); }
+    try { await api(`/org/leads/${id}/convert`, { method: "POST", body: "{}" }); await refresh(); if (state.requests) { await reloadRequests(); if (state.view === "requests") render(); } showToast("Converted to client."); }
     catch (error) { showToast(error.message || "Unable to convert lead."); }
   }
   if (action === "decide-approval") {

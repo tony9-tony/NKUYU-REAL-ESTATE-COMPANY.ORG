@@ -762,6 +762,28 @@ router.get("/leads", requireModuleAccess("leads"), async(req,res,next)=>{try{
   res.json({data:paged.rows,pagination:paged.pagination});
 }catch(e){next(e);}});
 router.post("/leads", requireModuleAccess("leads"), requirePermission("create"), async(req,res,next)=>{try{const own=ownershipFields(req.access);const r=await queryOne("INSERT INTO leads(organization_id,name,email,phone,source,status,notes,assigned_to,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *",[await organizationId(),text(req.body?.name,"name"),req.body?.email||null,req.body?.phone||null,req.body?.source||null,req.body?.status||"new",req.body?.notes||null,req.body?.assigned_to||req.user.id,own.owner_id,own.created_by,own.department_id,own.visibility]);await audit(req,"created","lead",r.id);res.status(201).json(r);}catch(e){next(e);}});
+// Requests: the website's Buy/Rent requests (leads with source 'website'),
+// each with the Customer Service task it was handed to, so Sales can follow it
+// from arrival to client. Same module and record scope as Leads.
+router.get("/requests", requireModuleAccess("leads"), async(req,res,next)=>{try{
+  const values=[await organizationId()];const visible=scopeCondition("l","lead",req.access,values);
+  res.json(await rows(`SELECT l.*, p.name AS property_name, t.status AS task_status, t.assigned_to AS task_assignee_id, u.display_name AS task_assignee, t.submitted_at AS task_submitted_at, t.approved_at AS task_approved_at
+    FROM leads l LEFT JOIN properties p ON p.id=l.property_id LEFT JOIN tasks t ON t.id=l.task_id LEFT JOIN users u ON u.id=t.assigned_to
+    WHERE l.organization_id=$1 AND l.source='website' AND ${visible} ORDER BY l.created_at DESC LIMIT 500`,values));
+}catch(e){next(e);}});
+// Records which Customer Service task a request was handed to. The task must
+// already exist and have been assigned by the caller (POST /tasks decided
+// whether they may assign it); this only ties the two together.
+router.post("/requests/:id/handed-off", requireModuleAccess("leads"), requirePermission("assign_tasks"), async(req,res,next)=>{try{
+  const leadId=id(req.params.id,"lead_id");const taskId=id(req.body?.task_id,"task_id");const org=await organizationId();
+  const values=[leadId,org];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND l.source='website' AND ${scopeCondition("l","lead",req.access,values)}`,values);
+  if(!lead)return res.status(404).json({error:"request not found"});
+  if(lead.client_id)return res.status(409).json({error:"this request is already a client"});
+  const task=await queryOne("SELECT id FROM tasks WHERE id=$1 AND organization_id=$2 AND assigned_by=$3",[taskId,org,req.user.id]);
+  if(!task)return res.status(400).json({error:"task not found"});
+  const r=await queryOne("UPDATE leads SET task_id=$1,handed_off_at=NOW(),status='handed_off' WHERE id=$2 RETURNING *",[taskId,leadId]);
+  await audit(req,"handed_off","lead",leadId,{task_id:taskId});res.json(r);
+}catch(e){next(e);}});
 // Conversion registers a person as a client record; it is NOT a signature. The
 // record is therefore created as a PROSPECT ('lead'), so the completed-client rule
 // (a client must have a contract) is never violated by converting a lead. Sales

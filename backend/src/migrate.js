@@ -293,6 +293,10 @@ async function migratePublicListing() {
     "property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL",
     "preferred_contact TEXT",
   ]) await query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS ${column}`);
+  // A Buy/Rent request is followed through the Customer Service task it was
+  // handed to (Requests view): the task's progress is the request's stage.
+  await query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL");
+  await query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS handed_off_at TIMESTAMPTZ");
 }
 
 /**
