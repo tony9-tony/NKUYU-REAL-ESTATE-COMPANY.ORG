@@ -265,6 +265,9 @@ router.post("/:id/actions", route(async (req, res) => {
   }
   if (action === "submit") {
     if (Number(task.assigned_to) !== Number(req.user.id)) return res.status(403).json({ error: "only the assignee may submit this task" });
+    const request = await queryOne("SELECT outcome FROM leads WHERE task_id=$1 ORDER BY id LIMIT 1", [taskId]);
+    if (request && !request.outcome) return res.status(400).json({ error: "report the customer outcome first (Report outcome to Sales)" });
+    if (!request && !comment) return res.status(400).json({ error: "write your report before submitting" });
     return applyTransition(req, res, task, from, access, "submitted", { submitted_by: req.user.id, submitted_at: stamp }, "task_submitted", comment);
   }
   if (action === "begin_review") {

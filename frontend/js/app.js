@@ -1241,6 +1241,19 @@ const REQUEST_OUTCOMES = {
   unreachable: "Could not reach the customer",
 };
 
+/**
+ * The written part of a task: the assignee's report (sent with Submit) and
+ * notes anyone on the task can add. Shown while the task is still open.
+ */
+function taskNoteBox(task) {
+  if (["completed", "cancelled"].includes(task.status)) return "";
+  const me = Number(state.organization.me?.user?.id);
+  const party = [task.assigned_to, task.assigned_by, task.reviewer_id, task.created_by].map(Number).includes(me);
+  if (!party) return "";
+  const reporting = (task.available_actions || []).includes("submit") && !task.request_id;
+  return `<div class="field" style="margin-top:12px"><label for="task-note">${reporting ? "Your report <span class=\"req\">*</span>" : "Note"}</label><textarea id="task-note" rows="3" maxlength="2000" placeholder="${reporting ? "What was done, what you found, what happens next" : "Add a note for the others on this task"}"></textarea>${reporting ? `<p class="muted" style="margin:.3rem 0 0">Sent with Submit to ${escapeHtml(task.reviewer_name || task.assigned_by_name || "the reviewer")}.</p>` : ""}</div>`;
+}
+
 /** One line describing what Customer Service reported on a request. */
 function outcomeText(outcome, note, when, type) {
   if (!outcome) return "";
@@ -1365,7 +1378,8 @@ async function openTask(id) {
     </div>
     ${task.description ? `<p class="task-instructions">${escapeHtml(task.description)}</p>` : ""}
     ${task.request_outcome ? `<div class="panel" style="margin-top:12px"><span class="toolbar-label">Outcome reported by Customer Service</span><div>${outcomeText(task.request_outcome, task.request_outcome_note, task.request_appointment_at, task.request_appointment_type)}</div>${task.request_outcome === "appointment" && !task.request_appointment_id ? `<p class="muted" style="margin:.4rem 0 0">Approving books this appointment and registers the customer as a client.</p>` : ""}</div>` : ""}
-    <div class="row-actions" style="margin:14px 0">${taskActionButtons(task)}</div>
+    ${taskNoteBox(task)}
+    <div class="row-actions" style="margin:14px 24px">${taskActionButtons(task)}${taskNoteBox(task) ? `<button class="btn btn-soft btn-small" data-action="add-task-note" data-id="${task.id}">Save note only</button>` : ""}</div>
     ${(task.available_actions || []).includes("request_changes") ? `<div class="field"><label for="task-review-comment">Review comment (required to request changes)</label><textarea id="task-review-comment" name="comment" rows="2" placeholder="What must change?"></textarea></div>` : ""}
     ${comments ? `<div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>Author</th><th>Comment</th><th>When</th></tr></thead><tbody>${comments}</tbody></table></div>` : ""}
     ${history ? `<div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>When</th><th>Who</th><th>Event</th><th>State change</th></tr></thead><tbody>${history}</tbody></table></div>` : ""}`;
@@ -1534,6 +1548,13 @@ function handOffLead(leadId) {
 
 async function submitTaskAction(taskId, action) {
   const body = { action };
+  if (action === "submit") {
+    const field = document.getElementById("task-note");
+    if (!field || modalBackdrop.hidden) { await openTask(taskId); showToast("Write your report, then press Submit."); return; }
+    const report = field.value.trim();
+    if (!report) { showToast("Write your report before submitting."); field.focus({ preventScroll: true }); return; }
+    body.comment = report;
+  }
   if (action === "request_changes") {
     const field = document.getElementById("task-review-comment");
     const comment = field ? field.value.trim() : "";
@@ -4783,6 +4804,12 @@ document.addEventListener("click", async (event) => {
   if (action === "rename-department") openRenameDepartment(id);
   if (action === "change-staff-department") openStaffDepartment(id);
   if (action === "request-outcome") { modalBackdrop.hidden = true; openRequestOutcome(id); }
+  if (action === "add-task-note") {
+    const text = document.getElementById("task-note")?.value.trim();
+    if (!text) { showToast("Write the note first."); return; }
+    try { await api(`/org/tasks/${id}/comments`, { method: "POST", body: { body: text } }); showToast("Note saved."); openTask(id); }
+    catch (error) { showToast(error.message || "Unable to save the note."); }
+  }
   if (action === "toggle-department") {
     try { await api(`/org/departments/${id}`, { method: "PUT", body: JSON.stringify({ active: target.dataset.active === "1" }) }); await refresh(); showToast(target.dataset.active === "1" ? "Department activated." : "Department deactivated."); }
     catch (error) { showToast(error.message || "Unable to update the department."); }

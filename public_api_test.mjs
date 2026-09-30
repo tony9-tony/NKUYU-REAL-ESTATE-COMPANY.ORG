@@ -186,7 +186,9 @@ try {
   let row = await stageOf();
   check(row?.task_status === "assigned" && row?.task_assignee && Number(row?.task_assignee_id) === Number(csId), "Requests shows who in Customer Service has it");
   const act = (who, action) => call(`/org/tasks/${task.body.id}/actions`, { method: "POST", as: who, body: { action } });
-  check((await act(cs, "start")).status === 200 && (await act(cs, "submit")).status === 200, "Customer Service contacts the customer and reports back");
+  check((await act(cs, "start")).status === 200, "Customer Service starts the task");
+  check((await act(cs, "submit")).status === 400, "a customer request cannot be submitted without its outcome report");
+  check((await call(`/org/tasks/${task.body.id}/outcome`, { method: "POST", as: cs, body: { outcome: "interested", note: "Will visit next month" } })).status === 200, "Customer Service contacts the customer and reports back");
   check((await stageOf())?.task_status === "submitted", "Requests shows the report waiting for Sales");
   check((await act(officer, "begin_review")).status === 200 && (await act(officer, "approve")).status === 200, "Sales reviews and approves the report");
   check((await stageOf())?.task_status === "approved", "Requests shows the customer as contacted");

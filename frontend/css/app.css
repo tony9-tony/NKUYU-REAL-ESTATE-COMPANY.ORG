@@ -1538,6 +1538,8 @@ td .row-actions { flex-wrap: nowrap; }
 .modal > .modal-head + :not(.modal-body):not(.stepper):not(.form-actions):not(#record-form) { margin-top: 20px; }
 .modal > :not(.modal-head):not(.modal-body):not(.stepper):not(.form-actions):not(#record-form):last-child { margin-bottom: 24px; }
 .modal > * + .table-wrap, .modal > * + .section, .modal > * + .field { margin-top: 14px; }
+/* Side margins + width:100% would overflow the modal (history table in a task). */
+.modal > .table-wrap, .modal > .row-actions { width: auto; }
 .form-actions {
   display: flex;
   flex-wrap: wrap;

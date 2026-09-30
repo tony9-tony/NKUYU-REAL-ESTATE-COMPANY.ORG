@@ -143,7 +143,9 @@ try {
   check(otherSubmit.status === 403, "9a. only the assignee may submit (403)");
   const foreignSubmit = await act(sessions.finance, taskId, { action: "submit" });
   check(foreignSubmit.status === 403 || foreignSubmit.status === 404, "9b. another user cannot submit somebody else's task");
-  const submitted = await act(sessions.sales, taskId, { action: "submit" });
+  const bare = await act(sessions.sales, taskId, { action: "submit" });
+  check(bare.status === 400, `10a. Submit without a written report is refused (${bare.status})`);
+  const submitted = await act(sessions.sales, taskId, { action: "submit", comment: "Report attached: done." });
   check(submitted.status === 200 && submitted.payload.status === "submitted", "9c. the assigned user can submit");
   check(submitted.payload.submitted_at !== null && Number(submitted.payload.submitted_by) === Number(ids.sales), "9d. submitted_by and submitted_at are server-stamped");
   check((submitted.payload.available_actions || []).includes("submit") === false, "10. the Submit action disappears once submitted (backend-authorized)");
@@ -172,7 +174,7 @@ try {
   // ---- 17-18. approval authority and self-approval --------------------------
   console.log("\n=== 17-18. approval authority ===");
   await act(sessions.sales, taskId, { action: "start" });
-  await act(sessions.sales, taskId, { action: "submit" });
+  await act(sessions.sales, taskId, { action: "submit", comment: "Resubmitted with the changes." });
   await act(sessions.salesManager, taskId, { action: "begin_review" });
   check((await act(sessions.sales, taskId, { action: "approve" })).status === 403, "17. an unauthorized user cannot approve (403)");
   // A manager outside the department is refused twice over: the task is not even
@@ -190,7 +192,7 @@ try {
   const selfReview = await assign(sessions.md, { title: "MD reviews own work", assigned_to: ids.md, priority: "low" });
   check(selfReview.status === 201, "18c. the MD may assign work organization-wide");
   await act(sessions.md, selfReview.payload.id, { action: "start" });
-  await act(sessions.md, selfReview.payload.id, { action: "submit" });
+  await act(sessions.md, selfReview.payload.id, { action: "submit", comment: "Done." });
   check((await act(sessions.md, selfReview.payload.id, { action: "begin_review" })).status === 403, "18d. a user cannot review their own submission (403)");
   check((await act(sessions.md, selfReview.payload.id, { action: "approve" })).status === 403, "18e. a user cannot approve their own submission (403)");
   // Creating a task that names the assignee as its own reviewer is refused at the
@@ -280,7 +282,7 @@ try {
   const mdReviewBadge = await call("/org/tasks/attention", { token: sessions.md });
   check(mdReviewBadge.payload.review === 0, "an assigned task is not yet an attention item for its reviewer");
   await act(sessions.sales, created.payload.id, { action: "start" });
-  await act(sessions.sales, created.payload.id, { action: "submit" });
+  await act(sessions.sales, created.payload.id, { action: "submit", comment: "Done." });
   check((await call("/org/tasks/attention", { token: sessions.md })).payload.review === 1, "once submitted, the reviewer's attention badge counts it");
 
   console.log(`\nconnected database: ${testDb}`);
