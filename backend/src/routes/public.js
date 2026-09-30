@@ -86,7 +86,10 @@ const propertySelect = `SELECT p.id, p.name, p.property_type, p.status, p.price,
   FROM properties p LEFT JOIN projects pr ON pr.id = p.project_id`;
 
 // Listed = published, offered for at least one service, not yet sold or rented.
-const LISTED = ["p.organization_id = $1", "p.public_listing", "(p.offer_rent OR p.offer_buy)", "p.status IN ('available','reserved')"];
+// Public = the Sales Officer ticked "show on the website" AND the listing is
+// approved (both are set together by Property.setListing); either alone is not enough.
+const PUBLISHED = "p.public_listing AND p.public_listing_status = 'approved'";
+const LISTED = ["p.organization_id = $1", PUBLISHED, "(p.offer_rent OR p.offer_buy)", "p.status IN ('available','reserved')"];
 
 function serviceFilter(req, res) {
   const service = req.query.service;
@@ -108,7 +111,7 @@ router.get("/properties", route(async (req, res) => {
 router.get("/properties/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   if (!id) return notFound(res, "Property");
-  const row = await queryOne(`${propertySelect} WHERE p.id = $1 AND p.organization_id = $2 AND p.public_listing`, [id, await organizationId()]);
+  const row = await queryOne(`${propertySelect} WHERE p.id = $1 AND p.organization_id = $2 AND ${PUBLISHED}`, [id, await organizationId()]);
   if (!row) return notFound(res, "Property");
   const photos = await photosFor(req, [row.id]);
   res.set("Cache-Control", "public, max-age=60");
@@ -154,7 +157,7 @@ router.get("/properties/:id/images/:imageId", route(async (req, res) => {
   if (!id || !imageId) return notFound(res, "Picture");
   const image = await queryOne(
     `SELECT i.stored_name, i.mime_type FROM property_images i JOIN properties p ON p.id = i.property_id
-      WHERE i.id = $1 AND i.property_id = $2 AND p.organization_id = $3 AND p.public_listing`,
+      WHERE i.id = $1 AND i.property_id = $2 AND p.organization_id = $3 AND ${PUBLISHED}`,
     [imageId, id, await organizationId()],
   );
   const fullPath = image && resolveStoredFile(propertyUploadsDir, image.stored_name);
@@ -227,7 +230,7 @@ router.post("/requests", route(async (req, res) => {
   const propertyId = parseId(body.property);
   const org = await organizationId();
   const property = propertyId && await queryOne(
-    "SELECT id, name, status, offer_rent, offer_buy FROM properties WHERE id = $1 AND organization_id = $2 AND public_listing",
+    "SELECT id, name, status, offer_rent, offer_buy FROM properties WHERE id = $1 AND organization_id = $2 AND public_listing AND public_listing_status = 'approved'",
     [propertyId, org],
   );
   if (!property) return notFound(res, "Property");

@@ -6,12 +6,28 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { runMigrations } from "./migrate.js";
 import { ensureUploadDirs } from "./uploads.js";
 import apiRoutes from "./routes/api.js";
+import { isProduction, rateLimit, securityHeaders } from "./security.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, "..", "..", ".env") });
 
 const app = express();
 const PORT = process.env.PORT || 3003;
+// Behind a tunnel or reverse proxy (ngrok, nginx) the client address and the
+// original protocol come from X-Forwarded-*: needed for per-IP rate limits and
+// to know when to send Secure cookies and HSTS.
+app.set("trust proxy", 1);
+app.disable("x-powered-by");
+app.use(securityHeaders());
+
+// MK-08: the public website's origins. Only these may call the public API
+// from a browser. PUBLIC_SITE_ORIGINS in .env lists the real site (comma
+// separated); in development the local preview addresses are allowed too.
+const DEV_PUBLIC_ORIGINS = ["http://localhost:5500", "http://127.0.0.1:5500"];
+const publicSiteOrigins = [
+  ...String(process.env.PUBLIC_SITE_ORIGINS || "").split(",").map((value) => value.trim()).filter(Boolean),
+  ...(isProduction() ? [] : DEV_PUBLIC_ORIGINS),
+];
 // Explicitly allowed CROSS-origin callers. The default is empty on purpose: this
 // same process serves the frontend (static files plus the SPA fallback), so a
 // browser reaching the API through it is always same-origin, and that case is
@@ -44,20 +60,22 @@ app.use(cors((request, callback) => {
   if (!origin || corsOrigins.includes("*") || corsOrigins.includes(origin) || isSameOrigin(origin, request)) {
     return callback(null, { origin: true });
   }
-  // The public website's API may be called from any origin (the public site is
-  // served separately). It carries no credentials: reads return only what the
-  // Sales Officer has published, and the only writes are a visitor's request
-  // or enquiry, which become Leads.
+  // The public website (served separately) may read what the Sales Officer
+  // has published and send a visitor's request, enquiry or sell submission.
+  // Only its own origins are allowed, and never with credentials.
   const url = String(request.originalUrl || request.url);
   const publicRead = ["GET", "HEAD", "OPTIONS"].includes(request.method) && url.startsWith("/api/v1/public/");
-  const publicWrite = request.method === "POST" && /^\/api\/v1\/public\/(requests|enquiries)(\?|$)/.test(url);
-  if (publicRead || publicWrite) {
+  const publicWrite = request.method === "POST" && /^\/api\/v1\/public\/(requests|enquiries|sell)(\?|$)/.test(url);
+  if ((publicRead || publicWrite) && publicSiteOrigins.includes(origin)) {
     return callback(null, { origin: true, credentials: false });
   }
   const refused = new Error("origin is not allowed");
   refused.status = 403;
   return callback(refused);
 }));
+// Abuse protection for the public API as a whole (per client address); the
+// request/enquiry/sell routes add their own tighter per-phone limits.
+app.use("/api/v1/public", rateLimit({ name: "public", limit: 300, windowMs: 60 * 1000 }));
 app.use(express.json({ limit: "1mb" }));
 
 // Serve static frontend
@@ -67,10 +85,19 @@ app.use(express.static(frontendDir));
 // API
 app.use("/api/v1", apiRoutes);
 
+// MK-11: clients get a safe message; the detail stays in the server log.
 app.use((error, req, res, next) => {
   if (req.path.startsWith("/api")) {
-    const status = error.status || 500;
-    return res.status(status).json({ error: status >= 500 ? "internal server error" : error.message });
+    // A malformed JSON body is the client's mistake, but the parser's own text
+    // (positions, tokens) is not something to echo back.
+    if (error.type === "entity.parse.failed") return res.status(400).json({ error: "the request body is not valid JSON" });
+    if (error.type === "entity.too.large") return res.status(413).json({ error: "the request is too large" });
+    const status = Number(error.status || error.statusCode) || 500;
+    if (status >= 500 || !error.status) {
+      console.error(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} failed:`, error?.stack || error);
+      return res.status(500).json({ error: "internal server error" });
+    }
+    return res.status(status).json({ error: error.message });
   }
   next(error);
 });

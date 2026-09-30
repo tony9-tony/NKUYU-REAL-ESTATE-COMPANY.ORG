@@ -36,7 +36,7 @@ const tokenFor = async (email) => (await signIn(email, legacyPasswordFor(email))
 
 const tag = Date.now().toString(36);
 const adminToken = await tokenFor("admin@mkuyu.local");
-const ictoToken = await tokenFor("icto@demo.mkuyu.local");
+let ictoToken = await tokenFor("icto@demo.mkuyu.local");
 const mdToken = await tokenFor("md@demo.mkuyu.local");
 check(Boolean(adminToken && ictoToken && mdToken), "administrator, ICTO and MD sign in");
 
@@ -146,6 +146,8 @@ check((await call("/org/departments", adminToken)).body.every((d) => typeof d.cl
 const ictoRoleId = roleId("ICTO");
 check((await call(`/org/users/${ictoId}/roles`, ictoToken, "PUT", { role_ids: [roleId("ICT Officer")] })).status === 200, "ICTO can move themselves to another system-administration role");
 check((await call(`/org/users/${ictoId}/roles`, adminToken, "PUT", { role_ids: [ictoRoleId] })).status === 200, "(restored the ICTO role)");
+check((await call("/org/me", ictoToken)).status === 401, "MK-13: after another administrator changed their role, the old session no longer works");
+ictoToken = await tokenFor("icto@demo.mkuyu.local");
 const ictDept = (await call("/org/departments", adminToken)).body.find((d) => d.name === "ICT & ADMINISTRATION");
 check((await call(`/org/users/${ictoId}/departments`, ictoToken, "PUT", { department_ids: [ictDept.id] })).status === 200, "ICTO can move themselves between departments");
 check((await call(`/org/users/${ictoId}`, ictoToken, "PUT", { active: false })).status === 403, "ICTO cannot deactivate themselves");

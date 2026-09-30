@@ -1,30 +1,13 @@
 const API_ROOT = "/api/v1";
 const ADMIN_PATH = "/admin";
 const STAFF_PATH = "/staff";
-const TOKEN_STORAGE_KEY = "mkuyu_token";
-// When "Remember me" is unticked the session lives in sessionStorage, so closing
-// the tab signs the user out. The token is read from both, in this order.
-const SESSION_TOKEN_KEY = "mkuyu_session_token";
-
-function readStoredToken() {
-  try { return localStorage.getItem(TOKEN_STORAGE_KEY) || sessionStorage.getItem(SESSION_TOKEN_KEY); } catch (_) { return null; }
-}
-
-function getToken() {
-  return readStoredToken();
-}
-
-function setToken(token, remember = true) {
-  try {
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
-    sessionStorage.removeItem(SESSION_TOKEN_KEY);
-    if (!token) return;
-    if (remember) localStorage.setItem(TOKEN_STORAGE_KEY, token);
-    else sessionStorage.setItem(SESSION_TOKEN_KEY, token);
-  } catch (_) { /* storage unavailable (e.g. private mode) */ }
-}
-
-function clearToken() { setToken(null); }
+// The session lives in an HttpOnly cookie that this page cannot read, so a
+// script injected into the page cannot steal it (MK-05). Every request carries
+// the CSRF header the server requires for cookie-authenticated changes.
+// "Remember me" decides how long the server keeps the cookie.
+const CSRF_HEADERS = { "X-MKUYU-CSRF": "1" };
+// Tokens that earlier versions kept in browser storage are removed for good.
+try { localStorage.removeItem("mkuyu_token"); sessionStorage.removeItem("mkuyu_session_token"); } catch (_) { /* storage unavailable */ }
 
 const state = {
   view: "dashboard",
@@ -164,7 +147,6 @@ function setAuthPortal(portal) {
 }
 
 function endSession(message = "") {
-  clearToken();
   currentUser = null;
   closeModal();
   // Cached picture blobs belong to the session that fetched them. Signing out
@@ -636,10 +618,7 @@ function reportRequestPayload(data) {
 }
 
 async function downloadFile(path, filename) {
-  const token = getToken();
-  const headers = {};
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetch(`${API_ROOT}${path}`, { headers });
+  const response = await fetch(`${API_ROOT}${path}`, { headers: { ...CSRF_HEADERS }, credentials: "same-origin" });
   if (response.status === 401) { endSession("Your session has expired. Please sign in again."); throw new Error("session expired"); }
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
@@ -657,10 +636,7 @@ async function downloadFile(path, filename) {
 }
 
 async function openFileInTab(path) {
-  const token = getToken();
-  const headers = {};
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetch(`${API_ROOT}${path}`, { headers });
+  const response = await fetch(`${API_ROOT}${path}`, { headers: { ...CSRF_HEADERS }, credentials: "same-origin" });
   if (response.status === 401) { endSession("Your session has expired. Please sign in again."); throw new Error("session expired"); }
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
@@ -676,12 +652,11 @@ async function api(path, options = {}) {
   const { form, headers: extraHeaders, ...rest } = options;
   const headers = { ...(extraHeaders || {}) };
   if (!form) headers["Content-Type"] = "application/json";
-  const token = getToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
+  Object.assign(headers, CSRF_HEADERS);
   // A plain object body is sent as JSON. Passing an object unserialized used
   // to send "[object Object]", which the server rejects (every task button did).
   if (!form && rest.body && typeof rest.body === "object") rest.body = JSON.stringify(rest.body);
-  const response = await fetch(`${API_ROOT}${path}`, { ...rest, headers });
+  const response = await fetch(`${API_ROOT}${path}`, { ...rest, headers, credentials: "same-origin" });
   const payload = await response.json().catch(() => ({}));
   const isCredentialRequest = path.startsWith("/auth/login") || path.startsWith("/auth/setup");
   if (response.status === 401 && !isCredentialRequest) {
@@ -2479,10 +2454,7 @@ async function hydrateImages(root = document) {
       return;
     }
     try {
-      const token = getToken();
-      const headers = {};
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const response = await fetch(src, { headers });
+      const response = await fetch(src, { headers: { ...CSRF_HEADERS }, credentials: "same-origin" });
       if (!response.ok) throw new Error(`image load failed (${response.status})`);
       const url = URL.createObjectURL(await response.blob());
       imageBlobCache.set(src, url);
@@ -5107,12 +5079,11 @@ authForm.addEventListener("submit", async (event) => {
   // wrong pairing. It is a request, never a grant: `enterWorkspace` still routes
   // on the role the server reports, never on this value.
   body.portal = authMode === "setup" ? "admin" : authPortal;
+  body.remember = authRemember ? authRemember.checked : true;
   authSubmit.disabled = true;
   try {
     const path = authMode === "setup" ? "/auth/setup" : "/auth/login";
     const user = await api(path, { method: "POST", body: JSON.stringify(body) });
-    if (!user.token) throw new Error("No session token returned");
-    setToken(user.token, authRemember ? authRemember.checked : true);
     enterWorkspace(user);
   } catch (error) {
     showAuthMessage(error.message || "Unable to sign in.");
@@ -5145,7 +5116,7 @@ if (authForgot) {
 
 document.querySelector('[data-action="logout"]')?.addEventListener("click", async () => {
   try {
-    if (getToken()) await api("/auth/logout", { method: "POST", body: "{}" });
+    await api("/auth/logout", { method: "POST", body: "{}" });
   } catch (_) { /* sign out locally even if the request fails */ }
   endSession();
   setAuthMode("login");
@@ -5153,19 +5124,19 @@ document.querySelector('[data-action="logout"]')?.addEventListener("click", asyn
 });
 
 async function boot() {
-  const token = getToken();
   try {
     const { configured } = await api("/auth/state");
     setAuthMode(configured ? "login" : "setup");
   } catch (_) {
     setAuthMode("login");
   }
-  if (!token) return;
+  // Without a live cookie this is simply the sign-in screen: no "expired" notice.
   try {
-    const user = await api("/auth/me");
-    enterWorkspace(user);
-  } catch (error) {
-    if (!error.sessionExpired) hideAuthMessage();
+    const response = await fetch(`${API_ROOT}/auth/me`, { headers: { ...CSRF_HEADERS }, credentials: "same-origin" });
+    if (!response.ok) return;
+    enterWorkspace(await response.json());
+  } catch (_) {
+    hideAuthMessage();
   }
 }
 

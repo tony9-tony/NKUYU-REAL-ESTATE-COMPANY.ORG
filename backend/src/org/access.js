@@ -41,6 +41,8 @@ export function currentAccess() {
   return storage.getStore() || null;
 }
 
+const ACCESS_CACHE_MS = 60 * 1000;
+
 export function clearAccessCache() {
   accessCache.clear();
 }
@@ -51,7 +53,10 @@ export function clearAccessCache() {
 export async function accessForUser(user) {
   if (!user) return null;
   const key = `${user.id}:${user.role === "admin" ? "admin" : "staff"}`;
-  if (accessCache.has(key)) return accessCache.get(key);
+  // Changes made through the API clear the cache at once; the short lifetime
+  // also catches changes made any other way (another process, direct SQL).
+  const cached = accessCache.get(key);
+  if (cached && Date.now() - cached.loadedAt < ACCESS_CACHE_MS) return cached.access;
   const row = await queryOne(
     `SELECT
        COALESCE((SELECT json_agg(json_build_object('scope', r.scope, 'rank', r.rank) ORDER BY r.rank DESC)
@@ -62,6 +67,7 @@ export async function accessForUser(user) {
                   WHERE ud.user_id = $1 AND d.active = TRUE), '[]'::json) AS departments,
        COALESCE((SELECT json_agg(DISTINCT p.permission_key)
                    FROM user_roles ur
+                   JOIN roles r ON r.id = ur.role_id AND r.active = TRUE
                    JOIN role_permissions rp ON rp.role_id = ur.role_id
                    JOIN permissions p ON p.id = rp.permission_id
                   WHERE ur.user_id = $1), '[]'::json) AS permissions`,
@@ -82,7 +88,7 @@ export async function accessForUser(user) {
     permissions: row.permissions || [],
     organizationId: await organizationId(),
   };
-  accessCache.set(key, access);
+  accessCache.set(key, { access, loadedAt: Date.now() });
   return access;
 }
 

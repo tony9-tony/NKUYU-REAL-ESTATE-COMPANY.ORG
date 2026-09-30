@@ -272,6 +272,15 @@ const roleRenames = { "Contracts & Legal Officer": "Legal Officer" };
  * Additive and idempotent: new columns default to "not offered, not
  * published", so nothing reaches the public site until someone publishes it.
  */
+// Sessions carry how long they may live and when they were last used (MK-06).
+async function migrateSessionSecurity() {
+  await query("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()");
+  await query("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS remember BOOLEAN NOT NULL DEFAULT TRUE");
+  await query("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)");
+  // Expired sessions are removed rather than accumulating.
+  await query("DELETE FROM sessions WHERE expires_at <= NOW()");
+}
+
 async function migratePublicListing() {
   for (const column of [
     "offer_rent BOOLEAN NOT NULL DEFAULT FALSE",
@@ -398,6 +407,7 @@ export async function runMigrations() {
   await migrateInstallmentStatus();
   await migrateContractPricing();
   await migratePublicListing();
+  await migrateSessionSecurity();
   for (const table of scopedTables) {
     await query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL`);
     await query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id) ON DELETE SET NULL`);

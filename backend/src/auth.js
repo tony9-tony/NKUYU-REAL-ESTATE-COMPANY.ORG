@@ -1,8 +1,16 @@
 import crypto from "node:crypto";
 import { query, queryOne } from "./db.js";
 import { provisionSystemAdministrator } from "./org/rbac.js";
+import { SESSION_COOKIE, csrfOk, readCookie, setSessionCookie } from "./security.js";
 
-const SESSION_DAYS = 7;
+// Session lifetime (MK-06). "Remember me" keeps a session for at most 7 days,
+// otherwise 12 hours; either way it ends after 8 hours without use, and a
+// browser session's token is replaced every 12 hours while in use.
+const REMEMBER_MS = 7 * 86400000;
+const SHORT_MS = 12 * 3600000;
+const IDLE_MS = 8 * 3600000;
+const ROTATE_MS = 12 * 3600000;
+const TOUCH_MS = 5 * 60000;
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString("hex");
@@ -79,16 +87,23 @@ function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
-async function createSession(userId) {
+async function createSession(userId, { remember = true, expiresAt = null } = {}) {
   const token = crypto.randomBytes(32).toString("hex");
-  const expiresAt = new Date(Date.now() + SESSION_DAYS * 86400000).toISOString().replace("T", " ").slice(0, 19);
-  await query("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)", [hashToken(token), userId, expiresAt]);
-  return { token, expires_at: expiresAt };
+  const lifetime = remember ? REMEMBER_MS : SHORT_MS;
+  const expires = expiresAt ? new Date(expiresAt) : new Date(Date.now() + lifetime);
+  await query("INSERT INTO sessions (token_hash, user_id, expires_at, remember, last_seen_at) VALUES ($1, $2, $3, $4, NOW())", [hashToken(token), userId, expires.toISOString(), remember]);
+  return { token, expires_at: expires.toISOString().replace("T", " ").slice(0, 19), max_age_ms: remember ? Math.max(0, expires.getTime() - Date.now()) : null };
 }
 
+/** The session token: a Bearer header (API clients, tests) or the HttpOnly cookie (the browser app). */
 function tokenFromRequest(req) {
   const header = req.get("authorization") || "";
-  return header.startsWith("Bearer ") ? header.slice(7).trim() : null;
+  if (header.startsWith("Bearer ")) return header.slice(7).trim() || null;
+  return readCookie(req, SESSION_COOKIE);
+}
+
+function viaCookie(req) {
+  return !String(req.get("authorization") || "").startsWith("Bearer ") && Boolean(readCookie(req, SESSION_COOKIE));
 }
 
 async function publicUser(user) {
@@ -108,15 +123,38 @@ async function requireAuth(req, res, next) {
   try {
     const token = tokenFromRequest(req);
     if (!token) return res.status(401).json({ error: "sign in required" });
-    const result = await query(`SELECT u.* FROM sessions s
+    const cookie = viaCookie(req);
+    // CSRF: a cookie-authenticated change must come from the MKUYU page itself.
+    if (cookie && !csrfOk(req)) return res.status(403).json({ error: "request refused (missing CSRF protection)" });
+    const result = await query(`SELECT u.*, s.id AS session_row_id, s.remember AS session_remember, s.expires_at AS session_expires_at,
+                                    s.created_at AS session_created_at, s.last_seen_at AS session_last_seen_at
+                             FROM sessions s
                              JOIN users u ON u.id = s.user_id
-                             WHERE s.token_hash = $1 AND s.expires_at > NOW() AND u.active = TRUE`, [hashToken(token)]);
-    const user = result.rows[0];
-    if (!user) return res.status(401).json({ error: "session expired" });
+                             WHERE s.token_hash = $1 AND s.expires_at > NOW()
+                               AND COALESCE(s.last_seen_at, s.created_at) > NOW() - ($2::int * INTERVAL '1 millisecond')
+                               AND u.active = TRUE`, [hashToken(token), IDLE_MS]);
+    const row = result.rows[0];
+    if (!row) return res.status(401).json({ error: "session expired" });
+    const { session_row_id: sessionId, session_remember: remember, session_expires_at: expiresAt, session_created_at: createdAt, session_last_seen_at: lastSeen, ...user } = row;
+    const now = Date.now();
+    if (cookie && now - new Date(createdAt).getTime() > ROTATE_MS) {
+      // Rotation: a long-lived browser session gets a fresh token; the old one dies.
+      const fresh = await createSession(user.id, { remember, expiresAt });
+      await query("DELETE FROM sessions WHERE id = $1", [sessionId]);
+      setSessionCookie(req, res, fresh.token, fresh.max_age_ms);
+      req.token = fresh.token;
+    } else {
+      if (!lastSeen || now - new Date(lastSeen).getTime() > TOUCH_MS) await query("UPDATE sessions SET last_seen_at = NOW() WHERE id = $1", [sessionId]);
+      req.token = token;
+    }
     req.user = user;
-    req.token = token;
     next();
   } catch (error) { next(error); }
+}
+
+/** Ends every session of a user (password reset, role change, deactivation). */
+async function revokeUserSessions(userId) {
+  await query("DELETE FROM sessions WHERE user_id = $1", [userId]);
 }
 
 export {
@@ -124,6 +162,7 @@ export {
   verifyPassword,
   hashToken,
   createSession,
+  revokeUserSessions,
   tokenFromRequest,
   publicUser,
   requireAuth,

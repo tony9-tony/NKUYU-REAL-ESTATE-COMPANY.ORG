@@ -1,4 +1,5 @@
 import { query, queryOne } from "../db.js";
+import { UNPAGED_LIMIT } from "../pagination.js";
 import { organizationId } from "../org/rbac.js";
 import { clearRecordShares, currentAccess, OWNERSHIP_COLUMNS, ownershipValues, scopeCondition } from "../org/access.js";
 
@@ -9,7 +10,7 @@ export const Project = {
     const values = [await organizationId()];
     const access = await currentAccess();
     const scope = scopeCondition("p", ENTITY, access, values);
-    return (await query(`SELECT p.* FROM projects p WHERE p.organization_id=$1 AND ${scope} ORDER BY p.created_at DESC`, values)).rows;
+    return (await query(`SELECT p.* FROM projects p WHERE p.organization_id=$1 AND ${scope} ORDER BY p.created_at DESC LIMIT ${UNPAGED_LIMIT}`, values)).rows;
   },
   // Paginated twin of `all`. The count reuses the same `scope` fragment, so it can
   // never report projects the caller is not allowed to see.

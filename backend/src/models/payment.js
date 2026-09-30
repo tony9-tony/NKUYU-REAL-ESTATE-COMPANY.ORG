@@ -1,4 +1,5 @@
 import { query, queryOne } from "../db.js";
+import { UNPAGED_LIMIT } from "../pagination.js";
 import { organizationId } from "../org/rbac.js";
 import { clearRecordShares, currentAccess, OWNERSHIP_COLUMNS, ownershipValues, scopeCondition } from "../org/access.js";
 import { deriveInstallmentStatus } from "./debt.js";
@@ -14,7 +15,7 @@ export const Payment = {
     for (const [key, sql] of [["projectId", "c.project_id"], ["contractId", "p.contract_id"], ["method", "p.method"], ["from", "p.paid_at >="], ["to", "p.paid_at <="]]) {
       if (filters[key]) { values.push(filters[key]); c.push(`${sql} $${values.length}`); }
     }
-    return (await query(`${paymentSelect} WHERE ${c.join(" AND ")} ORDER BY p.paid_at DESC,p.id DESC`, values)).rows;
+    return (await query(`${paymentSelect} WHERE ${c.join(" AND ")} ORDER BY p.paid_at DESC,p.id DESC LIMIT ${UNPAGED_LIMIT}`, values)).rows;
   },
   // Paginated twin. Same `c` array feeds the data query and the count, so filters
   // (project, contract, method, date window) scope the total identically.

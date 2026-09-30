@@ -4,8 +4,10 @@ import { BUSINESS_PERMISSIONS, organizationId, permissionKeys, requirePermission
 import { addRecordShare, can, canAccessModule, clearAccessCache, currentAccess, isScope, isVisibility, listRecordShares, ownershipFields, removeRecordShare, scopeCondition } from "../org/access.js";
 import { audit } from "../org/audit.js";
 import { attentionCount } from "../tasks/tasks.js";
-import { hashPassword, publicUser } from "../auth.js";
-import { paginatedList, paginationRequested, parsePagination, searchTerm } from "../pagination.js";
+import { hashPassword, publicUser, revokeUserSessions } from "../auth.js";
+import { isProduction } from "../security.js";
+import { demoPasswordFor } from "../org/demoCredentials.js";
+import { UNPAGED_LIMIT, paginatedList, paginationRequested, parsePagination, searchTerm } from "../pagination.js";
 import { Project } from "../models/project.js";
 import { Contract } from "../models/contract.js";
 import { Debt } from "../models/debt.js";
@@ -518,7 +520,7 @@ function profileUploadHandler(kind) {
       }
       let fileInfo;
       try { fileInfo = validateUploadedFile(req.file, profileImageExtensions); }
-      catch (error) { cleanupUploadedFile(req.file); return res.status(error.status || 400).json({ error: error.message }); }
+      catch (error) { cleanupUploadedFile(req.file); if (!error.status) { console.error("upload failed:", error?.stack || error); return res.status(400).json({ error: "the file could not be saved" }); } return res.status(error.status).json({ error: error.message }); }
       const previous = await queryOne(`SELECT ${nameColumn} AS stored FROM users WHERE id=$1`, [req.user.id]);
       const title = kind === "signature" && typeof req.body?.signature_title === "string" ? req.body.signature_title.trim().slice(0, 120) || null : undefined;
       await query(
@@ -756,7 +758,7 @@ router.get("/access-matrix", requireAdmin(), async (req, res, next) => {
 });
 router.put("/roles/:id/permissions", requirePermission("manage_permissions"), async (req,res,next)=>{try{const roleId=id(req.params.id,"role_id");await guardRoleChange(req,roleId,await organizationId());const keys=(Array.isArray(req.body?.permissions)?req.body.permissions:[]).map(String);if(!isAdminAccount(req)){const reserved=keys.filter((key)=>RESERVED_ROLE_PERMISSIONS.has(key));if(reserved.length)return res.status(403).json({error:`only the System Administrator can grant ${reserved.join(", ")}`});}await withTransaction(async(client)=>{await client.query("DELETE FROM role_permissions WHERE role_id=$1",[roleId]);for(const key of keys)await client.query("INSERT INTO role_permissions(role_id,permission_id) SELECT $1,id FROM permissions WHERE permission_key=$2 ON CONFLICT DO NOTHING",[roleId,String(key)]);});clearAccessCache();await audit(req,"updated","role_permissions",roleId);res.json({ok:true});}catch(e){next(e);}});
 router.get("/users", requirePermission("manage_users"), async (req,res,next)=>{try{const result=await rows(`SELECT u.id,u.email,u.display_name,u.role,u.active,u.created_at,${USER_ROLES_JSON} AS roles,${USER_DEPARTMENTS_JSON} AS departments FROM users u WHERE u.organization_id=$1 ORDER BY u.display_name`,[await organizationId()]);res.json(result);}catch(e){next(e);}});
-router.post("/users", requirePermission("manage_users"), async (req,res,next)=>{try{const password=String(req.body?.password||"");if(password.length<8)return res.status(400).json({error:"password must be at least 8 characters"});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map(Number))];let departmentIds=[...new Set((Array.isArray(req.body?.department_ids)?req.body.department_ids:[]).map(Number))].filter(Boolean);if(!roleIds.length)return res.status(400).json({error:"select at least one role for the staff member"});if(roleIds.some((roleId)=>!Number.isInteger(roleId)||roleId<1))return res.status(400).json({error:"one or more selected roles are invalid"});const org=await organizationId();await assignableRoles(req,roleIds,org);
+router.post("/users", requirePermission("manage_users"), async (req,res,next)=>{try{const password=String(req.body?.password||"");if(password.length<8)return res.status(400).json({error:"password must be at least 8 characters"});if(isProduction()&&password===demoPasswordFor(String(req.body?.email||"").toLowerCase()))return res.status(400).json({error:"that password follows the published demo scheme; choose another"});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map(Number))];let departmentIds=[...new Set((Array.isArray(req.body?.department_ids)?req.body.department_ids:[]).map(Number))].filter(Boolean);if(!roleIds.length)return res.status(400).json({error:"select at least one role for the staff member"});if(roleIds.some((roleId)=>!Number.isInteger(roleId)||roleId<1))return res.status(400).json({error:"one or more selected roles are invalid"});const org=await organizationId();await assignableRoles(req,roleIds,org);
     // Every staff member belongs to a department, or no department list would
     // ever show them. Without a choice, the role's home department is used.
     if(!departmentIds.length){const roleNames=await rows("SELECT name FROM roles WHERE id=ANY($1::int[]) AND organization_id=$2",[roleIds,org]);const homes=roleNames.map((row)=>ROLE_HOME_DEPARTMENT[row.name]).filter(Boolean);if(homes.length)departmentIds=(await rows("SELECT id FROM departments WHERE organization_id=$1 AND active AND name=ANY($2::text[])",[org,homes])).map((row)=>Number(row.id));}
@@ -767,19 +769,23 @@ router.put("/users/:id", requirePermission("manage_users"), async (req,res,next)
     // A password reset changes the credential and nothing else: the user id, role,
     // department, permissions and every owned record are untouched. Live sessions
     // are dropped so a token minted against the old password cannot outlive it.
-    if(req.body?.password){if(String(req.body.password).length<8)return res.status(400).json({error:"password must be at least 8 characters"});await query("UPDATE users SET password_hash=$1 WHERE id=$2",[hashPassword(req.body.password),userId]);await query("DELETE FROM sessions WHERE user_id=$1",[userId]);clearAccessCache();await audit(req,"password_reset","user",userId,{email:target.email,sessions_invalidated:true});}
-    if(!r)return res.status(404).json({error:"user not found"});clearAccessCache();await audit(req,"updated","user",userId);res.json(r);}catch(e){next(e);}});
+    if(req.body?.password){if(String(req.body.password).length<8)return res.status(400).json({error:"password must be at least 8 characters"});if(isProduction()&&String(req.body.password)===demoPasswordFor(target.email))return res.status(400).json({error:"that password follows the published demo scheme; choose another"});await query("UPDATE users SET password_hash=$1 WHERE id=$2",[hashPassword(req.body.password),userId]);await query("DELETE FROM sessions WHERE user_id=$1",[userId]);clearAccessCache();await audit(req,"password_reset","user",userId,{email:target.email,sessions_invalidated:true});}
+    if(!r)return res.status(404).json({error:"user not found"});clearAccessCache();if(req.body?.active===false||req.body?.active===0||req.body?.active==="false")await revokeUserSessions(userId);await audit(req,"updated","user",userId);res.json(r);}catch(e){next(e);}});
 router.put("/users/:id/roles", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");const org=await organizationId();await guardTargetUser(req,userId,org,{allowSelf:true});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map((roleId)=>id(roleId,"role_id")))];if(roleIds.length)await assignableRoles(req,roleIds,org);
     // An administrator may move THEMSELVES only between system-administration
     // roles (no business permission), so nobody can hand themselves Finance,
     // Legal or Sales powers; another administrator must do that.
-    if(userId===req.user.id){if(!roleIds.length)return res.status(400).json({error:"you must keep a role"});const business=await rows("SELECT DISTINCT r.name FROM roles r JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE r.id=ANY($1::int[]) AND p.permission_key=ANY($2::text[])",[roleIds,[...BUSINESS_PERMISSIONS]]);if(business.length)return res.status(403).json({error:`you can move yourself only between system-administration roles; "${business[0].name}" carries business access, so another administrator must assign it`});}await withTransaction(async(c)=>{await c.query("DELETE FROM user_roles WHERE user_id=$1",[userId]);for(const roleId of roleIds)await c.query("INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE id=$2 AND organization_id=$3 ON CONFLICT DO NOTHING",[userId,roleId,org]);});clearAccessCache();await audit(req,"changed_role","user",userId);res.json({ok:true});}catch(e){next(e);}});
+    if(userId===req.user.id){if(!roleIds.length)return res.status(400).json({error:"you must keep a role"});const business=await rows("SELECT DISTINCT r.name FROM roles r JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE r.id=ANY($1::int[]) AND p.permission_key=ANY($2::text[])",[roleIds,[...BUSINESS_PERMISSIONS]]);if(business.length)return res.status(403).json({error:`you can move yourself only between system-administration roles; "${business[0].name}" carries business access, so another administrator must assign it`});}await withTransaction(async(c)=>{await c.query("DELETE FROM user_roles WHERE user_id=$1",[userId]);for(const roleId of roleIds)await c.query("INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE id=$2 AND organization_id=$3 ON CONFLICT DO NOTHING",[userId,roleId,org]);});clearAccessCache();
+    // MK-13: someone whose role changed signs in again, so no browser keeps an
+    // old picture of their access. (Your own change keeps your current session.)
+    if(userId!==req.user.id)await revokeUserSessions(userId);await audit(req,"changed_role","user",userId);res.json({ok:true});}catch(e){next(e);}});
 router.put("/users/:id/departments", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");await guardTargetUser(req,userId,await organizationId());
     const wanted=[...new Set((Array.isArray(req.body?.department_ids)?req.body.department_ids:[]).map((value)=>id(value,"department_id")))];
     if(!wanted.length)return res.status(400).json({error:"a staff member must belong to at least one department"});
     const live=await rows("SELECT id FROM departments WHERE organization_id=$1 AND active AND id=ANY($2::int[])",[await organizationId(),wanted]);
     if(live.length!==wanted.length)return res.status(400).json({error:"one or more selected departments do not exist or are inactive"});
-    req.body.department_ids=wanted;await withTransaction(async(c)=>{await c.query("DELETE FROM user_departments WHERE user_id=$1",[userId]);for(const departmentId of(req.body?.department_ids||[]))await c.query("INSERT INTO user_departments(user_id,department_id) SELECT $1,id FROM departments WHERE id=$2 AND organization_id=$3 ON CONFLICT DO NOTHING",[userId,id(departmentId,"department_id"),await organizationId()]);});clearAccessCache();await audit(req,"changed_department","user",userId);res.json({ok:true});}catch(e){next(e);}});
+    req.body.department_ids=wanted;
+    if(userId!==req.user.id)await revokeUserSessions(userId);await withTransaction(async(c)=>{await c.query("DELETE FROM user_departments WHERE user_id=$1",[userId]);for(const departmentId of(req.body?.department_ids||[]))await c.query("INSERT INTO user_departments(user_id,department_id) SELECT $1,id FROM departments WHERE id=$2 AND organization_id=$3 ON CONFLICT DO NOTHING",[userId,id(departmentId,"department_id"),await organizationId()]);});clearAccessCache();await audit(req,"changed_department","user",userId);res.json({ok:true});}catch(e){next(e);}});
 /**
  * Audit log.
  *
@@ -827,7 +833,7 @@ router.put("/approvals/:id", requirePermission("approve"), async (req, res, next
 // still the bare array this route has always returned, which the workspace
 // aggregate and the existing tests both rely on.
 router.get("/leads", requireModuleAccess("leads"), async(req,res,next)=>{try{
-  if(!paginationRequested(req.query)){const values=[await organizationId()];const visible=scopeCondition("l","lead",req.access,values);return res.json(await rows(`SELECT l.* FROM leads l WHERE l.organization_id=$1 AND ${visible} ORDER BY l.created_at DESC`,values));}
+  if(!paginationRequested(req.query)){const values=[await organizationId()];const visible=scopeCondition("l","lead",req.access,values);return res.json(await rows(`SELECT l.* FROM leads l WHERE l.organization_id=$1 AND ${visible} ORDER BY l.created_at DESC LIMIT ${UNPAGED_LIMIT}`,values));}
   const paged=await paginatedList({build:()=>scopedListPaged("leads","l","lead","l.created_at DESC",searchTerm(req.query.search),["l.name","l.email","l.notes"]),...parsePagination(req.query)});
   res.json({data:paged.rows,pagination:paged.pagination});
 }catch(e){next(e);}});

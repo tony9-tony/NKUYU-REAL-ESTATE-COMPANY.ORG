@@ -118,4 +118,8 @@ function searchTerm(value) {
   return text;
 }
 
+// MK-10: a list requested WITHOUT page/page_size (the legacy bare-array form)
+// still never returns more than this many rows. The screens use pages.
+export const UNPAGED_LIMIT = 1000;
+
 export { MAX_PAGE_SIZE, DEFAULT_PAGE_SIZE, paginatedList, paginationRequested, parsePagination, paginationMeta, searchTerm };

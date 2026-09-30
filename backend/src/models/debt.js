@@ -1,4 +1,5 @@
 import { query, queryOne } from "../db.js";
+import { UNPAGED_LIMIT } from "../pagination.js";
 import { organizationId } from "../org/rbac.js";
 import { clearRecordShares, currentAccess, OWNERSHIP_COLUMNS, ownershipValues, scopeCondition } from "../org/access.js";
 
@@ -45,7 +46,7 @@ export const Debt = {
     const conditions = ["d.organization_id=$1", scopeCondition("d", ENTITY, access, values)];
     if (status) { values.push(status); conditions.push(`d.status=$${values.length}`); }
     if (projectId) { values.push(projectId); conditions.push(`c.project_id=$${values.length}`); }
-    return (await query(`${select} WHERE ${conditions.join(" AND ")} ORDER BY d.due_date ASC,d.created_at DESC`, values)).rows.map(normalize);
+    return (await query(`${select} WHERE ${conditions.join(" AND ")} ORDER BY d.due_date ASC,d.created_at DESC LIMIT ${UNPAGED_LIMIT}`, values)).rows.map(normalize);
   },
   // Paginated twin. `due_date` can repeat and is not unique, so `created_at` and
   // then `id` make the order total - otherwise a row could appear on two pages.

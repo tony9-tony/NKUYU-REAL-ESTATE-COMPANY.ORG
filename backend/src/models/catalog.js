@@ -1,4 +1,5 @@
 import { query, queryOne } from "../db.js";
+import { UNPAGED_LIMIT } from "../pagination.js";
 import { organizationId } from "../org/rbac.js";
 import { clearRecordShares, currentAccess, OWNERSHIP_COLUMNS, ownershipValues, scopeCondition } from "../org/access.js";
 import { propertyUploadsDir, storedFileExists } from "../uploads.js";
@@ -47,7 +48,7 @@ async function list(sql, alias, entity, values, conditions, order = "") {
   const access = await currentAccess();
   const all = [await organizationId(), ...values];
   const where = [`${alias}.organization_id=$1`, ...conditions, scopeCondition(alias, entity, access, all)];
-  return query(`${sql} WHERE ${where.join(" AND ")}${order}`, all).then((x) => x.rows);
+  return query(`${sql} WHERE ${where.join(" AND ")}${order} LIMIT ${UNPAGED_LIMIT}`, all).then((x) => x.rows);
 }
 
 /**

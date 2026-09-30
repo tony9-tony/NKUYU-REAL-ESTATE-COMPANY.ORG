@@ -26,6 +26,8 @@ import {
   portalForUser,
   resolvePortal,
 } from "../auth.js";
+import { CSRF_HEADER, clearSessionCookie, isProduction, loginBlocked, rateLimit, recordLoginFailure, recordLoginSuccess, setSessionCookie } from "../security.js";
+import { demoPasswordFor } from "../org/demoCredentials.js";
 import db, { DATABASE_URL, query, queryOne, withTransaction } from "../db.js";
 import { buildReport, parseFilters } from "../reports/builders.js";
 import { exportReport, EXPORT_FORMATS } from "../reports/exporters.js";
@@ -53,7 +55,7 @@ import {
 import orgRoutes from "./org.js";
 import publicRoutes from "./public.js";
 import { audit } from "../org/audit.js";
-import { requirePermissionForMethod, provisionSystemAdministrator, organizationId, requireAdmin } from "../org/rbac.js";
+import { requirePermissionForMethod, provisionSystemAdministrator, organizationId, requireAdmin, can as canPermission } from "../org/rbac.js";
 import { accessMiddleware, can, ownershipFields } from "../org/access.js";
 import {
   CONTRACT_ACTIONS,
@@ -495,10 +497,13 @@ function paymentDate(value) {
 
 async function validatePayment(body, current = {}) {
   const contractId = parseId(body.contract_id ?? current.contract_id, "contract_id");
-  const contract = requireRecord(await queryOne("SELECT id, client_name FROM contracts WHERE id = $1", [contractId]), "Contract");
+  // The contract and installment are read through the caller's own scope
+  // (organization + role/department visibility), so a payment can never be
+  // written against - or reveal the client of - a contract they cannot see.
+  const contract = requireRecord(await Contract.get(contractId), "Contract");
   const debtId = parseId(body.debt_id ?? current.debt_id, "debt_id", true);
   if (debtId) {
-    const debt = requireRecord(await queryOne("SELECT id, contract_id FROM debts WHERE id = $1", [debtId]), "Installment");
+    const debt = requireRecord(await Debt.get(debtId), "Installment");
     if (debt.contract_id !== contractId) throw new HttpError(400, "debt_id does not belong to the selected contract");
   }
   const paidAt = paymentDate(body.paid_at ?? current.paid_at);
@@ -631,8 +636,31 @@ function requireRecord(record, label = "Record") {
 
 router.get("/health", route((req, res) => res.json({ status: "ok" })));
 router.get("/auth/state", route(async (req, res) => res.json({ configured: Number((await queryOne("SELECT COUNT(*) AS count FROM users")).count) > 0 })));
-router.post("/auth/setup", route(async (req, res) => {
+// The browser app identifies itself with the CSRF header; it receives the
+// session only as an HttpOnly cookie, never in the response body. API clients
+// (scripts, tests) get the token in the body as before.
+function sendSession(req, res, status, payload, session) {
+  const browser = req.get(CSRF_HEADER) === "1";
+  setSessionCookie(req, res, session.token, session.max_age_ms);
+  const { max_age_ms, ...rest } = session;
+  const body = browser ? { ...payload, expires_at: session.expires_at } : { ...payload, ...rest };
+  return res.status(status).json(body);
+}
+
+/** A password anyone can derive from the address (the published demo scheme). */
+function isDemoPassword(email, password) {
+  return String(password) === demoPasswordFor(String(email).toLowerCase());
+}
+
+const setupLimit = rateLimit({ name: "setup", limit: 10, windowMs: 60 * 60 * 1000 });
+router.post("/auth/setup", setupLimit, route(async (req, res) => {
   if (Number((await queryOne("SELECT COUNT(*) AS count FROM users")).count) > 0) throw new HttpError(409, "workspace already configured");
+  // In production the very first account also needs the setup token the
+  // operator configured, so an unattended fresh install cannot be claimed by
+  // whoever reaches it first.
+  if (isProduction() && process.env.SETUP_TOKEN && String(req.get("x-setup-token") || req.body?.setup_token || "") !== process.env.SETUP_TOKEN) {
+    throw new HttpError(403, "the setup token is missing or wrong");
+  }
   const body = req.body || {};
   const displayName = requiredText(body.display_name, "display_name", 80);
   const email = validEmail(body.email, "email");
@@ -643,18 +671,42 @@ router.post("/auth/setup", route(async (req, res) => {
   // and make every later setup attempt fail with "already configured".
   const portal = resolvePortal(body.portal, { role: "admin" });
   const orgId = await organizationId();
-  const result = await queryOne("INSERT INTO users (organization_id, email, password_hash, display_name, role) VALUES ($1, $2, $3, $4, 'admin') RETURNING *", [orgId, email, hashPassword(password), displayName]);
+  // MK-07: the "no users yet" check and the insert happen inside one
+  // transaction holding an advisory lock, so two simultaneous setup requests
+  // cannot both see an empty workspace and both create an administrator.
+  const result = await withTransaction(async (client) => {
+    await client.query("SELECT pg_advisory_xact_lock(4242001)");
+    const existing = Number((await client.query("SELECT COUNT(*) AS count FROM users")).rows[0].count);
+    if (existing > 0) throw new HttpError(409, "workspace already configured");
+    return (await client.query("INSERT INTO users (organization_id, email, password_hash, display_name, role) VALUES ($1, $2, $3, $4, 'admin') RETURNING *", [orgId, email, hashPassword(password), displayName])).rows[0];
+  });
   await provisionSystemAdministrator(result.id);
   await audit({ user: { id: result.id } }, "login", "auth", result.id, { method: "setup", portal });
-  const session = await createSession(result.id);
-  res.status(201).json({ ...await publicUser(result), ...session, portal });
+  const session = await createSession(result.id, { remember: body.remember !== false });
+  return sendSession(req, res, 201, { ...await publicUser(result), portal }, session);
 }));
 router.post("/auth/login", route(async (req, res) => {
   const body = req.body || {};
   const email = validEmail(body.email, "email");
   const password = typeof body.password === "string" ? body.password : "";
+  // MK-02: repeated failures from one address (for one account, or overall)
+  // are stopped for a while. Checked before the password is even hashed.
+  const blocked = loginBlocked(req, email);
+  if (blocked.limited) {
+    res.set("Retry-After", String(blocked.retryAfter));
+    throw new HttpError(429, `Too many failed sign-in attempts. Try again in ${Math.ceil(blocked.retryAfter / 60)} minute(s).`);
+  }
   const user = await queryOne("SELECT * FROM users WHERE LOWER(email) = LOWER($1)", [email]);
-  if (!user || !verifyPassword(password, user.password_hash)) throw new HttpError(401, "email or password is incorrect");
+  if (!user || !verifyPassword(password, user.password_hash)) {
+    recordLoginFailure(req, email);
+    throw new HttpError(401, "email or password is incorrect");
+  }
+  // MK-01: in production a password anyone can derive from the address (the
+  // published demo scheme) is never accepted; an administrator must set a new one.
+  if (isProduction() && isDemoPassword(user.email, password)) {
+    throw new HttpError(403, "This account still uses a published demo password. Ask the administrator to set a new password.");
+  }
+  recordLoginSuccess(req, email);
   // Portal boundary. Deliberately AFTER the password check: a wrong password
   // must not reveal which portal an address belongs to, so an attacker cannot
   // probe for administrator accounts. `portal` is only a claim - the account's
@@ -662,9 +714,9 @@ router.post("/auth/login", route(async (req, res) => {
   // request cannot get further than the sign-in screen did.
   const portal = resolvePortal(body.portal, user);
   if (user.role === "admin") await provisionSystemAdministrator(user.id);
-  const session = await createSession(user.id);
+  const session = await createSession(user.id, { remember: body.remember !== false });
   await audit({ user }, "login", "auth", user.id, { portal });
-  res.json({ ...await publicUser(user), ...session, portal });
+  return sendSession(req, res, 200, { ...await publicUser(user), portal }, session);
 }));
 router.post("/auth/logout", route(async (req, res) => {
   const token = tokenFromRequest(req);
@@ -673,6 +725,7 @@ router.post("/auth/logout", route(async (req, res) => {
     if (sessionUser) await audit({ user: { id: sessionUser.user_id } }, "logout", "auth", sessionUser.user_id);
     await query("DELETE FROM sessions WHERE token_hash = $1", [hashToken(token)]);
   }
+  clearSessionCookie(req, res);
   res.json({ ok: true });
 }));
 router.get("/auth/me", requireAuth, route(async (req, res) => {
@@ -778,8 +831,13 @@ router.get("/contracts/:id", route(async (req, res) => res.json(contractResponse
 router.get("/contracts/:id/history", route(async (req, res) => {
   const id = parseId(req.params.id);
   requireRecord(await Contract.get(id), "Contract");
-  res.json(await Contract.history(id));
+  const history = await Contract.history(id);
+  // The finance step's notes carry payment terms; people without financial
+  // access see that the step happened, not what it said.
+  if (canPermission(req.access, "view_financial")) return res.json(history);
+  res.json(history.map((entry) => (FINANCIAL_REVISION_ACTIONS.has(entry.action) && entry.notes ? { ...entry, notes: null, notes_redacted: true } : entry)));
 }));
+const FINANCIAL_REVISION_ACTIONS = new Set(["finance_validate", "schedule", "payment"]);
 
 // The workflow. One endpoint for every transition; the resulting status comes
 // from the action table and the permission comes from the caller's access

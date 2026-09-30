@@ -1,4 +1,5 @@
 import { query, queryOne } from "../db.js";
+import { UNPAGED_LIMIT } from "../pagination.js";
 import { organizationId } from "../org/rbac.js";
 import { clearRecordShares, currentAccess, OWNERSHIP_COLUMNS, ownershipValues, scopeCondition } from "../org/access.js";
 
@@ -23,7 +24,7 @@ export const Contract = {
     const conditions = ["c.organization_id=$1", scopeCondition("c", ENTITY, access, values)];
     if (projectId) { values.push(projectId); conditions.push(`c.project_id=$${values.length}`); }
     if (type) { values.push(type); conditions.push(`c.contract_type=$${values.length}`); }
-    return (await query(`${select} WHERE ${conditions.join(" AND ")} ORDER BY c.created_at DESC`, values)).rows;
+    return (await query(`${select} WHERE ${conditions.join(" AND ")} ORDER BY c.created_at DESC LIMIT ${UNPAGED_LIMIT}`, values)).rows;
   },
   // Paginated twin. The count is built from the same `conditions` array the data
   // query uses, so a filtered or scope-limited total can never exceed what the
