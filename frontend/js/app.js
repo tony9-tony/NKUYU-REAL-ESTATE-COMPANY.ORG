@@ -1042,7 +1042,7 @@ function updateNavigation() {
       // correct after a refresh and cannot include another department's work.
       assignments: Number((state.attention || {}).total || 0),
       // New requests and reports waiting for Sales.
-      requests: (state.requests || []).filter((row) => ["new", "existing", "reported"].includes(requestStage(row))).length,
+      requests: (state.requests || []).filter(requestNeedsMe).length,
     };
     let lastGroup = null;
     nav.innerHTML = allowed.map((item) => {
@@ -3073,6 +3073,15 @@ function requestStage(row) {
   return "with_cs";
 }
 
+/** Whether this request is waiting on the person looking at it. */
+function requestNeedsMe(row) {
+  const stage = requestStage(row);
+  const mine = row.task_id && Number(row.task_assignee_id) === Number(state.organization.me?.user?.id);
+  if (mine) return stage === "with_cs";
+  if (!can("assign_tasks")) return false;
+  return ["new", "existing", "reported"].includes(stage);
+}
+
 async function loadRequests() {
   state.requestsRequested = true;
   try { state.requests = await api("/org/requests"); }
@@ -3096,24 +3105,31 @@ function renderRequests() {
   const count = (key) => all.filter((row) => requestStage(row) === key).length;
   const tabs = [["", "All", all.length], ...REQUEST_STAGES.map(([key, label]) => [key, label, count(key)])]
     .map(([key, label, n]) => `<button class="seg-btn${stage === key ? " active" : ""}" data-action="request-stage" data-stage="${key}" aria-pressed="${stage === key}">${escapeHtml(label)} (${n})</button>`).join("");
+  const me = Number(state.organization.me?.user?.id);
+  const note = (text) => `<span class="muted cell-plain">${escapeHtml(text)}</span>`;
   const list = rows.map((row) => {
     const key = requestStage(row);
-    const [, label, tone] = REQUEST_STAGES.find(([k]) => k === key);
+    let [, label, tone] = REQUEST_STAGES.find(([k]) => k === key);
+    // The Customer Service officer holding the task sees their own step, not
+    // Sales's: "Report outcome" while it is theirs, "Report sent" afterwards.
+    const mineToReport = row.task_id && Number(row.task_assignee_id) === me;
+    if (mineToReport && key === "reported") label = "Report sent to Sales";
     const who = row.task_assignee && key !== "new" && key !== "client" ? `<span class="cell-sub">Customer Service: ${escapeHtml(row.task_assignee)}</span>` : "";
     const known = row.existing_client_id ? `<span class="cell-sub">Already a client${row.existing_client_name && row.existing_client_name !== row.name ? ` (${escapeHtml(row.existing_client_name)})` : ""}: no new client record will be made</span>` : "";
     const reported = row.outcome && key !== "new" ? `<span class="cell-sub">${outcomeText(row.outcome, row.outcome_note, row.appointment_at, row.appointment_type)}</span>` : "";
     const cancelled = !row.client_id && row.task_status === "cancelled" ? `<span class="cell-sub">The last hand-off was cancelled</span>` : "";
     const openTaskBtn = (primary) => row.task_id ? `<button class="btn btn-small${primary ? " btn-primary" : ""}" data-action="open-task" data-id="${row.task_id}">${primary ? "Review report" : "Open assignment"}</button>` : "";
-    const handOff = mayHandOff ? `<button class="btn btn-small btn-primary" data-action="hand-off-lead" data-id="${row.id}">Hand to Customer Service</button>` : "";
+    // Only Sales (assign_tasks) hands requests over; everyone else is told who acts next.
+    const handOff = mayHandOff ? `<button class="btn btn-small btn-primary" data-action="hand-off-lead" data-id="${row.id}">Hand to Customer Service</button>` : note("Waiting for Sales to hand it to Customer Service");
     const convert = (primary) => mayCreate ? `<button class="btn btn-small${primary ? " btn-primary" : ""}" data-action="convert-lead" data-id="${row.id}" title="Register this customer as a client (prospect)">Convert to client</button>` : "";
     const next = {
       new: handOff,
       existing: handOff,
-      with_cs: openTaskBtn(false),
-      reported: openTaskBtn(true),
+      with_cs: mineToReport ? `<button class="btn btn-small btn-primary" data-action="request-outcome" data-id="${row.task_id}">Report outcome to Sales</button>` : openTaskBtn(false),
+      reported: mineToReport ? note("Waiting for Sales to approve") + openTaskBtn(false) : openTaskBtn(true),
       contacted: convert(true) + openTaskBtn(false),
       appointment: `<button class="btn btn-small" data-action="open-alert-view" data-view="appointments">Open Appointments</button>`,
-      unreachable: handOff.replace("Hand to Customer Service", "Hand off again") + openTaskBtn(false),
+      unreachable: (mayHandOff ? handOff.replace("Hand to Customer Service", "Hand off again") : note("Waiting for Sales to decide")) + openTaskBtn(false),
       closed: openTaskBtn(false),
       client: `<span class="muted cell-plain">Continue under Clients</span>`,
     }[key];
