@@ -18,8 +18,6 @@ export const uploadsRoot = path.join(runtimeDataRoot, "uploads");
 export const documentUploadsDir = path.join(uploadsRoot, "documents");
 export const reportUploadsDir = path.join(uploadsRoot, "reports");
 export const propertyUploadsDir = path.join(uploadsRoot, "properties");
-// Project pictures, published on the public website alongside the project.
-export const projectUploadsDir = path.join(uploadsRoot, "projects");
 // Staff profile photos and lawyers' signature images.
 export const profileUploadsDir = path.join(uploadsRoot, "profiles");
 export const backupsDir = path.join(runtimeDataRoot, "backups");
@@ -54,7 +52,6 @@ export function ensureUploadDirs() {
   fs.mkdirSync(documentUploadsDir, { recursive: true });
   fs.mkdirSync(reportUploadsDir, { recursive: true });
   fs.mkdirSync(propertyUploadsDir, { recursive: true });
-  fs.mkdirSync(projectUploadsDir, { recursive: true });
   fs.mkdirSync(profileUploadsDir, { recursive: true });
 }
 
@@ -131,7 +128,6 @@ function makeUploader(directory, allowedExtensions) {
 export const uploadDocumentFile = makeUploader(documentUploadsDir, documentExtensions);
 export const uploadReportFile = makeUploader(reportUploadsDir, reportExtensions);
 export const uploadPropertyImageFile = makeUploader(propertyUploadsDir, propertyImageExtensions);
-export const uploadProjectImageFile = makeUploader(projectUploadsDir, propertyImageExtensions);
 export const uploadProfileImageFile = makeUploader(profileUploadsDir, profileImageExtensions);
 
 export function validateUploadedFile(file, allowedExtensions) {

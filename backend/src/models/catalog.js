@@ -165,13 +165,6 @@ export const Property = {
   },
 };
 
-export const ProjectImage = {
-  async listFor(projectId) { const o=await organizationId(); return query("SELECT * FROM project_images WHERE project_id=$1 AND organization_id=$2 ORDER BY id",[projectId,o]).then((x)=>x.rows); },
-  async get(projectId,imageId) { const o=await organizationId(); return queryOne("SELECT * FROM project_images WHERE project_id=$1 AND id=$2 AND organization_id=$3",[projectId,imageId,o]); },
-  async countFor(projectId) { const o=await organizationId(); return (await queryOne("SELECT COUNT(*)::int AS count FROM project_images WHERE project_id=$1 AND organization_id=$2",[projectId,o])).count; },
-  create(projectId,data) { return createPlain("INSERT INTO project_images(organization_id,project_id,original_filename,stored_name,file_size,mime_type) VALUES($1,$2,$3,$4,$5,$6) RETURNING id",[projectId,data.original_filename||null,data.stored_name,data.file_size??null,data.mime_type||null]); },
-  async remove(imageId) { const o=await organizationId(); return query("DELETE FROM project_images WHERE id=$1 AND organization_id=$2",[imageId,o]); },
-};
 
 export const PropertyImage = {
   async listFor(propertyId) { const o=await organizationId(); return query("SELECT * FROM property_images WHERE property_id=$1 AND organization_id=$2 ORDER BY id",[propertyId,o]).then((x)=>x.rows); },

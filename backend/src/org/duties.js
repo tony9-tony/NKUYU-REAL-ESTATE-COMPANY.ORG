@@ -66,6 +66,16 @@ export const ROLE_HOME_DEPARTMENT = {
   "ICT Officer": SYSTEM_ADMIN_DEPARTMENT,
 };
 
+/**
+ * Cross-department hand-offs a department-scoped assigner may make, on top of
+ * assigning within their own department. Sales hands website leads to
+ * Customer Service, who contact the customer. Nothing else crosses a
+ * department line without organization scope.
+ */
+export const TASK_HANDOFF = {
+  "SALES, MARKETING & OPERATIONS": ["CUSTOMER SERVICE"],
+};
+
 /** Placeholder roles being retired, mapped to the role that absorbs members. */
 export const ROLE_REPLACEMENTS = {
   "Sales and Marketing Officer": "Sales, Marketing & Operations Officer",
@@ -204,6 +214,7 @@ export const ROLE_DUTIES = {
     { key: "viewings_and_follow_up", label: "Run viewings and follow-ups", description: "Schedules site visits and closes follow-ups so deals do not go cold.", permissions: ["access_appointments", "access_follow_ups", "view", "create", "edit"] },
     { key: "sales_reporting", label: "Report on sales activity", description: "Reports pipeline and conversion for the MD.", permissions: ["access_reports", "view_reports", "export"] },
     { key: "contract_templates", label: "Maintain contract templates", description: "Uploads the Word templates contracts are generated on and chooses the default.", permissions: ["upload_contract_templates"] },
+    { key: "lead_handoff", label: "Hand website leads to Customer Service", description: "Receives Rent/Buy requests from the website and assigns Customer Service to contact the customer by the means they chose, then reviews the outcome. May assign within Sales and to Customer Service only.", permissions: ["access_leads", "assign_tasks", "review_tasks"] },
   ],
   "Accountant": [
     { key: "payment_recording", label: "Record deposits and payments", description: "Logs money received, attaches receipts and corrects mistaken entries.", permissions: ["access_payments", "access_debts", "view", "create", "edit", "delete", "view_financial"] },

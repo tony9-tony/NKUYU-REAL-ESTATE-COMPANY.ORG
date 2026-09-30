@@ -12,6 +12,7 @@
 // ---------------------------------------------------------------------------
 import { query } from "../db.js";
 import { organizationId, hasPermission } from "../org/rbac.js";
+import { TASK_HANDOFF } from "../org/duties.js";
 
 async function userRow(id) {
   return (await query(
@@ -34,6 +35,30 @@ async function callerContext(req) {
     scope: access?.scope || "own",
     departments,
   };
+}
+
+/**
+ * Every department a department-scoped assigner may assign into: their own,
+ * plus the declared hand-off targets. The assignee picker and canAssignTo both
+ * use this rule, so the list can never offer someone the server would refuse.
+ */
+export async function assignableDepartmentIds(callerDepartmentIds) {
+  const own = (callerDepartmentIds || []).map(Number);
+  if (!own.length) return [];
+  const rows = (await query("SELECT id, name FROM departments WHERE active = TRUE AND organization_id = $1", [await organizationId()])).rows;
+  const byId = new Map(rows.map((row) => [Number(row.id), row.name]));
+  const targets = new Set(own.flatMap((id) => TASK_HANDOFF[byId.get(id)] || []));
+  return [...new Set([...own, ...rows.filter((row) => targets.has(row.name)).map((row) => Number(row.id))])];
+}
+
+/** The assignee's department the caller may hand work to, per TASK_HANDOFF. */
+async function handoffDepartment(callerDepartmentIds, assigneeDepartmentIds) {
+  if (!callerDepartmentIds.length || !assigneeDepartmentIds.length) return null;
+  const rows = (await query("SELECT id, name FROM departments WHERE id = ANY($1::int[]) AND active = TRUE", [[...callerDepartmentIds, ...assigneeDepartmentIds].map(Number)])).rows;
+  const name = new Map(rows.map((row) => [Number(row.id), row.name]));
+  const allowed = new Set(callerDepartmentIds.flatMap((id) => TASK_HANDOFF[name.get(Number(id))] || []));
+  const target = assigneeDepartmentIds.map(Number).find((id) => allowed.has(name.get(id)));
+  return target || null;
 }
 
 /** Whether the caller may create/assign tasks at all. */
@@ -67,8 +92,11 @@ export async function canAssignTo(req, assigneeId) {
   if (ctx.scope === "department") {
     const mine = new Set((ctx.departments || []).map(Number));
     const shared = (assignee.departments || []).map(Number).filter((id) => mine.has(id));
-    if (!shared.length) return { ok: false, reason: "assignee is outside your department scope" };
-    return { ok: true, assignee, departmentId: shared[0] };
+    if (shared.length) return { ok: true, assignee, departmentId: shared[0] };
+    // Declared cross-department hand-offs only (e.g. Sales → Customer Service).
+    const handoff = await handoffDepartment(ctx.departments || [], assignee.departments || []);
+    if (handoff) return { ok: true, assignee, departmentId: handoff };
+    return { ok: false, reason: "assignee is outside your department scope" };
   }
   return { ok: false, reason: "your scope may not assign tasks" };
 }

@@ -13,7 +13,7 @@ import { Payment } from "../models/payment.js";
 import { Reminder } from "../models/reminder.js";
 import { Report } from "../models/report.js";
 import { REPORT_TYPES, REPORT_TYPE_IDS, PAYMENT_METHODS, reportTypeLabel, reportTypeIsFinancial } from "../models/reportTypes.js";
-import { Property, Client, Appointment, Document, PropertyImage, ProjectImage } from "../models/catalog.js";
+import { Property, Client, Appointment, Document, PropertyImage } from "../models/catalog.js";
 import { paginatedList, paginationRequested, parsePagination, searchTerm } from "../pagination.js";
 import {
   hashPassword,
@@ -35,14 +35,12 @@ import {
   reportUploadsDir,
   documentUploadsDir,
   propertyUploadsDir,
-  projectUploadsDir,
   profileUploadsDir,
   propertyImageExtensions,
   backupsDir,
   uploadDocumentFile,
   uploadReportFile,
   uploadPropertyImageFile,
-  uploadProjectImageFile,
   uploadProfileImageFile,
   profileImageExtensions,
   validateUploadedFile,
@@ -357,7 +355,7 @@ function validateProperty(body, current = {}) {
 }
 
 /* ---------------------------------------------------------------------------
-   Public website listing (properties and projects)
+   Public website listing (properties)
 
    The Sales Officer chooses Rent, Buy or both, and publishes directly: there is
    no management approval step. Publishing is refused only when the listing
@@ -391,19 +389,6 @@ function validatePropertyListing(body, current = {}, salePrice = 0) {
   return listing;
 }
 
-function validateProjectListing(body, current = {}) {
-  const listing = {
-    offer_rent: flag(body.offer_rent, current.offer_rent),
-    offer_buy: flag(body.offer_buy, current.offer_buy),
-    public_listing: flag(body.public_listing, current.public_listing),
-    location: optionalText(body.location ?? current.location, "location", 120),
-    summary: optionalText(body.summary ?? current.summary, "summary", 400),
-  };
-  if (listing.public_listing && !listing.offer_rent && !listing.offer_buy) {
-    throw new HttpError(400, "Choose Rent, Buy or both before showing this project on the website");
-  }
-  return listing;
-}
 
 function validateClient(body, current = {}) {
   return {
@@ -756,78 +741,23 @@ router.get("/projects", route(async (req, res) => {
 router.get("/projects/:id", route(async (req, res) => res.json(requireRecord(await Project.get(parseId(req.params.id)), "Project"))));
 router.post("/projects", route(async (req, res) => {
   const data = validateProject(req.body || {});
-  const listing = validateProjectListing(req.body || {});
   const result = await Project.create(data.name, data.status);
-  await Project.setListing(result.id, listing);
   res.status(201).json(await Project.get(result.id));
 }));
 router.put("/projects/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   const current = requireRecord(await Project.get(id), "Project");
   const data = validateProject(req.body || {}, current);
-  const listing = validateProjectListing(req.body || {}, current);
   await Project.update(id, data.name, data.status);
-  await Project.setListing(id, listing);
   res.json(await Project.get(id));
 }));
 router.delete("/projects/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   requireRecord(await Project.get(id), "Project");
-  const images = await ProjectImage.listFor(id);
   await Project.remove(id);
-  images.forEach((image) => removeStoredFile(projectUploadsDir, image.stored_name));
   res.json({ ok: true });
 }));
 
-// Project pictures, shown with the project on the public website.
-router.get("/projects/:id/images", route(async (req, res) => {
-  const projectId = parseId(req.params.id);
-  requireRecord(await Project.get(projectId), "Project");
-  res.json((await ProjectImage.listFor(projectId)).map((image) => ({
-    ...image,
-    available: storedFileExists(projectUploadsDir, image.stored_name),
-    file_url: `/api/v1/projects/${projectId}/images/${image.id}/file`,
-  })));
-}));
-router.post("/projects/:id/images", uploadProjectImageFile, route(async (req, res) => {
-  const projectId = parseId(req.params.id);
-  try {
-    requireRecord(await Project.get(projectId), "Project");
-    if (await ProjectImage.countFor(projectId) >= MAX_PROPERTY_IMAGES) {
-      throw new HttpError(409, `A project can have at most ${MAX_PROPERTY_IMAGES} pictures`);
-    }
-    const fileInfo = validateUploadedFile(req.file, propertyImageExtensions);
-    const result = await ProjectImage.create(projectId, {
-      original_filename: fileInfo.displayName,
-      stored_name: fileInfo.storedName,
-      file_size: fileInfo.size,
-      mime_type: fileInfo.mimeType,
-    });
-    const image = await ProjectImage.get(projectId, result.id);
-    res.status(201).json({ ...image, file_url: `/api/v1/projects/${projectId}/images/${image.id}/file` });
-  } catch (error) {
-    cleanupUploadedFile(req.file);
-    throw error;
-  }
-}));
-router.get("/projects/:id/images/:imageId/file", route(async (req, res) => {
-  const projectId = parseId(req.params.id);
-  const imageId = parseId(req.params.imageId, "image_id");
-  requireRecord(await Project.get(projectId), "Project");
-  const image = requireRecord(await ProjectImage.get(projectId, imageId), "Picture");
-  const fullPath = resolveStoredFile(projectUploadsDir, image.stored_name);
-  if (!fullPath) throw new HttpError(404, "Picture file not found");
-  return sendStoredFile(res, fullPath, image.mime_type || null, image.original_filename || image.stored_name, false);
-}));
-router.delete("/projects/:id/images/:imageId", route(async (req, res) => {
-  const projectId = parseId(req.params.id);
-  const imageId = parseId(req.params.imageId, "image_id");
-  requireRecord(await Project.get(projectId), "Project");
-  const image = requireRecord(await ProjectImage.get(projectId, imageId), "Picture");
-  await ProjectImage.remove(imageId);
-  removeStoredFile(projectUploadsDir, image.stored_name);
-  res.json({ ok: true });
-}));
 
 router.get("/contracts", route(async (req, res) => {
   const projectId = req.query.project_id === undefined ? null : parseId(req.query.project_id, "project_id");

@@ -10,7 +10,7 @@ import { currentAccess } from "../org/access.js";
 import { audit } from "../org/audit.js";
 import { TASK_PRIORITIES, TASK_STATUSES, TASK_LINK_ENTITIES, canTransitionTask, normalizeTaskPriority, normalizeTaskStatus, taskActionsFor } from "../tasks/workflow.js";
 import { attentionCount, linkedRecordExists, listComments, listHistory, listTasks, taskVisible } from "../tasks/tasks.js";
-import { canAssignTo, canReviewTask, mayAssign, mayReview } from "../tasks/authority.js";
+import { assignableDepartmentIds, canAssignTo, canReviewTask, mayAssign, mayReview } from "../tasks/authority.js";
 
 const router = Router();
 const MAX_INT4 = 2147483647;
@@ -50,7 +50,8 @@ router.get("/assignees", route(async (req, res) => {
   const values = [org];
   let scope = "";
   if (!(req.user?.role === "admin" || access?.isAdmin || access?.scope === "organization")) {
-    const departments = access?.departmentIds || [];
+    // Own departments plus declared hand-offs (Sales → Customer Service).
+    const departments = await assignableDepartmentIds(access?.departmentIds || []);
     if (!departments.length) return res.json([]);
     values.push(departments);
     scope = `AND EXISTS (SELECT 1 FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=u.id AND d.active=TRUE AND ud.department_id = ANY($${values.length}))`;

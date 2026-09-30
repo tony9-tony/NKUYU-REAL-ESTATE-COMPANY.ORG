@@ -47,13 +47,6 @@ export const Project = {
     const scope = scopeCondition("p", ENTITY, access, values);
     return query(`UPDATE projects p SET name=$1,status=$2 WHERE p.id=$3 AND p.organization_id=$4 AND ${scope}`, values);
   },
-  /** Public-website listing fields. The route has already scope-checked `id`. */
-  async setListing(id, listing) {
-    return query(
-      "UPDATE projects SET offer_rent=$1, offer_buy=$2, public_listing=$3, location=$4, summary=$5 WHERE id=$6 AND organization_id=$7",
-      [listing.offer_rent, listing.offer_buy, listing.public_listing, listing.location, listing.summary, id, await organizationId()],
-    );
-  },
   async remove(id) {
     const values = [id, await organizationId()];
     const access = await currentAccess();
