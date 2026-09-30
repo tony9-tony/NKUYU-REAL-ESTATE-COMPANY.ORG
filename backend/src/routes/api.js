@@ -2,6 +2,7 @@ import { Router } from "express";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Project } from "../models/project.js";
@@ -34,11 +35,14 @@ import {
   reportUploadsDir,
   documentUploadsDir,
   propertyUploadsDir,
+  profileUploadsDir,
   propertyImageExtensions,
   backupsDir,
   uploadDocumentFile,
   uploadReportFile,
   uploadPropertyImageFile,
+  uploadProfileImageFile,
+  profileImageExtensions,
   validateUploadedFile,
   cleanupUploadedFile,
   safeDisplayFilename,
@@ -65,8 +69,10 @@ import {
   produceContractDocument,
   renderContractDocument,
 } from "../contracts/generation.js";
-import { CONTRACT_PLACEHOLDERS, placeholdersUsed, unknownPlaceholders } from "../contracts/workflow.js";
+import { CONTRACT_PLACEHOLDERS, placeholdersUsed, unknownPlaceholders, writeContractDocx } from "../contracts/workflow.js";
 import { shareContractWithHandoverDesks } from "../contracts/handover.js";
+import { templateTextFromUpload } from "../contracts/docxText.js";
+import { contractSignature, signContractDocument } from "../contracts/signature.js";
 
 const router = Router();
 const execFileAsync = promisify(execFile);
@@ -637,6 +643,28 @@ router.get("/auth/me", requireAuth, route(async (req, res) => {
   res.json({ ...await publicUser(req.user), portal: portalForUser(req.user) });
 }));
 router.use(requireAuth);
+// Own profile photo, kept for compatibility with the earlier /profile/photo
+// endpoints. Both routes use the same stored photo as /org/me/photo, which is
+// the one colleagues see (GET /org/users/:id/photo).
+router.get("/profile/photo", route(async (req, res) => {
+  const user = await queryOne("SELECT photo_stored_name, photo_mime FROM users WHERE id=$1", [req.user.id]);
+  const fullPath = resolveStoredFile(profileUploadsDir, user?.photo_stored_name);
+  if (!fullPath) throw new HttpError(404, "No profile photo is uploaded");
+  res.set("Cache-Control", "private, no-store");
+  return sendStoredFile(res, fullPath, user.photo_mime, "profile-photo", false);
+}));
+router.post("/profile/photo", uploadProfileImageFile, route(async (req, res) => {
+  const fileInfo = validateUploadedFile(req.file, profileImageExtensions);
+  try {
+    const current = await queryOne("SELECT photo_stored_name FROM users WHERE id=$1", [req.user.id]);
+    await query("UPDATE users SET photo_stored_name=$1, photo_mime=$2 WHERE id=$3", [fileInfo.storedName, fileInfo.mimeType, req.user.id]);
+    if (current?.photo_stored_name && current.photo_stored_name !== fileInfo.storedName) removeStoredFile(profileUploadsDir, current.photo_stored_name);
+    res.json({ profile_photo_url: `/api/v1/org/users/${req.user.id}/photo?v=${Date.now()}` });
+  } catch (error) {
+    cleanupUploadedFile(req.file);
+    throw error;
+  }
+}));
 // Resolve the caller once per request: role scope, departments and permissions.
 // Models read it through the async-local store so list/get/update/delete all
 // enforce the same visibility rules.
@@ -738,7 +766,9 @@ router.post("/contracts/:id/transition", route(async (req, res) => {
   });
   // The desk that now holds the contract must be able to open it (see handover.js).
   const sharedWith = await shareContractWithHandoverDesks(id, req.user.id);
-  await audit(req, `contract_${name}`, "contract", id, { from: contract.status, to: action.to, shared_with: sharedWith });
+  // Legal approval puts the approving lawyer's signature on the document.
+  const signed = name === "legal_approve" ? await signContractDocument(id, req.user.id) : false;
+  await audit(req, `contract_${name}`, "contract", id, { from: contract.status, to: action.to, shared_with: sharedWith, signed_by_lawyer: signed });
   res.json(contractResponse(await Contract.get(id), req));
 }));
 
@@ -810,8 +840,16 @@ router.post("/contracts/generate", route(async (req, res) => {
   let templateId = null;
   let templateBody = DEFAULT_CONTRACT_TEMPLATE;
   let templateTitle = "Sale Agreement";
-  if (hasSelectedTemplate) {
-    templateId = parseId(body.template_document_id, "template_document_id");
+  // No template field at all (as opposed to an explicit "built-in" choice)
+  // means "use the organization's default template", when one is set and the
+  // caller may use templates.
+  let useTemplateId = hasSelectedTemplate ? parseId(body.template_document_id, "template_document_id") : null;
+  if (body.template_document_id === undefined && can(req.access, "access_documents")) {
+    const fallback = await queryOne("SELECT id FROM documents WHERE organization_id=$1 AND category='template' AND is_default_template=TRUE LIMIT 1", [await organizationId()]);
+    if (fallback) useTemplateId = fallback.id;
+  }
+  if (useTemplateId) {
+    templateId = useTemplateId;
     const template = requireRecord(await Document.get(templateId), "Template");
     if (String(template.category) !== "template") throw new HttpError(400, "the selected document is not a contract template");
     if (!String(template.body_text || "").trim()) throw new HttpError(400, "the selected template has no body text");
@@ -925,11 +963,13 @@ router.post("/contracts/generate", route(async (req, res) => {
 router.get("/contract-templates", route(async (req, res) => {
   if (!can(req.access, "access_documents")) throw new HttpError(403, "permission denied");
   const templates = (await query(
-    `SELECT d.id, d.title, d.body_text, d.category, d.original_filename, d.stored_name, d.created_at, d.uploaded_at,
+    `SELECT d.id, d.title, d.body_text, d.category, d.original_filename, d.stored_name, d.created_at, d.uploaded_at, d.is_default_template AS is_default,
+        u.display_name AS uploaded_by_name,
         (SELECT COUNT(*)::int FROM contracts c WHERE c.template_document_id = d.id) AS used_by
        FROM documents d
+       LEFT JOIN users u ON u.id = d.created_by
       WHERE d.organization_id=$1 AND d.category='template'
-      ORDER BY d.title`,
+      ORDER BY d.is_default_template DESC, d.title`,
     [await organizationId()],
   )).rows;
   res.json(templates.map((template) => ({
@@ -950,9 +990,10 @@ router.post("/contract-templates", route(async (req, res) => {
   const unknown = unknownPlaceholders(bodyText);
   if (unknown.length) throw new HttpError(400, `unknown placeholder(s): ${unknown.join(", ")}`);
   const created = await queryOne(
-    "INSERT INTO documents (organization_id,title,category,status,notes,body_text) VALUES ($1,$2,'template','approved',$3,$4) RETURNING id",
-    [await organizationId(), title, `Template using: ${placeholdersUsed(bodyText).join(", ") || "no placeholders"}`, bodyText],
+    "INSERT INTO documents (organization_id,title,category,status,notes,body_text,created_by,visibility) VALUES ($1,$2,'template','approved',$3,$4,$5,'organization') RETURNING id",
+    [await organizationId(), title, `Template using: ${placeholdersUsed(bodyText).join(", ") || "no placeholders"}`, bodyText, req.user.id],
   );
+  if (truthy(req.body?.is_default)) await setDefaultTemplate(created.id);
   await audit(req, "created", "contract_template", created.id, { title });
   res.status(201).json({ id: created.id, title, category: "template", placeholders: placeholdersUsed(bodyText), unknown });
 }));
@@ -968,8 +1009,66 @@ router.put("/contract-templates/:id", route(async (req, res) => {
   const unknown = unknownPlaceholders(bodyText);
   if (unknown.length) throw new HttpError(400, `unknown placeholder(s): ${unknown.join(", ")}`);
   const updated = await queryOne("UPDATE documents SET title=$1, body_text=$2 WHERE id=$3 RETURNING id", [title, bodyText, id]);
-  await audit(req, "updated", "contract_template", updated.id, { title });
+  if (req.body?.is_default !== undefined) {
+    if (truthy(req.body.is_default)) await setDefaultTemplate(id);
+    else await query("UPDATE documents SET is_default_template=FALSE WHERE id=$1", [id]);
+  }
+  await audit(req, "updated", "contract_template", updated.id, { title, is_default: req.body?.is_default });
   res.json({ id: updated.id, title, placeholders: placeholdersUsed(bodyText), unknown });
+}));
+
+function truthy(value) {
+  return value === true || value === 1 || ["true", "1", "yes", "on"].includes(String(value).toLowerCase());
+}
+
+/** Exactly one default template per organization. */
+async function setDefaultTemplate(id) {
+  const org = await organizationId();
+  await withTransaction(async (client) => {
+    await client.query("UPDATE documents SET is_default_template=FALSE WHERE organization_id=$1 AND category='template' AND id<>$2", [org, id]);
+    await client.query("UPDATE documents SET is_default_template=TRUE WHERE organization_id=$1 AND category='template' AND id=$2", [org, id]);
+  });
+}
+
+// A ready-made Word template containing every placeholder, for staff to
+// download, adapt in Word and upload back.
+router.get("/contract-templates/starter", route(async (req, res) => {
+  if (!can(req.access, "access_documents")) throw new HttpError(403, "permission denied");
+  const tmp = path.join(os.tmpdir(), `mkuyu-starter-${crypto.randomUUID()}.docx`);
+  await writeContractDocx({ text: DEFAULT_CONTRACT_TEMPLATE, targetPath: tmp, title: "MKUYU contract template", contractNumber: "" });
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+  res.setHeader("Content-Disposition", 'attachment; filename="MKUYU-contract-template.docx"');
+  res.send(fs.readFileSync(tmp));
+  fs.rmSync(tmp, { force: true });
+}));
+
+// Upload a Word (.docx) contract template. The wording is extracted into the
+// template text (placeholders such as {{CLIENT_NAME}} included) and the
+// original file is kept so it can be downloaded again. Same permissions as
+// creating a template by typing it.
+router.post("/contract-templates/upload", uploadDocumentFile, route(async (req, res) => {
+  try {
+    if (!can(req.access, "access_documents")) throw new HttpError(403, "permission denied");
+    if (!can(req.access, "create")) throw new HttpError(403, "creating a template requires the create permission");
+    const fileInfo = validateUploadedFile(req.file, documentExtensions);
+    if (fileInfo.extension !== ".docx") throw new HttpError(400, "upload the contract template as a Word .docx file");
+    const bodyText = templateTextFromUpload(fs.readFileSync(req.file.path), ".docx");
+    if (!bodyText) throw new HttpError(400, "the Word document is empty");
+    const unknown = unknownPlaceholders(bodyText);
+    if (unknown.length) throw new HttpError(400, `unknown placeholder(s): ${unknown.join(", ")}. Use only the placeholders listed on the Templates screen.`);
+    const title = optionalText(req.body?.title, "title", 160) || fileInfo.displayName.replace(/\.docx$/i, "");
+    const created = await queryOne(
+      `INSERT INTO documents (organization_id,title,category,status,notes,body_text,original_filename,stored_name,file_size,mime_type,uploaded_at,created_by,visibility)
+       VALUES ($1,$2,'template','approved',$3,$4,$5,$6,$7,$8,NOW(),$9,'organization') RETURNING id`,
+      [await organizationId(), title, `Template using: ${placeholdersUsed(bodyText).join(", ") || "no placeholders"}`, bodyText, fileInfo.displayName, fileInfo.storedName, fileInfo.size, fileInfo.mimeType, req.user.id],
+    );
+    if (truthy(req.body?.is_default)) await setDefaultTemplate(created.id);
+    await audit(req, "uploaded", "contract_template", created.id, { title, filename: fileInfo.displayName });
+    res.status(201).json({ id: created.id, title, category: "template", placeholders: placeholdersUsed(bodyText), unknown: [], characters: bodyText.length });
+  } catch (error) {
+    cleanupUploadedFile(req.file);
+    throw error;
+  }
 }));
 
 router.delete("/contract-templates/:id", route(async (req, res) => {
@@ -1022,7 +1121,8 @@ router.put("/contracts/:id/document-content", route(async (req, res) => {
   const bodyText = requiredText(req.body?.body_text, "body_text", 100000);
   if (/\{\{\s*[A-Z0-9_]+\s*\}\}/.test(bodyText)) throw new HttpError(400, "replace every unresolved {{PLACEHOLDER}} before saving the contract");
 
-  const file = await produceContractDocument({ templateBody: bodyText, values: {}, title: document.title || "Sale Agreement", contractNumber: contract.contract_number });
+  // A contract Legal has already signed keeps the signature on the revision.
+  const file = await produceContractDocument({ templateBody: bodyText, values: {}, title: document.title || "Sale Agreement", contractNumber: contract.contract_number, signature: await contractSignature(contract) });
   try {
     const updated = await query(
       `UPDATE documents SET body_text=$1,original_filename=$2,stored_name=$3,file_size=$4,mime_type=$5,uploaded_at=NOW()

@@ -65,6 +65,9 @@ export function buildContractValues({ contract, project, property, client, compa
     AGREEMENT_DURATION: duration,
     CONTRACT_DATE: formatDocumentDate(contract.contract_date),
     CONTRACT_NUMBER: contract.contract_number || "",
+    // A blank signing line for custom templates. Once Legal approves, the
+    // approving lawyer's real signature is added as a block at the end.
+    LAWYER_SIGNATURE: "____________________________",
   };
 }
 
@@ -112,8 +115,8 @@ export function renderContractDocument(templateBody, values) {
 }
 
 /** Generates the real PDF and returns the stored-file facts. */
-export async function produceContractDocument({ templateBody, values, title, contractNumber }) {
-  return generateContractDocument({ text: renderContractDocument(templateBody, values), title, contractNumber });
+export async function produceContractDocument({ templateBody, values, title, contractNumber, signature = null }) {
+  return generateContractDocument({ text: renderContractDocument(templateBody, values), title, contractNumber, signature });
 }
 
 export { CONTRACT_PLACEHOLDERS, formatDocumentDate, formatMoney, unknownPlaceholders };

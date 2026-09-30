@@ -316,6 +316,9 @@ async function migrateContractPricing() {
 
 export async function runMigrations() {
   await query(schema);
+  await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_photo_stored_name TEXT");
+  await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_photo_mime_type TEXT");
+  await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_photo_updated_at TIMESTAMPTZ");
   await query(sharingSchema);
   await query(dutySchema);
   await query("ALTER TABLE roles ADD COLUMN IF NOT EXISTS rank INTEGER NOT NULL DEFAULT 0");
@@ -450,6 +453,19 @@ export async function runMigrations() {
   await seedDemoAccounts();
   await rotateLegacyPasswords();
   await repairRetiredRoleDisplayNames();
+  // Staff profile photos, and a lawyer's signature image used on contracts.
+  for (const column of ["photo_stored_name TEXT", "photo_mime TEXT", "signature_stored_name TEXT", "signature_mime TEXT", "signature_title TEXT"]) {
+    await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS ${column}`);
+  }
+  // Photos uploaded through the earlier profile_photo_* columns move to the
+  // shared photo column (same folder on disk), so nobody loses their picture.
+  await query(`UPDATE users SET photo_stored_name = profile_photo_stored_name, photo_mime = profile_photo_mime_type
+                WHERE photo_stored_name IS NULL AND profile_photo_stored_name IS NOT NULL`);
+  // Which lawyer's signature is on a contract, and when it was applied.
+  await query("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS legal_signed_by INTEGER REFERENCES users(id) ON DELETE SET NULL");
+  await query("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS legal_signed_at TIMESTAMPTZ");
+  // One contract template may be the organization's default.
+  await query("ALTER TABLE documents ADD COLUMN IF NOT EXISTS is_default_template BOOLEAN NOT NULL DEFAULT FALSE");
   // Contracts already past Sales get the hand-over shares they were missing.
   await backfillHandoverShares();
 }

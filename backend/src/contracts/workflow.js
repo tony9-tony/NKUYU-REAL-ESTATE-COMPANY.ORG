@@ -203,6 +203,7 @@ export const CONTRACT_PLACEHOLDERS = [
   { token: "AGREEMENT_DURATION", label: "Agreement duration" },
   { token: "CONTRACT_DATE", label: "Contract date" },
   { token: "CONTRACT_NUMBER", label: "Contract number" },
+  { token: "LAWYER_SIGNATURE", label: "Lawyer signature line" },
 ];
 
 const KNOWN = new Set(CONTRACT_PLACEHOLDERS.map((entry) => entry.token));
@@ -279,7 +280,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import PDFDocument from "pdfkit";
-import { Document as WordDocument, HeadingLevel, Packer, Paragraph, TextRun } from "docx";
+import { Document as WordDocument, HeadingLevel, ImageRun, Packer, Paragraph, TextRun } from "docx";
 import { BRAND, BRAND_GREEN, BRAND_GOLD, BRAND_SUB } from "../reports/exporters.js";
 import { documentUploadsDir, extensionMime } from "../uploads.js";
 
@@ -381,7 +382,49 @@ export function writeContractPdf({ text, targetPath, title, contractNumber }) {
 }
 
 /** Writes the rendered agreement as an editable Word document. */
-export async function writeContractDocx({ text, targetPath, title, contractNumber }) {
+/** Pixel size of a PNG or JPEG, read from its header (null if unknown). */
+export function imageSize(buffer) {
+  try {
+    if (buffer.readUInt32BE(0) === 0x89504e47) return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20), type: "png" };
+    if (buffer[0] === 0xff && buffer[1] === 0xd8) {
+      let offset = 2;
+      while (offset < buffer.length) {
+        if (buffer[offset] !== 0xff) break;
+        const marker = buffer[offset + 1];
+        const length = buffer.readUInt16BE(offset + 2);
+        if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) {
+          return { height: buffer.readUInt16BE(offset + 5), width: buffer.readUInt16BE(offset + 7), type: "jpg" };
+        }
+        offset += 2 + length;
+      }
+    }
+  } catch { /* fall through */ }
+  return null;
+}
+
+/**
+ * The lawyer's signature block appended after the agreement text: the image,
+ * the signer's name and title, and the date it was applied. It is a separate
+ * block (not part of the editable text), so re-saving the text never
+ * duplicates or loses it.
+ */
+function signatureParagraphs(signature) {
+  if (!signature?.image) return [];
+  const size = imageSize(signature.image);
+  const width = 200;
+  const height = size && size.width ? Math.max(30, Math.min(120, Math.round(width * size.height / size.width))) : 70;
+  return [
+    new Paragraph({ text: "", spacing: { before: 360 } }),
+    new Paragraph({ children: [new TextRun({ text: `Signed for and on behalf of ${signature.company || "the Company"} (Legal)`, bold: true })], spacing: { after: 120 } }),
+    new Paragraph({ children: [new ImageRun({ type: size?.type || "png", data: signature.image, transformation: { width, height } })] }),
+    new Paragraph({ children: [new TextRun({ text: "______________________________" })] }),
+    new Paragraph({ children: [new TextRun({ text: signature.name || "", bold: true })] }),
+    ...(signature.title ? [new Paragraph({ children: [new TextRun({ text: signature.title })] })] : []),
+    new Paragraph({ children: [new TextRun({ text: `Date: ${signature.date || ""}`, color: "666666" })], spacing: { after: 120 } }),
+  ];
+}
+
+export async function writeContractDocx({ text, targetPath, title, contractNumber, signature = null }) {
   const children = [];
   for (const raw of String(text || "").split(/\r?\n/)) {
     const line = raw.replace(/\s+$/, "");
@@ -405,7 +448,7 @@ export async function writeContractDocx({ text, targetPath, title, contractNumbe
     creator: `${BRAND} · ${BRAND_SUB}`,
     title: title || "Sale Agreement",
     subject: `Contract ${contractNumber || ""}`.trim(),
-    sections: [{ properties: { page: { margin: { top: 1000, right: 1000, bottom: 1000, left: 1000 } } }, children }],
+    sections: [{ properties: { page: { margin: { top: 1000, right: 1000, bottom: 1000, left: 1000 } } }, children: [...children, ...signatureParagraphs(signature)] }],
   });
   const buffer = await Packer.toBuffer(document);
   fs.mkdirSync(path.dirname(targetPath), { recursive: true });
@@ -414,10 +457,10 @@ export async function writeContractDocx({ text, targetPath, title, contractNumbe
 }
 
 /** Generates the full contract DOCX into the shared document upload directory. */
-export async function generateContractDocument({ text, title, contractNumber }) {
+export async function generateContractDocument({ text, title, contractNumber, signature = null }) {
   const originalFilename = contractFileName(contractNumber, title);
   const storedName = contractStoredName(originalFilename);
-  const file = await writeContractDocx({ text, targetPath: path.join(documentUploadsDir, storedName), title, contractNumber });
+  const file = await writeContractDocx({ text, targetPath: path.join(documentUploadsDir, storedName), title, contractNumber, signature });
   return { ...file, stored_name: storedName, original_filename: originalFilename };
 }
 

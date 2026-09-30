@@ -17,6 +17,7 @@ import { REPORT_TYPES, PAYMENT_METHODS, reportTypeIsFinancial } from "../models/
 import { CONTRACT_ACTIONS, WORKFLOW_STAGES, WORKFLOW_EXCEPTIONS, availableActions, canTransition, workflowGraph, workflowStagePermissions } from "../contracts/workflow.js";
 import { ROLE_DUTIES, CONTRACT_OWNERSHIP, ROLE_HOME_DEPARTMENT, departmentDutyTree, checkRoleDuties, checkContractOwnership, checkNoSystemAdminLeak, checkDeadPermissions } from "../org/duties.js";
 import taskRoutes from "./tasks.js";
+import { cleanupUploadedFile, profileImageExtensions, profileUploadsDir, removeStoredFile, resolveStoredFile, uploadProfileImageFile, validateUploadedFile } from "../uploads.js";
 
 const router = Router();
 
@@ -115,7 +116,10 @@ async function buildMe(req) {
     // caller is party to, not a decoration - it is 0 for a user with nothing
     // outstanding and never counts another department's private work.
     attention: await attentionCount(req.access),
-    user: await publicUser(req.user),
+    user: {
+      ...await publicUser(req.user),
+      profile_photo_url: req.user.photo_stored_name ? `/api/v1/org/users/${req.user.id}/photo` : null,
+    },
   };
 }
 
@@ -425,6 +429,89 @@ router.get("/workspace", async (req, res, next) => {
       summary, projectReports, reportTypes, reportHistory,
       admin: { departments, roles, users, audit, approvals, dashboard: null, collections: null },
     });
+  } catch (error) { next(error); }
+});
+
+// ---------------------------------------------------------------------------
+// Profile photo (every member) and signature (Legal only).
+//
+// Each person manages only their OWN photo and signature: the routes act on
+// the session user and take no user id, so nobody can replace another
+// person's picture. Photos may be viewed by any signed-in colleague; a
+// signature image is only ever returned to its owner (for preview) and
+// otherwise only leaves the server embedded in a signed contract.
+// ---------------------------------------------------------------------------
+function profileUploadHandler(kind) {
+  const nameColumn = kind === "photo" ? "photo_stored_name" : "signature_stored_name";
+  const mimeColumn = kind === "photo" ? "photo_mime" : "signature_mime";
+  return async (req, res, next) => {
+    try {
+      if (kind === "signature" && !can(req.access, "approve_legal")) {
+        cleanupUploadedFile(req.file);
+        return res.status(403).json({ error: "only members of Legal who approve contracts can upload a signature" });
+      }
+      let fileInfo;
+      try { fileInfo = validateUploadedFile(req.file, profileImageExtensions); }
+      catch (error) { cleanupUploadedFile(req.file); return res.status(error.status || 400).json({ error: error.message }); }
+      const previous = await queryOne(`SELECT ${nameColumn} AS stored FROM users WHERE id=$1`, [req.user.id]);
+      const title = kind === "signature" && typeof req.body?.signature_title === "string" ? req.body.signature_title.trim().slice(0, 120) || null : undefined;
+      await query(
+        `UPDATE users SET ${nameColumn}=$1, ${mimeColumn}=$2${title !== undefined ? ", signature_title=$4" : ""} WHERE id=$3`,
+        title !== undefined ? [fileInfo.storedName, fileInfo.mimeType, req.user.id, title] : [fileInfo.storedName, fileInfo.mimeType, req.user.id],
+      );
+      if (previous?.stored && previous.stored !== fileInfo.storedName) removeStoredFile(profileUploadsDir, previous.stored);
+      await audit(req, `${kind}_uploaded`, "user", req.user.id, {});
+      res.status(201).json({ ok: true, [`has_${kind}`]: true });
+    } catch (error) { next(error); }
+  };
+}
+
+function profileDeleteHandler(kind) {
+  const nameColumn = kind === "photo" ? "photo_stored_name" : "signature_stored_name";
+  const mimeColumn = kind === "photo" ? "photo_mime" : "signature_mime";
+  return async (req, res, next) => {
+    try {
+      const previous = await queryOne(`SELECT ${nameColumn} AS stored FROM users WHERE id=$1`, [req.user.id]);
+      await query(`UPDATE users SET ${nameColumn}=NULL, ${mimeColumn}=NULL WHERE id=$1`, [req.user.id]);
+      // A signature already embedded in signed contracts stays in those
+      // documents; only the stored image used for future signing is removed.
+      if (previous?.stored) removeStoredFile(profileUploadsDir, previous.stored);
+      await audit(req, `${kind}_removed`, "user", req.user.id, {});
+      res.json({ ok: true, [`has_${kind}`]: false });
+    } catch (error) { next(error); }
+  };
+}
+
+function sendProfileImage(res, storedName, mime) {
+  const file = resolveStoredFile(profileUploadsDir, storedName);
+  if (!file) return res.status(404).json({ error: "no image" });
+  res.setHeader("Content-Type", mime || "image/png");
+  res.setHeader("Cache-Control", "private, max-age=300");
+  return res.sendFile(file);
+}
+
+router.post("/me/photo", uploadProfileImageFile, profileUploadHandler("photo"));
+router.delete("/me/photo", profileDeleteHandler("photo"));
+router.post("/me/signature", uploadProfileImageFile, profileUploadHandler("signature"));
+router.delete("/me/signature", profileDeleteHandler("signature"));
+router.put("/me/signature-title", async (req, res, next) => {
+  try {
+    if (!can(req.access, "approve_legal")) return res.status(403).json({ error: "only members of Legal can set a signature title" });
+    const title = typeof req.body?.signature_title === "string" ? req.body.signature_title.trim().slice(0, 120) || null : null;
+    await query("UPDATE users SET signature_title=$1 WHERE id=$2", [title, req.user.id]);
+    res.json({ ok: true, signature_title: title });
+  } catch (error) { next(error); }
+});
+router.get("/me/signature", async (req, res, next) => {
+  try {
+    const row = await queryOne("SELECT signature_stored_name, signature_mime FROM users WHERE id=$1", [req.user.id]);
+    return sendProfileImage(res, row?.signature_stored_name, row?.signature_mime);
+  } catch (error) { next(error); }
+});
+router.get("/users/:id/photo", async (req, res, next) => {
+  try {
+    const row = await queryOne("SELECT photo_stored_name, photo_mime FROM users WHERE id=$1 AND organization_id=$2", [id(req.params.id, "user_id"), await organizationId()]);
+    return sendProfileImage(res, row?.photo_stored_name, row?.photo_mime);
   } catch (error) { next(error); }
 });
 

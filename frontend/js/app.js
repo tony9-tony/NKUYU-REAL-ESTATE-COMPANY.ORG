@@ -180,6 +180,21 @@ function endSession(message = "") {
   if (message) showAuthMessage(message);
 }
 
+// Bumped after an upload so the cached picture is refetched.
+let photoVersion = Date.now();
+
+/** Shows the caller's photo in the sidebar, falling back to their initial. */
+function renderUserAvatar() {
+  const avatar = document.getElementById("user-avatar");
+  if (!avatar) return;
+  const user = state.organization.me?.user || currentUser || {};
+  const initial = escapeHtml(String(user.display_name || user.email || "?").charAt(0).toUpperCase());
+  avatar.innerHTML = user.has_photo && user.id
+    ? `<span>${initial}</span><img data-src="${API_ROOT}/org/users/${user.id}/photo?v=${photoVersion}" alt="">`
+    : `<span>${initial}</span>`;
+  if (user.has_photo) hydrateImages(avatar);
+}
+
 function enterWorkspace(user) {
   currentUser = user;
   authScreen.hidden = true;
@@ -195,11 +210,16 @@ function enterWorkspace(user) {
   state.authorized = false;
   document.getElementById("user-name").textContent = name;
   document.getElementById("user-email").textContent = user.email || "Private workspace";
-  document.getElementById("user-avatar").textContent = name.charAt(0).toUpperCase();
+  setUserAvatar(user);
   // The rail names the portal the caller actually landed in, which is the role
   // the server reported rather than the tab they happened to click.
   if (brandSub) brandSub.textContent = isAdmin ? "Admin Portal" : "Staff Portal";
   bootstrap();
+}
+
+function setUserAvatar() {
+  // One avatar implementation: renderUserAvatar() reads the signed-in profile.
+  renderUserAvatar();
 }
 
 /** Resolves the caller's permissions, scope and module list before anything renders. */
@@ -208,6 +228,8 @@ async function bootstrap() {
   try {
     const me = await api("/org/me");
     state.organization.me = me;
+    currentUser = { ...currentUser, ...me.user };
+    setUserAvatar(currentUser);
     state.authorized = true;
   } catch (error) {
     if (error?.sessionExpired) return;
@@ -869,6 +891,7 @@ function applyWorkspace(payload) {
   state.reportTypes = payload.reportTypes?.types || [];
   state.reportPaymentMethods = payload.reportTypes?.payment_methods || [];
   if (payload.me) state.organization.me = payload.me;
+  renderUserAvatar();
   // The navigation attention badge. Server-computed; never derived locally.
   if (payload.me?.attention) state.attention = payload.me.attention;
   state.organization.leads = payload.leads || [];
@@ -1396,8 +1419,13 @@ function propertyOptionsForProject(projectId, selected = "") {
 }
 
 function contractTemplateOptions(selected = "") {
-  const built = `<option value="" ${!selected ? "selected" : ""}>Built-in Sale Agreement</option>`;
-  return built + (state.contractTemplates || []).map((template) => `<option value="${template.id}" ${String(template.id) === String(selected) ? "selected" : ""}>${escapeHtml(template.title)}</option>`).join("");
+  // Nothing chosen yet: the organization's default template is preselected.
+  // "builtin" is an explicit choice of the built-in agreement, so going back
+  // from the review step never silently swaps the template.
+  const fallback = (state.contractTemplates || []).find((template) => template.is_default);
+  const chosen = selected || (fallback ? String(fallback.id) : "builtin");
+  const built = `<option value="builtin" ${chosen === "builtin" ? "selected" : ""}>Built-in Sale Agreement</option>`;
+  return built + (state.contractTemplates || []).map((template) => `<option value="${template.id}" ${String(template.id) === String(chosen) ? "selected" : ""}>${escapeHtml(template.title)}${template.is_default ? " (default)" : ""}</option>`).join("");
 }
 
 /** Reads the overlay's own inputs. The form is the only thing that changes. */
@@ -1423,7 +1451,8 @@ function generateContractFormData() {
     installments: value("gc-installments", "installments"),
     frequency: value("gc-frequency", "frequency", "monthly"),
     first_due_date: value("gc-first-due", "first_due_date") || null,
-    template_document_id: value("gc-template", "template_document_id") || null,
+    template_choice: value("gc-template", "template_choice") || "",
+    template_document_id: (() => { const raw = value("gc-template", "template_choice"); return raw && raw !== "builtin" ? raw : null; })(),
     notes: value("gc-notes", "notes").trim(),
   };
 }
@@ -1534,7 +1563,9 @@ function generateContractFormBody() {
     </fieldset>
 
     <fieldset class="gen-section"><legend>Contract</legend>
-      <div class="field full"><label for="gc-template">Contract template</label><select id="gc-template" name="template_document_id">${contractTemplateOptions(data.template_document_id)}</select></div>
+      <div class="field full"><label for="gc-template">Contract template</label><select id="gc-template" name="template_document_id">${contractTemplateOptions(data.template_choice)}</select></div>
+      ${canModule("documents") ? `<div class="field full"><div class="field-help">To add or change templates, go to <strong>Documents → Contract templates</strong>. New contracts use the default template automatically.</div></div>` : ""}
+      ${canModule("documents") && can("create") ? `<div class="field full"><label for="gc-attachment">Supporting document (optional)</label><input id="gc-attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.png,.jpg,.jpeg,.gif,.webp,.bmp">${state.contractGen?.attachment ? `<div class="field-help">Selected: ${escapeHtml(state.contractGen.attachment.name)}</div>` : `<div class="field-help">The uploaded file will be linked to this contract in Documents.</div>`}</div>` : ""}
       <div class="field full"><label for="gc-contract-number">Contract number</label><input id="gc-contract-number" value="${escapeHtml(data.contract_number || "")}" placeholder="Issued automatically when generated" readonly aria-readonly="true" tabindex="-1"></div>
       ${genField("gc-notes", "Notes", `<textarea id="gc-notes" name="notes" maxlength="2000" placeholder="Internal notes">${escapeHtml(data.notes)}</textarea>`)}
       <div class="field full"><div class="field-help">The contract number is issued by the system when the contract is created.</div></div>
@@ -1580,6 +1611,7 @@ function generateContractReviewBody(data) {
       ${row("First due date", data.first_due_date ? formatDate(data.first_due_date) : "—")}
       <h3 class="review-heading">Document</h3>
       ${row("Template", template?.title || "Built-in Sale Agreement")}
+      ${state.contractGen?.attachment ? row("Supporting document", state.contractGen.attachment.name) : ""}
       ${row("Contract number", "Issued automatically when generated")}
     </div>
     <div class="form-actions">
@@ -1640,7 +1672,7 @@ function renderGenerateContractModal() {
 
 /** Opens the overlay. Loading the template list is all that happens here. */
 async function openGenerateContractModal() {
-  state.contractGen = { step: "form", result: null, error: null, data: {} };
+  state.contractGen = { step: "form", result: null, error: null, data: {}, attachment: null };
   if (!state.contractTemplates) {
     // A caller without document access still gets the built-in template, so a
     // refusal here must not block contract generation.
@@ -1687,11 +1719,24 @@ async function submitGenerateContract() {
   }
   try {
     const result = await api("/contracts/generate", { method: "POST", body: JSON.stringify(payload) });
+    let attachmentError = null;
+    if (state.contractGen.attachment) {
+      const file = state.contractGen.attachment;
+      const attachment = new FormData();
+      attachment.append("file", file);
+      attachment.append("title", `Contract attachment - ${file.name}`.slice(0, 120));
+      attachment.append("category", "other");
+      attachment.append("status", "pending");
+      attachment.append("contract_id", String(result.contract.id));
+      try { await api("/documents/upload", { method: "POST", form: true, body: attachment }); }
+      catch (error) { attachmentError = error.message || "The contract was generated, but its attachment could not be uploaded."; }
+    }
     state.contractGen = { step: "success", result, error: null };
     renderGenerateContractModal();
     // The register must show the new contract without a manual refresh.
     state.listState.contracts = null;
     refresh();
+    if (attachmentError) showToast(attachmentError);
   } catch (error) {
     showToast(error.message || "The contract could not be generated.");
     state.contractGen.step = "form";
@@ -1991,7 +2036,11 @@ function renderPhotoStrip(property) {
 // would otherwise leak a full image per card per render for the life of the
 // session. The cache also stops the same file being re-fetched on every render.
 const imageBlobCache = new Map();
-const liveImageUrls = new WeakSet();
+// URLs handed out during the current hydration pass. A plain Set: blob URLs are
+// strings, and a WeakSet rejects strings - which used to throw inside
+// hydrateImages and make EVERY authenticated picture (property photos
+// included) fall back to "Photo unavailable".
+const liveImageUrls = new Set();
 
 function revokeImageBlob(url) {
   if (!url || !url.startsWith("blob:")) return;
@@ -2002,7 +2051,10 @@ function revokeImageBlob(url) {
 function releaseDetachedImageBlobs(root = document) {
   for (const [src, url] of imageBlobCache) {
     if (liveImageUrls.has(url)) continue;
-    const stillUsed = Array.from(root.querySelectorAll("img")).some((img) => img.src === url);
+    // Checked against the whole page, not just the re-rendered region, so a
+    // picture still shown elsewhere (the sidebar avatar, an open dialog) keeps
+    // its blob.
+    const stillUsed = Array.from(document.querySelectorAll("img")).some((img) => img.src === url);
     if (!stillUsed) {
       revokeImageBlob(url);
       imageBlobCache.delete(src);
@@ -2042,6 +2094,7 @@ async function hydrateImages(root = document) {
     }
   }));
   releaseDetachedImageBlobs(root);
+  liveImageUrls.clear();
 }
 
 /** Drops every cached picture, e.g. after a property's gallery is edited. */
@@ -2333,6 +2386,7 @@ function renderContracts() {
     const menu = rowMenu([
       ...secondary,
       generatedDocumentAction(contract),
+      canModule("documents") && can("create") ? `<button class="btn btn-small" data-action="upload-contract-document" data-id="${contract.id}">Upload document</button>` : "",
       `<button class="btn btn-small" data-action="contract-history" data-id="${contract.id}">History</button>`,
       can("edit") ? `<button class="btn btn-small" data-action="edit-contract" data-id="${contract.id}">Edit details</button>` : "",
       scheduleAction(contract.id),
@@ -2340,7 +2394,7 @@ function renderContracts() {
     ]);
     return `<tr data-searchable>
       <td><button class="cell-link" data-action="view-contract" data-id="${contract.id}"><span class="cell-main">${escapeHtml(contract.client_name)}</span></button><span class="cell-sub">${escapeHtml(contract.contract_number || "No number yet")}${contract.project_name ? ` · ${escapeHtml(contract.project_name)}` : ""}</span></td>
-      <td>${contractStatusBadge(contract.status)}${stage ? `<span class="cell-sub stage-note" title="Department currently holding the contract">Stage ${stage.number} of ${stage.total} · Held by ${escapeHtml(titleCase(stage.owner))}</span>` : ""}${needsPlan ? `<span class="cell-sub plan-missing">No payment plan yet</span>` : ""}</td>
+      <td>${contractStatusBadge(contract.status)}${stage ? `<span class="cell-sub stage-note" title="Department currently holding the contract">Stage ${stage.number} of ${stage.total} · Held by ${escapeHtml(titleCase(stage.owner))}</span>` : ""}${needsPlan ? `<span class="cell-sub plan-missing">No payment plan yet</span>` : ""}${contract.legal_signed_by ? `<span class="cell-sub signed-note">${icon("check")}Signed by Legal</span>` : ""}</td>
       <td>${badge(contract.contract_type, "neutral")}</td>
       <td><span class="cell-main cell-plain">${formatDate(contract.start_date)}</span><span class="cell-sub">to ${formatDate(contract.end_date)}</span></td>
       <td class="amount">${money(contract.value)}${Number(contract.discount_pct || 0) > 0 ? `<span class="cell-sub">${numberValue(contract.discount_pct)}% discount</span>` : ""}</td>
@@ -2728,7 +2782,78 @@ function renderAppointments() {
         : emptyState("No appointments scheduled", "Book viewings, calls, meetings and inspections with clients.", { iconName: "calendar", action: mayCreate ? `<button class="btn btn-primary" data-action="new-appointment">${icon("plus")}Schedule an appointment</button>` : "" })}</div>`}`;
 }
 
+/** Documents | Contract templates switch at the top of the Documents page. */
+function documentTabs() {
+  const tab = state.docTab || "documents";
+  return `<div class="segmented page-tabs" role="tablist" aria-label="Documents sections"><button class="seg-btn${tab === "documents" ? " active" : ""}" data-action="doc-tab" data-tab="documents" role="tab" aria-selected="${tab === "documents"}">Documents</button><button class="seg-btn${tab === "templates" ? " active" : ""}" data-action="doc-tab" data-tab="templates" role="tab" aria-selected="${tab === "templates"}">Contract templates</button></div>`;
+}
+
+// Contract templates: the Word files contracts are generated from. Uploading a
+// template, choosing the default and removing unused ones all go through the
+// existing /contract-templates endpoints and document permissions.
+function renderTemplates() {
+  if (!state.templatesLoaded && !state.templatesRequested) {
+    state.templatesRequested = true;
+    Promise.all([
+      api("/contract-templates").catch(() => []),
+      state.placeholders ? Promise.resolve(state.placeholders) : api("/contract-placeholders").catch(() => []),
+    ]).then(([templates, placeholders]) => {
+      state.contractTemplates = templates;
+      state.placeholders = placeholders;
+      state.templatesLoaded = true;
+      if (state.view === "documents") render();
+    });
+  }
+  const templates = state.contractTemplates || [];
+  const mayCreate = can("create");
+  const rows = templates.map((template) => {
+    const download = template.has_file ? `<button class="btn btn-small" data-action="download-generated-document" data-id="${template.id}" data-filename="${escapeHtml(template.original_filename || `${template.title}.docx`)}">Download</button>` : "";
+    const makeDefault = !template.is_default && can("edit") ? `<button class="btn btn-small" data-action="template-default" data-id="${template.id}">Make default</button>` : "";
+    const remove = can("delete") && !template.used_by ? `<button class="btn btn-small btn-danger-ghost" data-action="template-delete" data-id="${template.id}">Delete template</button>` : "";
+    return `<tr>
+      <td><span class="cell-main">${escapeHtml(template.title)}</span><span class="cell-sub">${escapeHtml(template.original_filename || "Typed template")}</span></td>
+      <td>${template.is_default ? badge("Default", "approved") : `<span class="muted cell-plain">—</span>`}</td>
+      <td>${escapeHtml(template.uploaded_by_name || "—")}</td>
+      <td>${formatDate(template.uploaded_at || template.created_at)}</td>
+      <td>${Number(template.used_by || 0)} contract${Number(template.used_by) === 1 ? "" : "s"}</td>
+      <td><div class="row-actions">${download}${rowMenu([makeDefault, remove])}</div></td>
+    </tr>`;
+  }).join("");
+  const placeholders = (state.placeholders || []).map((entry) => `<li><code>{{${escapeHtml(entry.token)}}}</code><span>${escapeHtml(entry.label || "")}</span></li>`).join("");
+  return `
+    <div class="template-guide panel">
+      <div class="panel-head"><div><h2 class="panel-title">How contract templates work</h2><div class="panel-note">Every new contract is generated from the default template, unless another is chosen.</div></div><a class="btn btn-small" href="#" data-action="template-starter">${icon("file")}Download starter template</a></div>
+      <div class="panel-body">
+        <ol class="guide-steps">
+          <li><strong>Download</strong> the starter template (or use your own Word agreement).</li>
+          <li><strong>Edit it in Word.</strong> Where client or price details go, type a placeholder such as <code>{{CLIENT_NAME}}</code> or <code>{{FINAL_PRICE}}</code>.</li>
+          <li><strong>Upload</strong> the .docx below and tick <em>Use as default</em>.</li>
+          <li>When anyone generates a contract, the placeholders are filled in automatically, and Legal's signature is added at Legal approval.</li>
+        </ol>
+        ${placeholders ? `<details class="placeholder-list"><summary>Placeholders you can use (${(state.placeholders || []).length})</summary><ul>${placeholders}</ul></details>` : ""}
+      </div>
+    </div>
+    ${mayCreate ? `<form id="template-upload-form" class="panel template-upload">
+      <div class="panel-head"><div><h2 class="panel-title">Upload a template</h2><div class="panel-note">Word .docx only. Wording and headings are kept; the document is produced in the MKUYU style.</div></div></div>
+      <div class="panel-body form-grid">
+        <div class="field full"><label for="template-file">Template file (.docx)</label><input id="template-file" name="file" type="file" accept=".docx" required></div>
+        <div class="field"><label for="template-title">Template name</label><input id="template-title" name="title" maxlength="160" placeholder="e.g. MKUYU Sale Agreement 2026"></div>
+        <div class="field"><label class="checkbox-field"><input type="checkbox" name="is_default" value="true" ${templates.length ? "" : "checked"}><span>Use as default for new contracts</span></label></div>
+        <div class="full row-actions"><button class="btn btn-primary" type="submit">${icon("plus")}Upload template</button></div>
+      </div>
+    </form>` : ""}
+    ${!state.templatesLoaded ? `<div class="loading"><div class="spinner" aria-hidden="true"></div><span>Loading templates…</span></div>`
+      : rows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Template</th><th>Default</th><th>Uploaded by</th><th>Date</th><th>Used by</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<div class="panel">${emptyState("No templates yet", "Contracts use the built-in Sale Agreement until you upload your own template.", { iconName: "file", compact: true })}</div>`}`;
+}
+
 function renderDocuments() {
+  if (state.docTab === "templates") {
+    content.innerHTML = `${documentTabs()}${renderTemplates()}`;
+    const form = document.getElementById("template-upload-form");
+    if (form) markRequiredFields(form);
+    return;
+  }
   const filters = state.filters;
   const rows = (state.documents || []).filter((doc) =>
     (!filters.project || String(doc.project_id) === filters.project) &&
@@ -2771,7 +2896,7 @@ function renderDocuments() {
   }).join("");
   const mayCreate = canModule("documents") && can("create");
   const filtered = Boolean(filters.project || filters.documentStatus || filters.type || filters.documentSearch);
-  content.innerHTML = `
+  content.innerHTML = `${documentTabs()}
     <div class="toolbar">
       <div class="toolbar-filters">
         <label class="toolbar-search">${icon("search")}<input class="filter-input" data-filter="documentSearch" type="search" value="${escapeHtml(filters.documentSearch || "")}" placeholder="Search document titles" aria-label="Search documents"></label>
@@ -2992,6 +3117,46 @@ function showProfile() {
   openModal("profile", {});
   const table = modal.querySelector("table tbody");
   if (table) table.innerHTML = rows;
+  const initial = escapeHtml(String(user.display_name || "?").charAt(0).toUpperCase());
+  const head = document.getElementById("profile-head");
+  if (head) {
+    head.innerHTML = `<div class="profile-photo">${user.has_photo ? `<span>${initial}</span><img data-src="${API_ROOT}/org/users/${user.id}/photo?v=${photoVersion}" alt="Your profile photo">` : `<span>${initial}</span>`}</div>
+      <div class="profile-photo-copy"><strong>${escapeHtml(user.display_name || "")}</strong><span>Profile photo · PNG or JPG, up to 15 MB</span>
+        <div class="row-actions"><label class="btn btn-small btn-primary">${icon("image")}${user.has_photo ? "Change photo" : "Upload photo"}<input type="file" accept=".png,.jpg,.jpeg" data-profile-upload="photo" hidden></label>${user.has_photo ? `<button type="button" class="btn btn-small btn-ghost" data-action="remove-profile-image" data-kind="photo">Remove</button>` : ""}</div></div>`;
+  }
+  // Only members of Legal who approve contracts keep a signature.
+  const signature = document.getElementById("profile-signature");
+  if (signature && can("approve_legal")) {
+    signature.innerHTML = `<div class="form-section"><h3>Contract signature</h3><p>Added automatically to a contract's document when you give Legal approval.</p></div>
+      <div class="signature-box">${user.has_signature ? `<img data-src="${API_ROOT}/org/me/signature?v=${photoVersion}" alt="Your signature">` : `<span class="muted">No signature uploaded yet</span>`}</div>
+      <div class="field"><label for="signature-title">Title shown under your signature</label><input id="signature-title" maxlength="120" value="${escapeHtml(user.signature_title || "")}" placeholder="e.g. Advocate · Legal Manager"></div>
+      <div class="row-actions"><label class="btn btn-small btn-primary">${icon("image")}${user.has_signature ? "Replace signature" : "Upload signature"}<input type="file" accept=".png,.jpg,.jpeg" data-profile-upload="signature" hidden></label><button type="button" class="btn btn-small" data-action="save-signature-title">Save title</button>${user.has_signature ? `<button type="button" class="btn btn-small btn-ghost" data-action="remove-profile-image" data-kind="signature">Remove</button>` : ""}</div>
+      <p class="field-help">Tip: sign on white paper, photograph or scan it, and crop close to the signature. A PNG with a transparent background looks best.</p>`;
+  }
+  hydrateImages(modal);
+}
+
+/** Re-reads the caller's profile after a photo or signature change. */
+async function reloadProfile() {
+  photoVersion = Date.now();
+  clearImageBlobCache();
+  try { state.organization.me = await api("/org/me"); } catch (_) { /* keep the old profile */ }
+  renderUserAvatar();
+  showProfile();
+}
+
+async function uploadProfileImage(kind, file) {
+  if (!file) return;
+  const payload = new FormData();
+  payload.append("file", file);
+  if (kind === "signature") payload.append("signature_title", document.getElementById("signature-title")?.value || "");
+  try {
+    await api(`/org/me/${kind}`, { method: "POST", form: true, body: payload });
+    showToast(kind === "photo" ? "Profile photo updated." : "Signature saved. It will be added to contracts you approve.");
+    await reloadProfile();
+  } catch (error) {
+    showToast(error.message || "Upload failed.");
+  }
 }
 
 function showAlertsPanel() {
@@ -3213,8 +3378,10 @@ function openModal(type, record = null) {
     </div>`;
   }
   if (type === "document") {
-    title = record ? "Edit document" : "New document";
-    subtitle = record ? "Update this document record." : "Upload a file and register the document.";
+    // A prefilled record (e.g. "Upload document" on a contract) is still new.
+    const editing = Boolean(record?.id);
+    title = editing ? "Edit document" : record?.contract_id ? "Upload contract document" : "New document";
+    subtitle = editing ? "Update this document record." : record?.contract_id ? "Attach a file to this contract, e.g. the signed copy, ID or title deed." : "Upload a file and register the document.";
     const hasFile = record?.has_file;
     body = `<div class="form-grid">
       ${formSection("Related records", "Optional links to the project, contract or client this document belongs to.")}
@@ -3226,7 +3393,7 @@ function openModal(type, record = null) {
       <div class="field"><label for="field-category">Category</label><select id="field-category" name="category"><option value="agreement" ${record?.category === "agreement" ? "selected" : ""}>Agreement</option><option value="title" ${record?.category === "title" ? "selected" : ""}>Title</option><option value="invoice" ${record?.category === "invoice" ? "selected" : ""}>Invoice</option><option value="receipt" ${record?.category === "receipt" ? "selected" : ""}>Receipt</option><option value="report" ${record?.category === "report" ? "selected" : ""}>Report</option><option value="permit" ${record?.category === "permit" ? "selected" : ""}>Permit</option><option value="other" ${record?.category === "other" ? "selected" : ""}>Other</option></select></div>
       <div class="field"><label for="field-status">Status</label><select id="field-status" name="status"><option value="pending" ${record?.status === "pending" ? "selected" : ""}>Pending</option><option value="approved" ${record?.status === "approved" ? "selected" : ""}>Approved</option><option value="archived" ${record?.status === "archived" ? "selected" : ""}>Archived</option></select></div>
       ${formSection("File")}
-      <div class="field full"><label for="field-file">File</label><input id="field-file" name="file" type="file" ${record ? "disabled" : ""}>${hasFile ? `<div class="field-help">Current file: <strong>${escapeHtml(record.original_filename || record.file_name || "attached")}</strong></div>` : record ? `<div class="field-help">Files can only be attached while creating a document.</div>` : ""}</div>
+      <div class="field full"><label for="field-file">File</label><input id="field-file" name="file" type="file" ${editing ? "disabled" : ""}>${hasFile ? `<div class="field-help">Current file: <strong>${escapeHtml(record.original_filename || record.file_name || "attached")}</strong></div>` : editing ? `<div class="field-help">Files can only be attached while creating a document.</div>` : ""}</div>
       <div class="field full"><label for="field-file-reference">File reference</label><input id="field-file-reference" name="file_reference" maxlength="120" value="${escapeHtml(record?.file_reference || "")}" placeholder="documents/onboarding-checklist.pdf"></div>
       <div class="field full"><label for="field-notes">Notes</label><textarea id="field-notes" name="notes" maxlength="2000" placeholder="Purpose or follow-up note">${escapeHtml(record?.notes || "")}</textarea></div>
     </div>`;
@@ -3265,8 +3432,10 @@ function openModal(type, record = null) {
     // Rows are filled in by showProfile() straight after the dialog opens, so the
     // markup here only supplies the frame.
     title = "My profile";
-    subtitle = "Your account, role and data scope as the server reports them.";
-    body = `<div class="table-wrap"><table><tbody></tbody></table></div>
+    subtitle = "Your photo, account, role and data scope.";
+    body = `<div class="profile-head" id="profile-head"></div>
+      <div class="table-wrap"><table><tbody></tbody></table></div>
+      <div id="profile-signature"></div>
       <p class="field-help" style="margin-top:14px">Role, department and permissions are managed by an administrator in Administration → Users.</p>`;
   }
   if (type === "alerts") {
@@ -3896,6 +4065,7 @@ function viewContract(contractId) {
       <button type="button" class="btn" data-action="close-modal">Close</button>
       ${contract.generated_document_id && canModule("documents") ? `<button type="button" class="btn btn-soft" data-action="view-generated-contract" data-id="${contract.id}">View / Edit</button><button type="button" class="btn" data-action="download-generated-document" data-id="${contract.generated_document_id}" data-filename="${escapeHtml(`${contract.contract_number || "contract"}.docx`)}">Download DOCX</button>` : ""}
       ${can("edit") ? `<button type="button" class="btn btn-primary" data-action="edit-contract-from-view" data-id="${contract.id}">Edit contract</button>` : ""}
+      ${canModule("documents") && can("create") ? `<button type="button" class="btn" data-action="upload-contract-document" data-id="${contract.id}">Upload document</button>` : ""}
       <button type="button" class="btn btn-soft" data-action="contract-history" data-id="${contract.id}">History</button>
     </div>`;
   modalBackdrop.hidden = false;
@@ -3981,6 +4151,32 @@ document.addEventListener("click", async (event) => {
   if (action === "generate-schedule") openModalFor("contracts", id, "schedule");
   if (action === "contract-transition") runContractTransition(id, target.dataset.transition);
   if (action === "contract-history") showContractHistory(id);
+  if (action === "doc-tab") {
+    state.docTab = target.dataset.tab;
+    if (state.docTab === "templates") state.templatesRequested = false;
+    render();
+  }
+  if (action === "template-starter") {
+    event.preventDefault();
+    downloadFile("/contract-templates/starter", "MKUYU-contract-template.docx").catch((error) => showToast(error.message || "Download failed."));
+  }
+  if (action === "template-default") {
+    try { await api(`/contract-templates/${id}`, { method: "PUT", body: JSON.stringify({ is_default: true }) }); showToast("Default template updated."); state.templatesLoaded = false; state.templatesRequested = false; render(); }
+    catch (error) { showToast(error.message || "Unable to update the template."); }
+  }
+  if (action === "template-delete") {
+    const ok = await confirmDialog({ title: "Delete template", message: "Delete this contract template? Contracts already generated are not affected.", confirmLabel: "Delete template" });
+    if (ok) {
+      try { await api(`/contract-templates/${id}`, { method: "DELETE" }); showToast("Template deleted."); state.templatesLoaded = false; state.templatesRequested = false; render(); }
+      catch (error) { showToast(error.message || "Unable to delete the template."); }
+    }
+  }
+  if (action === "upload-contract-document") {
+    // Opens the normal New document form, already linked to this contract.
+    const contract = (state.contracts || []).find((item) => String(item.id) === String(id));
+    closeModal();
+    openModal("document", { prefill: true, contract_id: id, project_id: contract?.project_id, client_id: contract?.client_id, category: "agreement", title: contract ? `${contract.contract_number || "Contract"} · ` : "" });
+  }
   if (action === "view-contract") viewContract(id);
   if (action === "edit-contract-from-view") {
     // Resolved by id: the contract being viewed may not be on the current page.
@@ -4014,6 +4210,14 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "show-alerts") showAlertsPanel();
   if (action === "show-profile") showProfile();
+  if (action === "remove-profile-image") {
+    try { await api(`/org/me/${target.dataset.kind}`, { method: "DELETE" }); showToast("Removed."); await reloadProfile(); }
+    catch (error) { showToast(error.message || "Unable to remove."); }
+  }
+  if (action === "save-signature-title") {
+    try { await api("/org/me/signature-title", { method: "PUT", body: JSON.stringify({ signature_title: document.getElementById("signature-title")?.value || "" }) }); showToast("Signature title saved."); await reloadProfile(); }
+    catch (error) { showToast(error.message || "Unable to save."); }
+  }
   if (action === "open-alert-view") {
     // Route through the normal view switch, which re-applies the navigation
     // permission filter, so a stale link can never open a forbidden screen.
@@ -4196,6 +4400,26 @@ content.addEventListener("change", (event) => {
 });
 
 content.addEventListener("submit", async (event) => {
+  if (event.target.id !== "template-upload-form") return;
+  event.preventDefault();
+  const form = event.target;
+  const button = form.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
+  try {
+    const payload = new FormData(form);
+    if (!payload.get("is_default")) payload.delete("is_default");
+    const result = await api("/contract-templates/upload", { method: "POST", form: true, body: payload });
+    showToast(`Template "${result.title}" uploaded (${(result.placeholders || []).length} placeholders found).`);
+    state.templatesLoaded = false;
+    state.templatesRequested = false;
+    render();
+  } catch (error) {
+    showToast(error.message || "Upload failed.");
+    if (button) button.disabled = false;
+  }
+});
+
+content.addEventListener("submit", async (event) => {
   if (event.target.id !== "lead-form") return;
   event.preventDefault();
   try { await api("/org/leads", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(event.target))) }); await refresh(); showToast("Lead added."); }
@@ -4239,6 +4463,14 @@ modal.addEventListener("input", (event) => {
   updateGenerateContractPreview();
 });
 modal.addEventListener("change", (event) => {
+  if (event.target.dataset?.profileUpload) {
+    uploadProfileImage(event.target.dataset.profileUpload, event.target.files?.[0]);
+    return;
+  }
+  if (event.target.id === "gc-attachment") {
+    state.contractGen.attachment = event.target.files?.[0] || null;
+    return;
+  }
   if (event.target.id === "gc-project") {
     const data = generateContractFormData();
     state.contractGen.data = { ...data, property_id: null };

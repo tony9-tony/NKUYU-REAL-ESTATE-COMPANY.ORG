@@ -199,7 +199,17 @@ async function main() {
 }
 
 async function runPropertyAndBackupTests(projectId, clientId) {
-  let res = await call("/properties", { method: "POST", body: JSON.stringify({ project_id: projectId, name: "E2E Villa", property_type: "villa", status: "available", price: 500000, location: "Dar", area: 400, bedrooms: 4, bathrooms: 3, featured: false }) });
+  let res;
+  const profilePhotoForm = new FormData();
+  profilePhotoForm.append("file", new Blob([PNG], { type: "image/png" }), "profile.png");
+  res = await call("/profile/photo", { method: "POST", form: true, body: profilePhotoForm });
+  assert(res.status === 200 && Boolean(res.payload?.profile_photo_url), `upload profile photo (${res.status}: ${res.payload?.error || "ok"})`);
+  const profile = await call("/org/me");
+  assert(profile.payload?.user?.profile_photo_url, "profile photo is returned after refresh");
+  const profilePhotoResponse = await fetch(`${BASE}/profile/photo`, { headers: { Authorization: `Bearer ${token}` } });
+  assert(profilePhotoResponse.status === 200, "authenticated profile photo file endpoint returns 200");
+
+  res = await call("/properties", { method: "POST", body: JSON.stringify({ project_id: projectId, name: "E2E Villa", property_type: "villa", status: "available", price: 500000, location: "Dar", area: 400, bedrooms: 4, bathrooms: 3, featured: false }) });
   assert(res.status === 201, "create property without pictures (must succeed)");
   const propertyId = res.payload.id;
   assert(res.payload.image_count === 0, "new property has zero pictures");

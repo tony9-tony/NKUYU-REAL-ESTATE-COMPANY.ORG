@@ -18,6 +18,8 @@ export const uploadsRoot = path.join(runtimeDataRoot, "uploads");
 export const documentUploadsDir = path.join(uploadsRoot, "documents");
 export const reportUploadsDir = path.join(uploadsRoot, "reports");
 export const propertyUploadsDir = path.join(uploadsRoot, "properties");
+// Staff profile photos and lawyers' signature images.
+export const profileUploadsDir = path.join(uploadsRoot, "profiles");
 export const backupsDir = path.join(runtimeDataRoot, "backups");
 
 export const documentExtensions = new Set([
@@ -27,6 +29,8 @@ export const documentExtensions = new Set([
 export const reportExtensions = new Set([".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"]);
 // Property pictures are optional and image-only.
 export const propertyImageExtensions = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
+// Profile photos and signatures: formats a Word document can embed.
+export const profileImageExtensions = new Set([".png", ".jpg", ".jpeg"]);
 
 export const extensionMime = {
   ".pdf": "application/pdf",
@@ -48,6 +52,7 @@ export function ensureUploadDirs() {
   fs.mkdirSync(documentUploadsDir, { recursive: true });
   fs.mkdirSync(reportUploadsDir, { recursive: true });
   fs.mkdirSync(propertyUploadsDir, { recursive: true });
+  fs.mkdirSync(profileUploadsDir, { recursive: true });
 }
 
 export function safeExtension(originalName) {
@@ -123,6 +128,7 @@ function makeUploader(directory, allowedExtensions) {
 export const uploadDocumentFile = makeUploader(documentUploadsDir, documentExtensions);
 export const uploadReportFile = makeUploader(reportUploadsDir, reportExtensions);
 export const uploadPropertyImageFile = makeUploader(propertyUploadsDir, propertyImageExtensions);
+export const uploadProfileImageFile = makeUploader(profileUploadsDir, profileImageExtensions);
 
 export function validateUploadedFile(file, allowedExtensions) {
   if (!file) {

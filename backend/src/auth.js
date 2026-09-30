@@ -94,7 +94,14 @@ function tokenFromRequest(req) {
 async function publicUser(user) {
   const roles = (await query("SELECT r.id, r.name, r.rank FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1 ORDER BY r.rank DESC, r.name", [user.id])).rows;
   const departments = (await query("SELECT d.id, d.name FROM user_departments ud JOIN departments d ON d.id = ud.department_id WHERE ud.user_id = $1 ORDER BY d.name", [user.id])).rows;
-  return { id: user.id, email: user.email, display_name: user.display_name, role: user.role, roles, departments };
+  return {
+    id: user.id, email: user.email, display_name: user.display_name, role: user.role, roles, departments,
+    // Presence flags only; the images are served by /org/users/:id/photo and
+    // /org/me/signature, never inlined.
+    has_photo: Boolean(user.photo_stored_name),
+    has_signature: Boolean(user.signature_stored_name),
+    signature_title: user.signature_title || null,
+  };
 }
 
 async function requireAuth(req, res, next) {
