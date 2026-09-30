@@ -197,6 +197,33 @@ try {
   check((await call(`/org/requests/${leadId}/handed-off`, { method: "POST", as: officer, body: { task_id: task.body.id } })).status === 409, "a request that is already a client cannot be handed off again");
   check((await call("/org/requests", { as: await signIn("finance@demo.mkuyu.local") })).status === 403, "staff without the Leads module (Finance) cannot read Requests");
 
+  console.log("\n=== Assignments: every task reaches its person ===");
+  const people = ["cs@demo.mkuyu.local", "finance@demo.mkuyu.local", "sales@demo.mkuyu.local"];
+  const adminAssignees = (await call("/org/tasks/assignees", { as: admin })).body;
+  check(adminAssignees.every((u) => Array.isArray(u.departments)), "every assignee comes with their departments (for the Department picker)");
+  const csDept = departments.find((d) => d.name === "CUSTOMER SERVICE").id;
+  check(adminAssignees.filter((u) => u.departments.some((d) => d.id === csDept)).every((u) => csMembers.includes(Number(u.id))), "choosing Customer Service offers only its members");
+  const sent2 = [];
+  for (const email of people) {
+    const uid = (await query("SELECT id FROM users WHERE email=$1", [email])).rows[0].id;
+    const t = await call("/org/tasks", { method: "POST", as: admin, body: { title: `Delivery check ${tag} for ${email}`, assigned_to: uid, priority: "medium" } });
+    check(t.status === 201, `the admin assigns a task to ${email} (${t.status})`);
+    sent2.push({ email, id: t.body.id });
+  }
+  for (const { email, id: taskId } of sent2) {
+    const who = await signIn(email);
+    const mine = (await call("/org/tasks?box=mine", { as: who })).body;
+    const attention = (await call("/org/tasks/attention", { as: who })).body;
+    check(mine.some((t) => t.id === taskId) && attention.mine >= 1, `${email} really receives it: in My tasks and in the attention count`);
+    const others = sent2.filter((x) => x.email !== email).map((x) => x.id);
+    check(!mine.some((t) => others.includes(t.id)), `${email} does not receive other people's tasks`);
+  }
+  const all = (await call("/org/tasks?box=all", { as: admin })).body;
+  check(sent2.every((x) => all.some((t) => t.id === x.id)), "All assignments shows every task to the admin");
+  const officerAll = (await call("/org/tasks?box=all", { as: officer })).body;
+  check(officerAll.some((t) => t.id === task.body.id) && !officerAll.some((t) => t.id === sent2[1].id), "a Sales officer's All assignments shows their work, not Finance's");
+  check((await call("/org/tasks?box=everything", { as: admin })).status === 400, "an unknown box is refused");
+
   console.log("\n=== boundaries ===");
   const cors = await call("/public/properties", { auth: false, headers: { Origin: "http://localhost:5500" } });
   check(cors.status === 200 && cors.headers.get("access-control-allow-origin") === "http://localhost:5500", "the public website's origin may read the public API");

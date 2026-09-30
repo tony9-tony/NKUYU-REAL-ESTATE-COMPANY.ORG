@@ -71,7 +71,7 @@ const state = {
   // count (from /org/me and refreshed after every task action) - the badge is
   // never computed here from local rows, so it cannot drift from the backend.
   tasks: null,
-  taskBox: "mine",
+  taskBox: "all",
   taskPriority: "",
   taskStatus: "",
   tasksRequested: false,
@@ -1194,6 +1194,9 @@ const TASK_STATUS_LABELS = {
   completed: "Completed", cancelled: "Cancelled",
 };
 const TASK_BOXES = [
+  // Every assignment this person may see: all of them for the MD/ICT,
+  // their department's for a department head, their own work otherwise.
+  { key: "all", label: "All assignments" },
   { key: "mine", label: "My tasks" },
   { key: "assigned_by_me", label: "Tasks I assigned" },
   { key: "needs_review", label: "Needs my review" },
@@ -1347,6 +1350,34 @@ const TASK_LINK_CHOICES = [
  * hold it without `review_tasks`. A reviewer list that cannot be read now simply
  * means no reviewer is offered; the assignee list is the one that must succeed.
  */
+/** The departments the caller may assign into, from the server's assignee list. */
+function taskDepartments(assignees) {
+  const byId = new Map();
+  for (const person of assignees) for (const dept of person.departments || []) byId.set(dept.id, dept);
+  return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Officers follow the chosen department; nobody from another department is offered. */
+function wireTaskDepartment(assignees, lockTo = null) {
+  const form = document.getElementById("task-form");
+  const deptSelect = form?.querySelector('[data-role="task-department"]');
+  const people = form?.querySelector('[name="assigned_to"]');
+  if (!deptSelect || !people) return;
+  const fill = () => {
+    const deptId = Number(deptSelect.value);
+    const members = deptId ? assignees.filter((p) => (p.departments || []).some((d) => Number(d.id) === deptId)) : [];
+    people.innerHTML = `<option value="">${deptId ? (members.length ? "Choose an officer" : "No active officer in this department") : "Choose a department first"}</option>${members.map((p) => `<option value="${p.id}">${escapeHtml(p.display_name)}</option>`).join("")}`;
+    people.disabled = !members.length;
+    if (members.length === 1) people.value = String(members[0].id);
+  };
+  if (lockTo) {
+    const match = taskDepartments(assignees).find((d) => d.name.toUpperCase() === lockTo.toUpperCase());
+    if (match) { deptSelect.value = String(match.id); deptSelect.disabled = true; }
+  }
+  deptSelect.addEventListener("change", fill);
+  fill();
+}
+
 async function openTaskModal(prefill = {}) {
   // A hand-off remembers its request, so the new task is tied to it on save.
   state.pendingHandOff = prefill.requestId || null;
@@ -1384,6 +1415,7 @@ async function openTaskModal(prefill = {}) {
     <form id="task-form" class="form-grid">
       <div class="field"><label for="task-title">Task title <span class="req">*</span></label><input id="task-title" name="title" required maxlength="160" placeholder="Prepare Monthly Sales Report"></div>
       <div class="field full"><label for="task-description">Description / instructions</label><textarea id="task-description" name="description" rows="3" placeholder="What exactly must be produced?"></textarea></div>
+      <div class="field"><label for="task-department">Department <span class="req">*</span></label><select id="task-department" data-role="task-department" required><option value="">Choose a department</option>${taskDepartments(assignees).map((d) => `<option value="${d.id}">${escapeHtml(titleCase(d.name))}</option>`).join("")}</select></div>
       <div class="field"><label for="task-assignee">Assign to <span class="req">*</span></label><select id="task-assignee" name="assigned_to" required><option value="">Select authorized staff</option>${people}</select></div>
       ${reviewerField}
       <div class="field"><label for="task-priority-input">Priority</label><select id="task-priority-input" name="priority">${priorities}</select></div>
@@ -1392,6 +1424,7 @@ async function openTaskModal(prefill = {}) {
       <div class="field"><label for="task-link-id">Linked record id</label><input id="task-link-id" name="linked_record_id" type="number" min="1" step="1" placeholder="e.g. 21"></div>
       <div class="form-actions full"><button type="button" class="btn" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="submit">Assign work</button></div>
     </form>`;
+  wireTaskDepartment(assignees, prefill.department || null);
   // Hand-offs (e.g. a website lead to Customer Service) arrive pre-filled.
   if (prefill.title || prefill.description) {
     const form = document.getElementById("task-form");
@@ -1408,9 +1441,6 @@ async function openTaskModal(prefill = {}) {
       if (label) label.firstChild.textContent = "Customer Service officer ";
       const note = modal.querySelector(".modal-head p");
       if (note) note.textContent = "Only Customer Service staff are listed.";
-      const select = form?.querySelector('[name="assigned_to"]');
-      if (select?.options[0]) select.options[0].text = "Choose a Customer Service officer";
-      if (select && assignees.length === 1) select.value = String(assignees[0].id);
       // The request is already in the description; no linked-record fields.
       for (const name of ["linked_entity", "linked_record_id"]) form?.querySelector(`[name="${name}"]`)?.closest(".field")?.remove();
     }

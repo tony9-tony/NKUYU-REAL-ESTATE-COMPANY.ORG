@@ -62,7 +62,9 @@ router.get("/assignees", route(async (req, res) => {
     values.push(String(req.query.department).trim().toUpperCase());
     scope += ` AND EXISTS (SELECT 1 FROM user_departments ud2 JOIN departments d2 ON d2.id=ud2.department_id WHERE ud2.user_id=u.id AND d2.active=TRUE AND UPPER(d2.name)=$${values.length})`;
   }
-  res.json((await query(`SELECT u.id, u.display_name, u.email FROM users u WHERE u.organization_id=$1 AND u.active=TRUE ${scope} ORDER BY u.display_name LIMIT 200`, values)).rows);
+  res.json((await query(`SELECT u.id, u.display_name, u.email,
+      COALESCE((SELECT json_agg(json_build_object('id', d.id, 'name', d.name) ORDER BY d.name) FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=u.id AND d.active=TRUE), '[]'::json) AS departments
+    FROM users u WHERE u.organization_id=$1 AND u.active=TRUE ${scope} ORDER BY u.display_name LIMIT 200`, values)).rows);
 }));
 
 router.get("/reviewers", route(async (req, res) => {
@@ -77,7 +79,7 @@ router.get("/", route(async (req, res) => {
   if (req.query.status && !TASK_STATUSES.includes(status)) return res.status(400).json({ error: "status is invalid" });
   if (req.query.priority && !TASK_PRIORITIES.includes(priority)) return res.status(400).json({ error: "priority is invalid" });
   const box = req.query.box ? String(req.query.box) : null;
-  if (box && !["mine", "assigned_by_me", "needs_review"].includes(box)) return res.status(400).json({ error: "box is invalid" });
+  if (box && !["all", "mine", "assigned_by_me", "needs_review"].includes(box)) return res.status(400).json({ error: "box is invalid" });
   const rows = await listTasks({ status, priority, box, search: req.query.search || null }, req.access || (await currentAccess()));
   res.json(await Promise.all(rows.map((row) => decorate(row, req))));
 }));
