@@ -197,6 +197,68 @@ try {
   check((await call(`/org/requests/${leadId}/handed-off`, { method: "POST", as: officer, body: { task_id: task.body.id } })).status === 409, "a request that is already a client cannot be handed off again");
   check((await call("/org/requests", { as: await signIn("finance@demo.mkuyu.local") })).status === 403, "staff without the Leads module (Finance) cannot read Requests");
 
+  console.log("\n=== Customer Service reports the outcome back to Sales ===");
+  const home = await call("/properties", { method: "POST", body: { project_id: project.body.id, name: `Flat ${tag}`, property_type: "apartment", status: "available", price: 90000000, location: "Dar es Salaam", area: 90, bedrooms: 2, bathrooms: 1, offer_buy: 1, public_listing: 1 } });
+  check(home.status === 201, "a second home is published for the outcome checks");
+  const newRequest = async (name, phone) => {
+    const r = await call("/public/requests", { method: "POST", auth: false, body: { property: home.body.id, service: "buy", name, phone, email: "", budget: 80000000, preferred_contact: "phone", message: "" } });
+    return Number(r.body.reference.slice(2));
+  };
+  const handOff = async (requestId) => {
+    const t = await call("/org/tasks", { method: "POST", as: officer, body: { title: "Contact customer", assigned_to: csId, reviewer_id: officerId, priority: "high" } });
+    await call(`/org/requests/${requestId}/handed-off`, { method: "POST", as: officer, body: { task_id: t.body.id } });
+    return t.body.id;
+  };
+  const rowOf = async (requestId) => (await call("/org/requests", { as: officer })).body.find((r) => r.id === requestId);
+  const outcome = (taskId, body, who = cs) => call(`/org/tasks/${taskId}/outcome`, { method: "POST", as: who, body });
+  const approve = async (taskId) => { await call(`/org/tasks/${taskId}/actions`, { method: "POST", as: officer, body: { action: "begin_review" } }); return call(`/org/tasks/${taskId}/actions`, { method: "POST", as: officer, body: { action: "approve" } }); };
+
+  // Appointment arranged
+  const r1 = await newRequest("Outcome Appointment", "+255 713 100 001");
+  const t1 = await handOff(r1);
+  const csTask = (await call("/org/tasks?box=mine", { as: cs })).body.find((t) => t.id === t1);
+  check(Number(csTask?.request_id) === r1 && csTask?.request_customer === "Outcome Appointment", "Customer Service sees which customer request the task is");
+  check((await outcome(t1, { outcome: "appointment", note: "Wants Saturday" }, officer)).status === 403, "only the Customer Service officer given the task can report its outcome");
+  check((await outcome(t1, { outcome: "appointment" })).status === 400, "an appointment needs a date and time");
+  check((await outcome(t1, { outcome: "appointment", appointment_at: "2020-01-01T10:00:00Z" })).status === 400, "an appointment in the past is refused");
+  const when = new Date(Date.now() + 3 * 86400000); when.setUTCHours(8, 0, 0, 0);
+  const sentOutcome = await outcome(t1, { outcome: "appointment", appointment_at: when.toISOString(), appointment_type: "viewing", note: "Wants to view with spouse" });
+  check(sentOutcome.status === 200 && sentOutcome.body.status === "submitted", `one step reports the outcome and submits the task, even before 'Start' (${sentOutcome.status}, ${sentOutcome.body.status})`);
+  check((await call("/org/tasks/attention", { as: officer })).body.review >= 1, "Sales is notified: the report counts in Sales's review badge");
+  let row1 = await rowOf(r1);
+  check(row1?.outcome === "appointment" && row1?.task_status === "submitted" && !row1?.appointment_id, "Requests shows the reported appointment, waiting for Sales");
+  const detail1 = (await call(`/org/tasks/${t1}`, { as: officer })).body;
+  check(detail1.request_outcome === "appointment" && (detail1.comments || []).some((c) => c.body.includes("Appointment arranged")), "the task keeps the outcome as its submission comment (history)");
+  check((await outcome(t1, { outcome: "declined", note: "x" })).status === 409, "an outcome cannot be reported twice");
+  check((await approve(t1)).status === 200, "Sales approves the report");
+  row1 = await rowOf(r1);
+  const appt = row1?.appointment_id ? (await query("SELECT * FROM appointments WHERE id=$1", [row1.appointment_id])).rows[0] : null;
+  check(Boolean(appt) && appt.appointment_type === "viewing" && new Date(appt.starts_at).getTime() === when.getTime() && Number(appt.property_id) === home.body.id, "approval books the appointment in Appointments, for that property and time");
+  check(Boolean(row1?.client_id) && Number(appt?.client_id) === Number(row1.client_id), "and registers the customer as a client");
+  const apptList = (await call("/appointments", { as: officer })).body;
+  check((Array.isArray(apptList) ? apptList : apptList?.data || []).some((a) => a.id === appt?.id), "the Sales officer can see the booked appointment");
+
+  // Declined
+  const r2 = await newRequest("Outcome Declined", "+255 713 100 002");
+  const t2 = await handOff(r2);
+  check((await outcome(t2, { outcome: "declined" })).status === 400, "'declined' needs the reason");
+  check((await outcome(t2, { outcome: "declined", note: "Bought elsewhere" })).status === 200, "Customer Service reports that the customer declined");
+  await approve(t2);
+  const row2 = await rowOf(r2);
+  check(row2?.status === "closed" && !row2?.client_id && !row2?.appointment_id, "after approval the request is closed, with no client or appointment created");
+
+  // Unreachable, then handed off again
+  const r3 = await newRequest("Outcome Unreachable", "+255 713 100 003");
+  const t3 = await handOff(r3);
+  check((await outcome(t3, { outcome: "unreachable", note: "No answer twice" })).status === 200, "Customer Service reports the customer could not be reached");
+  await approve(t3);
+  check((await rowOf(r3))?.status === "unreachable", "after approval the request is marked not reached");
+  const t3b = await handOff(r3);
+  const row3 = await rowOf(r3);
+  check(Number(row3?.task_id) === t3b && !row3?.outcome && row3?.task_status === "assigned", "Sales can hand it off again, starting fresh");
+  check((await outcome(t3b, { outcome: "maybe" })).status === 400, "an unknown outcome is refused");
+  check((await outcome(t3b, { outcome: "interested", note: "Call back next week" })).status === 200, "the new attempt reports 'interested'");
+
   console.log("\n=== Assignments: every task reaches its person ===");
   const people = ["cs@demo.mkuyu.local", "finance@demo.mkuyu.local", "sales@demo.mkuyu.local"];
   const adminAssignees = (await call("/org/tasks/assignees", { as: admin })).body;

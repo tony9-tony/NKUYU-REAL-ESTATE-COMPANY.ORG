@@ -27,7 +27,11 @@ const select = `SELECT t.*,
   rv.display_name AS reviewer_name, rv.email AS reviewer_email,
   sb.display_name AS submitted_by_name, ap.display_name AS approved_by_name,
   cb.display_name AS completed_by_name,
-  d.name AS department_name
+  d.name AS department_name,
+  rq.id AS request_id, rq.name AS request_customer, rq.service AS request_service,
+  rq.outcome AS request_outcome, rq.outcome_note AS request_outcome_note,
+  rq.appointment_at AS request_appointment_at, rq.appointment_type AS request_appointment_type,
+  rq.appointment_id AS request_appointment_id
  FROM tasks t
  LEFT JOIN users ab ON ab.id = t.assigned_by
  LEFT JOIN users at ON at.id = t.assigned_to
@@ -35,7 +39,8 @@ const select = `SELECT t.*,
  LEFT JOIN users sb ON sb.id = t.submitted_by
  LEFT JOIN users ap ON ap.id = t.approved_by
  LEFT JOIN users cb ON cb.id = t.completed_by
- LEFT JOIN departments d ON d.id = t.department_id`;
+ LEFT JOIN departments d ON d.id = t.department_id
+ LEFT JOIN LATERAL (SELECT l.* FROM leads l WHERE l.task_id = t.id ORDER BY l.id LIMIT 1) rq ON TRUE`;
 
 function visibilityCondition(access, values) {
   if (!access || access.isAdmin || access.scope === "organization") return "TRUE";

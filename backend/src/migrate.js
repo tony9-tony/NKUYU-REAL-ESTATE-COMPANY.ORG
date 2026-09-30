@@ -297,6 +297,19 @@ async function migratePublicListing() {
   // handed to (Requests view): the task's progress is the request's stage.
   await query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL");
   await query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS handed_off_at TIMESTAMPTZ");
+  // What Customer Service found when they contacted the customer, reported
+  // back to Sales with the task: appointment / interested / declined /
+  // unreachable. An appointment becomes a real Appointment (and the customer a
+  // client) only when Sales approves the report.
+  for (const column of [
+    "outcome TEXT",
+    "outcome_note TEXT",
+    "outcome_at TIMESTAMPTZ",
+    "outcome_by INTEGER REFERENCES users(id) ON DELETE SET NULL",
+    "appointment_at TIMESTAMPTZ",
+    "appointment_type TEXT",
+    "appointment_id INTEGER REFERENCES appointments(id) ON DELETE SET NULL",
+  ]) await query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS ${column}`);
 }
 
 /**

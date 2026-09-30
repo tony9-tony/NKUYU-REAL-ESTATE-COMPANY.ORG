@@ -846,7 +846,7 @@ router.post("/requests/:id/handed-off", requireModuleAccess("leads"), requirePer
   // A request goes to Customer Service, nobody else.
   const inCs=await queryOne("SELECT 1 FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=$1 AND d.active=TRUE AND d.name='CUSTOMER SERVICE'",[task.assigned_to]);
   if(!inCs)return res.status(400).json({error:"a request can only be handed to a Customer Service officer"});
-  const r=await queryOne("UPDATE leads SET task_id=$1,handed_off_at=NOW(),status='handed_off' WHERE id=$2 RETURNING *",[taskId,leadId]);
+  const r=await queryOne("UPDATE leads SET task_id=$1,handed_off_at=NOW(),status='handed_off',outcome=NULL,outcome_note=NULL,outcome_at=NULL,outcome_by=NULL,appointment_at=NULL,appointment_type=NULL WHERE id=$2 RETURNING *",[taskId,leadId]);
   await audit(req,"handed_off","lead",leadId,{task_id:taskId});res.json(r);
 }catch(e){next(e);}});
 // Conversion registers a person as a client record; it is NOT a signature. The

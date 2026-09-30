@@ -170,6 +170,13 @@ function endSession(message = "") {
   // Cached picture blobs belong to the session that fetched them. Signing out
   // releases them rather than leaving them for whoever signs in next.
   clearImageBlobCache();
+  // Per-person lists loaded on demand must not survive into the next session:
+  // the next person would see the previous person's tasks and buttons.
+  Object.assign(state, {
+    tasks: null, tasksRequested: false, taskBox: "all", attention: null,
+    requests: null, requestsRequested: false, requestStage: "",
+    taskAssignees: null, taskReviewers: null, pendingHandOff: null, smallFormSubmit: null,
+  });
   state.navOpen = false;
   document.getElementById("primary-nav")?.classList.remove("nav-open");
   workspace.hidden = true;
@@ -671,6 +678,9 @@ async function api(path, options = {}) {
   if (!form) headers["Content-Type"] = "application/json";
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
+  // A plain object body is sent as JSON. Passing an object unserialized used
+  // to send "[object Object]", which the server rejects (every task button did).
+  if (!form && rest.body && typeof rest.body === "object") rest.body = JSON.stringify(rest.body);
   const response = await fetch(`${API_ROOT}${path}`, { ...rest, headers });
   const payload = await response.json().catch(() => ({}));
   const isCredentialRequest = path.startsWith("/auth/login") || path.startsWith("/auth/setup");
@@ -1224,7 +1234,29 @@ function shortDate(value) {
   return parsed.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 }
 
+const REQUEST_OUTCOMES = {
+  appointment: "Appointment arranged",
+  interested: "Interested - needs follow-up",
+  declined: "Customer declined",
+  unreachable: "Could not reach the customer",
+};
+
+/** One line describing what Customer Service reported on a request. */
+function outcomeText(outcome, note, when, type) {
+  if (!outcome) return "";
+  const at = when ? ` · ${escapeHtml(humanize(type || "viewing"))} on ${formatDateTime(when, true)}` : "";
+  return `<strong>${escapeHtml(REQUEST_OUTCOMES[outcome] || outcome)}</strong>${at}${note ? `<span class="cell-sub">${escapeHtml(note)}</span>` : ""}`;
+}
+
 function taskActionButtons(task) {
+  // A customer request handed to Customer Service is closed with an outcome
+  // report (appointment / interested / declined / unreachable), not a bare
+  // Submit: the one button starts and submits the task with that report.
+  const mine = Number(task.assigned_to) === Number(state.organization.me?.user?.id);
+  if (task.request_id && mine && (task.available_actions || []).some((a) => a === "start" || a === "submit")) {
+    const rest = (task.available_actions || []).filter((a) => a !== "start" && a !== "submit");
+    return `<button class="btn btn-primary btn-small" data-action="request-outcome" data-id="${task.id}">Report outcome to Sales</button>` + taskActionButtons({ ...task, request_id: null, available_actions: rest });
+  }
   return (task.available_actions || []).map((action) => `<button class="btn btn-${action === "request_changes" || action === "cancel" ? "soft" : "primary"} btn-small" data-action="task-action" data-id="${task.id}" data-task-action="${action}">${escapeHtml(TASK_ACTION_LABELS[action] || action)}</button>`).join("");
 }
 
@@ -1332,6 +1364,7 @@ async function openTask(id) {
       ${task.linked_entity ? `<div><span>Linked record</span><strong>${escapeHtml(task.linked_entity)} #${task.linked_record_id}</strong></div>` : ""}
     </div>
     ${task.description ? `<p class="task-instructions">${escapeHtml(task.description)}</p>` : ""}
+    ${task.request_outcome ? `<div class="panel" style="margin-top:12px"><span class="toolbar-label">Outcome reported by Customer Service</span><div>${outcomeText(task.request_outcome, task.request_outcome_note, task.request_appointment_at, task.request_appointment_type)}</div>${task.request_outcome === "appointment" && !task.request_appointment_id ? `<p class="muted" style="margin:.4rem 0 0">Approving books this appointment and registers the customer as a client.</p>` : ""}</div>` : ""}
     <div class="row-actions" style="margin:14px 0">${taskActionButtons(task)}</div>
     ${(task.available_actions || []).includes("request_changes") ? `<div class="field"><label for="task-review-comment">Review comment (required to request changes)</label><textarea id="task-review-comment" name="comment" rows="2" placeholder="What must change?"></textarea></div>` : ""}
     ${comments ? `<div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>Author</th><th>Comment</th><th>When</th></tr></thead><tbody>${comments}</tbody></table></div>` : ""}
@@ -1508,7 +1541,7 @@ async function submitTaskAction(taskId, action) {
     body.comment = comment;
   }
   try {
-    await api(`/org/tasks/${taskId}/actions`, { method: "POST", body });
+    await api(`/org/tasks/${taskId}/actions`, { method: "POST", body: JSON.stringify(body) });
     modalBackdrop.hidden = true;
     showToast(`Task ${action.replace(/_/g, " ")}.`);
   } catch (error) {
@@ -1519,6 +1552,13 @@ async function submitTaskAction(taskId, action) {
   await refreshAttention();
   await loadTasks();
   if (state.view === "assignments") render();
+  // Approving a request's report can create a client and an appointment, so
+  // the workspace lists are re-read; a request's stage follows its task too.
+  if (action === "approve") await refresh();
+  if (state.requests) { await reloadRequests(); if (state.view === "requests") render(); }
+  // Beginning a review leads straight to the decision: reopen the task with
+  // Approve / Request changes instead of making the reviewer find it again.
+  if (action === "begin_review") openTask(taskId);
 }
 
 // ---------------------------------------------------------------------------
@@ -2032,6 +2072,44 @@ function openRenameDepartment(deptId) {
       await api(`/org/departments/${dept.id}`, { method: "PUT", body: JSON.stringify({ name: data.name }) });
       return "Department renamed.";
     });
+}
+
+async function openRequestOutcome(taskId) {
+  let task = (state.tasks || []).find((row) => String(row.id) === String(taskId));
+  if (!task) { try { task = await api(`/org/tasks/${taskId}`); } catch (error) { showToast(error.message || "Unable to open this task."); return; } }
+  const choices = Object.entries(REQUEST_OUTCOMES).map(([value, label]) => `<label class="check-field"><input type="radio" name="outcome" value="${value}" required> ${escapeHtml(label)}</label>`).join("");
+  openSmallForm(`Outcome for ${task.request_customer || "the customer"}`, "Sales is notified at once and approves your report.",
+    `<div class="field full"><span class="toolbar-label">What happened? <span class="req">*</span></span>${choices}</div>
+     <div class="field" data-appointment hidden><label for="outcome-when">Appointment date and time <span class="req">*</span></label><input id="outcome-when" name="appointment_at" type="datetime-local"></div>
+     <div class="field" data-appointment hidden><label for="outcome-type">Type</label><select id="outcome-type" name="appointment_type"><option value="viewing">Viewing</option><option value="meeting">Meeting</option><option value="call">Call</option></select></div>
+     <div class="field full"><label for="outcome-note">Note for Sales <span class="muted" data-note-hint></span></label><textarea id="outcome-note" name="note" rows="3" maxlength="2000" placeholder="What did the customer say?"></textarea></div>`,
+    "Send to Sales",
+    async (data) => {
+      const body = { outcome: data.outcome, note: data.note || null };
+      if (data.outcome === "appointment") {
+        if (!data.appointment_at) throw new Error("Give the appointment date and time.");
+        body.appointment_at = new Date(data.appointment_at).toISOString();
+        body.appointment_type = data.appointment_type || "viewing";
+      }
+      if (data.outcome === "declined" && !data.note) throw new Error("Say why the customer declined.");
+      await api(`/org/tasks/${taskId}/outcome`, { method: "POST", body: JSON.stringify(body) });
+      state.tasks = null;
+      state.tasksRequested = false;
+      await refreshAttention();
+      return "Outcome sent to Sales.";
+    });
+  const form = document.getElementById("small-form");
+  form?.addEventListener("change", (event) => {
+    if (event.target.name !== "outcome") return;
+    const appointment = event.target.value === "appointment";
+    form.querySelectorAll("[data-appointment]").forEach((el) => { el.hidden = !appointment; });
+    const when = form.querySelector('[name="appointment_at"]');
+    if (when) when.required = appointment;
+    const hint = form.querySelector("[data-note-hint]");
+    if (hint) hint.textContent = event.target.value === "declined" ? "(required: why?)" : "";
+    const note = form.querySelector('[name="note"]');
+    if (note) note.required = event.target.value === "declined";
+  });
 }
 
 /** One card per department: its roles, and every duty declared against each. */
@@ -2976,15 +3054,21 @@ const REQUEST_STAGES = [
   ["new", "New", "open"],
   ["with_cs", "With Customer Service", "task-in-progress"],
   ["reported", "Report waiting for you", "submitted"],
-  ["contacted", "Customer contacted", "approved"],
+  ["appointment", "Appointment booked", "approved"],
+  ["contacted", "Interested - follow up", "approved"],
+  ["unreachable", "Not reached", "pending"],
+  ["closed", "Declined", "archived"],
   ["client", "Became a client", "converted"],
 ];
 
 function requestStage(row) {
+  if (row.appointment_id) return "appointment";
   if (row.client_id) return "client";
   if (!row.task_id || row.task_status === "cancelled") return "new";
   if (["submitted", "under_review"].includes(row.task_status)) return "reported";
-  if (["approved", "completed"].includes(row.task_status)) return "contacted";
+  if (["approved", "completed"].includes(row.task_status)) {
+    return { declined: "closed", unreachable: "unreachable", appointment: "appointment" }[row.outcome] || "contacted";
+  }
   return "with_cs";
 }
 
@@ -3015,6 +3099,7 @@ function renderRequests() {
     const key = requestStage(row);
     const [, label, tone] = REQUEST_STAGES.find(([k]) => k === key);
     const who = row.task_assignee && key !== "new" && key !== "client" ? `<span class="cell-sub">Customer Service: ${escapeHtml(row.task_assignee)}</span>` : "";
+    const reported = row.outcome && key !== "new" ? `<span class="cell-sub">${outcomeText(row.outcome, row.outcome_note, row.appointment_at, row.appointment_type)}</span>` : "";
     const cancelled = !row.client_id && row.task_status === "cancelled" ? `<span class="cell-sub">The last hand-off was cancelled</span>` : "";
     const openTaskBtn = (primary) => row.task_id ? `<button class="btn btn-small${primary ? " btn-primary" : ""}" data-action="open-task" data-id="${row.task_id}">${primary ? "Review report" : "Open assignment"}</button>` : "";
     const handOff = mayHandOff ? `<button class="btn btn-small btn-primary" data-action="hand-off-lead" data-id="${row.id}">Hand to Customer Service</button>` : "";
@@ -3024,6 +3109,9 @@ function renderRequests() {
       with_cs: openTaskBtn(false),
       reported: openTaskBtn(true),
       contacted: convert(true) + openTaskBtn(false),
+      appointment: `<button class="btn btn-small" data-action="open-alert-view" data-view="appointments">Open Appointments</button>`,
+      unreachable: handOff.replace("Hand to Customer Service", "Hand off again") + openTaskBtn(false),
+      closed: openTaskBtn(false),
       client: `<span class="muted cell-plain">Continue under Clients</span>`,
     }[key];
     return `<tr data-searchable>
@@ -3031,7 +3119,7 @@ function renderRequests() {
       <td>${row.service ? badge(row.service === "rent" ? "Rent" : "Buy", "open") : ""}<span class="cell-sub">${escapeHtml(row.property_name || "Property no longer listed")}</span></td>
       <td>${row.budget ? `TZS ${escapeHtml(Number(row.budget).toLocaleString("en-US"))}` : "—"}<span class="cell-sub">Contact by ${escapeHtml(means[row.preferred_contact] || "Phone")}</span></td>
       <td>${formatDate(row.created_at)}</td>
-      <td>${badge(label, tone)}${who}${cancelled}</td>
+      <td>${badge(label, tone)}${who}${reported}${cancelled}</td>
       <td class="cell-note">${escapeHtml(String(row.notes || "").replace(/^Website request to [^\n]*\n*/, "") || "—")}</td>
       <td class="align-right"><div class="row-actions">${next}</div></td>
     </tr>`;
@@ -4675,6 +4763,7 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "rename-department") openRenameDepartment(id);
   if (action === "change-staff-department") openStaffDepartment(id);
+  if (action === "request-outcome") { modalBackdrop.hidden = true; openRequestOutcome(id); }
   if (action === "toggle-department") {
     try { await api(`/org/departments/${id}`, { method: "PUT", body: JSON.stringify({ active: target.dataset.active === "1" }) }); await refresh(); showToast(target.dataset.active === "1" ? "Department activated." : "Department deactivated."); }
     catch (error) { showToast(error.message || "Unable to update the department."); }

@@ -6,7 +6,7 @@
 import { Router } from "express";
 import { query, queryOne } from "../db.js";
 import { organizationId } from "../org/rbac.js";
-import { currentAccess } from "../org/access.js";
+import { currentAccess, ownershipFields } from "../org/access.js";
 import { audit } from "../org/audit.js";
 import { TASK_PRIORITIES, TASK_STATUSES, TASK_LINK_ENTITIES, canTransitionTask, normalizeTaskPriority, normalizeTaskStatus, taskActionsFor } from "../tasks/workflow.js";
 import { attentionCount, linkedRecordExists, listComments, listHistory, listTasks, taskVisible } from "../tasks/tasks.js";
@@ -143,7 +143,7 @@ router.post("/action", route(async (req, res) => {
   return res.status(400).json({ error: "use POST /org/tasks/:id/actions" });
 }));
 
-async function applyTransition(req, res, task, from, access, to, patch, auditAction, comment) {
+async function applyTransition(req, res, task, from, access, to, patch, auditAction, comment, after = null) {
   if (!canTransitionTask(from, to)) return res.status(400).json({ error: "cannot move task from " + from + " to " + to });
   const keys = Object.keys(patch || {});
   const sets = ["status=$1", "updated_at=NOW()"];
@@ -155,7 +155,98 @@ async function applyTransition(req, res, task, from, access, to, patch, auditAct
     await query("INSERT INTO task_comments (task_id, author_id, body) VALUES ($1,$2,$3)", [task.id, req.user.id, comment]);
     await writeAudit(req, "task_commented", next, from, comment);
   }
-  res.json(await decorate(next, req));
+  if (after) await after(next);
+  res.json(await decorate(await taskVisible(next.id, access), req));
+}
+
+// ---- Request outcome ---------------------------------------------------
+// Customer Service reports what happened with the customer, in one step: the
+// outcome is saved on the request and the task is submitted to its reviewer
+// (Sales), with the outcome as the submission comment. Nothing else changes
+// until Sales approves.
+const OUTCOMES = {
+  appointment: "Appointment arranged",
+  interested: "Interested - needs follow-up",
+  declined: "Customer declined",
+  unreachable: "Could not reach the customer",
+};
+const APPOINTMENT_TYPES = ["viewing", "meeting", "call"];
+
+router.post("/:id/outcome", route(async (req, res) => {
+  const taskId = id(req.params.id, "task_id");
+  const access = req.access || (await currentAccess());
+  const task = await taskVisible(taskId, access);
+  if (!task) return res.status(404).json({ error: "task not found" });
+  if (Number(task.assigned_to) !== Number(req.user.id)) return res.status(403).json({ error: "only the person the task was given to can report its outcome" });
+  const request = await queryOne("SELECT * FROM leads WHERE task_id=$1 ORDER BY id LIMIT 1", [taskId]);
+  if (!request) return res.status(400).json({ error: "this task is not a customer request" });
+  const from = normalizeTaskStatus(task.status);
+  if (!["assigned", "in_progress", "changes_requested"].includes(from)) return res.status(409).json({ error: "the outcome has already been reported" });
+  const outcome = String(req.body?.outcome || "");
+  if (!OUTCOMES[outcome]) return res.status(400).json({ error: "choose an outcome: appointment, interested, declined or unreachable" });
+  const note = maybeText(req.body?.note, "note", 2000);
+  if (outcome === "declined" && !note) return res.status(400).json({ error: "say why the customer declined" });
+  let when = null;
+  let type = null;
+  if (outcome === "appointment") {
+    when = new Date(String(req.body?.appointment_at || ""));
+    if (Number.isNaN(when.getTime())) return res.status(400).json({ error: "give the appointment date and time" });
+    if (when.getTime() < Date.now() - 60 * 60 * 1000) return res.status(400).json({ error: "the appointment must be in the future" });
+    type = String(req.body?.appointment_type || "viewing");
+    if (!APPOINTMENT_TYPES.includes(type)) return res.status(400).json({ error: "appointment type must be viewing, meeting or call" });
+  }
+  await query("UPDATE leads SET outcome=$1, outcome_note=$2, outcome_at=NOW(), outcome_by=$3, appointment_at=$4, appointment_type=$5 WHERE id=$6",
+    [outcome, note, req.user.id, when ? when.toISOString() : null, type, request.id]);
+  const summary = [
+    `Outcome: ${OUTCOMES[outcome]}`,
+    when ? `Appointment: ${type} on ${when.toISOString().slice(0, 16).replace("T", " ")} UTC` : null,
+    note ? `Note: ${note}` : null,
+  ].filter(Boolean).join("\n");
+  let current = task;
+  let status = from;
+  if (from === "assigned") {
+    if (!canTransitionTask("assigned", "in_progress")) return res.status(400).json({ error: "the task cannot be started" });
+    await query("UPDATE tasks SET status='in_progress', updated_at=NOW() WHERE id=$1", [taskId]);
+    current = await taskVisible(taskId, access);
+    await writeAudit(req, "task_status_changed", current, "assigned");
+    status = "in_progress";
+  }
+  const stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
+  return applyTransition(req, res, current, status, access, "submitted", { submitted_by: req.user.id, submitted_at: stamp }, "task_submitted", summary);
+}));
+
+/**
+ * Runs when Sales approves a request's outcome report.
+ * - appointment: the customer becomes a client (unless already one) and the
+ *   appointment is booked in Appointments, owned by the approver.
+ * - declined / unreachable / interested: the request is marked accordingly.
+ */
+async function applyApprovedOutcome(req, taskId) {
+  const request = await queryOne("SELECT * FROM leads WHERE task_id=$1 ORDER BY id LIMIT 1", [taskId]);
+  if (!request || !request.outcome) return;
+  const status = { declined: "closed", unreachable: "unreachable", interested: "contacted", appointment: "appointment" }[request.outcome];
+  if (request.outcome !== "appointment" || request.appointment_id) {
+    if (!request.client_id) await query("UPDATE leads SET status=$1 WHERE id=$2", [status, request.id]);
+    return;
+  }
+  const own = ownershipFields(req.access || (await currentAccess()));
+  const org = request.organization_id;
+  let clientId = request.client_id;
+  if (!clientId) {
+    const client = await queryOne("INSERT INTO clients(organization_id,name,email,phone,client_type,status,notes,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,'buyer','lead',$5,$6,$7,$8,$9) RETURNING id",
+      [org, request.name, request.email, request.phone, request.notes, own.owner_id, own.created_by, own.department_id, own.visibility]);
+    clientId = client.id;
+    await audit(req, "converted", "lead", request.id, { client_id: clientId, via: "appointment" });
+  }
+  const property = request.property_id ? await queryOne("SELECT id, name, project_id FROM properties WHERE id=$1", [request.property_id]) : null;
+  const title = `${request.appointment_type === "call" ? "Call" : request.appointment_type === "meeting" ? "Meeting" : "Viewing"}: ${request.name}${property ? ` · ${property.name}` : ""}`;
+  const appointment = await queryOne(`INSERT INTO appointments(organization_id,client_id,property_id,project_id,title,appointment_type,starts_at,status,notes,owner_id,created_by,department_id,visibility)
+    VALUES($1,$2,$3,$4,$5,$6,$7,'scheduled',$8,$9,$10,$11,$12) RETURNING id`,
+    [org, clientId, property?.id || null, property?.project_id || null, title, request.appointment_type || "viewing", request.appointment_at,
+     [request.outcome_note, request.phone ? `Phone: ${request.phone}` : null, `Website request W-${request.id}`].filter(Boolean).join("\n"),
+     own.owner_id, own.created_by, own.department_id, own.visibility]);
+  await query("UPDATE leads SET client_id=$1, appointment_id=$2, status='appointment', converted_at=COALESCE(converted_at, NOW()) WHERE id=$3", [clientId, appointment.id, request.id]);
+  await audit(req, "created", "appointment", appointment.id, { from_request: request.id });
 }
 
 router.post("/:id/actions", route(async (req, res) => {
@@ -184,7 +275,7 @@ router.post("/:id/actions", route(async (req, res) => {
     const grant = await canReviewTask(req, task);
     if (!grant.ok) return res.status(403).json({ error: grant.reason });
     if (Number(task.submitted_by) === Number(req.user.id)) return res.status(403).json({ error: "you cannot approve your own submission" });
-    return applyTransition(req, res, task, from, access, "approved", { approved_by: req.user.id, approved_at: stamp }, "task_approved", comment);
+    return applyTransition(req, res, task, from, access, "approved", { approved_by: req.user.id, approved_at: stamp }, "task_approved", comment, () => applyApprovedOutcome(req, task.id));
   }
   if (action === "request_changes") {
     const grant = await canReviewTask(req, task);
