@@ -172,6 +172,15 @@ try {
   check(task.status === 201, `assigned Customer Service with Sales as reviewer (${task.status})`);
   check((await call(`/org/requests/${leadId}/handed-off`, { method: "POST", as: officer, body: { task_id: 999999 } })).status === 400, "a hand-off cannot point at an unknown task");
   check((await call(`/org/requests/${enquiryLead.id}/handed-off`, { method: "POST", as: officer, body: { task_id: task.body.id } })).status === 404, "a contact enquiry is not a request");
+  const csOnly = (await call("/org/tasks/assignees?department=CUSTOMER%20SERVICE", { as: officer })).body;
+  const csMembers = (await query("SELECT ud.user_id FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE d.name='CUSTOMER SERVICE'")).rows.map((r) => Number(r.user_id));
+  check(csOnly.length > 0 && csOnly.some((u) => u.id === csId), "the hand-off list offers Customer Service staff");
+  check(csOnly.every((u) => csMembers.includes(Number(u.id))), `the hand-off list offers ONLY Customer Service staff (${csOnly.map((u) => u.display_name).join(", ")})`);
+  check(!csOnly.some((u) => u.id === officerId), "the Sales officer is not offered to themselves");
+  const salesColleague = (await query("SELECT id FROM users WHERE email='sales@demo.mkuyu.local'")).rows[0].id;
+  const wrong = await call("/org/tasks", { method: "POST", as: officer, body: { title: "Wrong person", assigned_to: salesColleague } });
+  check(wrong.status === 201, "(a task to a Sales colleague can still be assigned as ordinary work)");
+  check((await call(`/org/requests/${leadId}/handed-off`, { method: "POST", as: officer, body: { task_id: wrong.body.id } })).status === 400, "a request cannot be handed to someone outside Customer Service");
   const linked = await call(`/org/requests/${leadId}/handed-off`, { method: "POST", as: officer, body: { task_id: task.body.id } });
   check(linked.status === 200 && linked.body.status === "handed_off", `the request is tied to its Customer Service task (${linked.status})`);
   let row = await stageOf();

@@ -56,6 +56,12 @@ router.get("/assignees", route(async (req, res) => {
     values.push(departments);
     scope = `AND EXISTS (SELECT 1 FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=u.id AND d.active=TRUE AND ud.department_id = ANY($${values.length}))`;
   }
+  // ?department=<name> narrows the list to one department (a hand-off to
+  // Customer Service lists only Customer Service). It can only narrow.
+  if (req.query.department) {
+    values.push(String(req.query.department).trim().toUpperCase());
+    scope += ` AND EXISTS (SELECT 1 FROM user_departments ud2 JOIN departments d2 ON d2.id=ud2.department_id WHERE ud2.user_id=u.id AND d2.active=TRUE AND UPPER(d2.name)=$${values.length})`;
+  }
   res.json((await query(`SELECT u.id, u.display_name, u.email FROM users u WHERE u.organization_id=$1 AND u.active=TRUE ${scope} ORDER BY u.display_name LIMIT 200`, values)).rows);
 }));
 

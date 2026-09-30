@@ -1360,13 +1360,15 @@ async function openTaskModal(prefill = {}) {
       return null; // null means "not readable for this caller"
     }
   };
-  const [assignees, reviewers] = await Promise.all([loadList("/org/tasks/assignees"), loadList("/org/tasks/reviewers")]);
+  // A hand-off lists only its department (a request goes to Customer Service).
+  const assigneePath = prefill.department ? `/org/tasks/assignees?department=${encodeURIComponent(prefill.department)}` : "/org/tasks/assignees";
+  const [assignees, reviewers] = await Promise.all([loadList(assigneePath), loadList("/org/tasks/reviewers")]);
   if (assignees === null) {
     showToast("You are not allowed to assign work.");
     return;
   }
   if (!assignees.length) {
-    showToast("No staff member is inside your assignment scope.");
+    showToast(prefill.department ? "There is no active Customer Service officer yet. Ask ICT to add one under Administration." : "No staff member is inside your assignment scope.");
     return;
   }
   state.taskAssignees = assignees;
@@ -1401,6 +1403,17 @@ async function openTaskModal(prefill = {}) {
     if (prefill.reviewerId && reviewer && [...reviewer.options].some((o) => o.value === String(prefill.reviewerId))) reviewer.value = String(prefill.reviewerId);
     const heading = modal.querySelector(".modal-head h2");
     if (prefill.heading && heading) heading.textContent = prefill.heading;
+    if (prefill.department) {
+      const label = form?.querySelector('label[for="task-assignee"]');
+      if (label) label.firstChild.textContent = "Customer Service officer ";
+      const note = modal.querySelector(".modal-head p");
+      if (note) note.textContent = "Only Customer Service staff are listed.";
+      const select = form?.querySelector('[name="assigned_to"]');
+      if (select?.options[0]) select.options[0].text = "Choose a Customer Service officer";
+      if (select && assignees.length === 1) select.value = String(assignees[0].id);
+      // The request is already in the description; no linked-record fields.
+      for (const name of ["linked_entity", "linked_record_id"]) form?.querySelector(`[name="${name}"]`)?.closest(".field")?.remove();
+    }
   }
   modalBackdrop.hidden = false;
 }
@@ -1425,6 +1438,7 @@ function handOffLead(leadId) {
   ].filter((line) => line !== null);
   openTaskModal({
     requestId: lead.source === "website" ? lead.id : null,
+    department: "CUSTOMER SERVICE",
     heading: "Hand to Customer Service",
     title: `Contact ${lead.name}${lead.service ? ` (${lead.service === "rent" ? "rent" : "buy"} request)` : ""}`,
     description: lines.join("\n"),

@@ -779,8 +779,11 @@ router.post("/requests/:id/handed-off", requireModuleAccess("leads"), requirePer
   const values=[leadId,org];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND l.source='website' AND ${scopeCondition("l","lead",req.access,values)}`,values);
   if(!lead)return res.status(404).json({error:"request not found"});
   if(lead.client_id)return res.status(409).json({error:"this request is already a client"});
-  const task=await queryOne("SELECT id FROM tasks WHERE id=$1 AND organization_id=$2 AND assigned_by=$3",[taskId,org,req.user.id]);
+  const task=await queryOne("SELECT id,assigned_to FROM tasks WHERE id=$1 AND organization_id=$2 AND assigned_by=$3",[taskId,org,req.user.id]);
   if(!task)return res.status(400).json({error:"task not found"});
+  // A request goes to Customer Service, nobody else.
+  const inCs=await queryOne("SELECT 1 FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=$1 AND d.active=TRUE AND d.name='CUSTOMER SERVICE'",[task.assigned_to]);
+  if(!inCs)return res.status(400).json({error:"a request can only be handed to a Customer Service officer"});
   const r=await queryOne("UPDATE leads SET task_id=$1,handed_off_at=NOW(),status='handed_off' WHERE id=$2 RETURNING *",[taskId,leadId]);
   await audit(req,"handed_off","lead",leadId,{task_id:taskId});res.json(r);
 }catch(e){next(e);}});
