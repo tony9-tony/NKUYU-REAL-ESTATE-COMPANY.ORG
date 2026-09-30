@@ -154,6 +154,23 @@ export const Property = {
   create(data) { return create(`INSERT INTO properties(organization_id,project_id,name,property_type,status,price,location,area,bedrooms,bathrooms,description,featured,${OWNERSHIP_COLUMNS}) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`, [data.project_id || null, data.name, data.property_type, data.status, data.price, data.location, data.area, data.bedrooms || 0, data.bathrooms || 0, data.description || null, Boolean(data.featured)]); },
   update(id, data) { return update("property", "properties", id, "UPDATE properties SET project_id=$1,name=$2,property_type=$3,status=$4,price=$5,location=$6,area=$7,bedrooms=$8,bathrooms=$9,description=$10,featured=$11", [data.project_id || null, data.name, data.property_type, data.status, data.price, data.location, data.area, data.bedrooms || 0, data.bathrooms || 0, data.description || null, Boolean(data.featured)]); },
   remove(id) { return remove("property", "properties", id); },
+  /** Public-website listing fields. The route has already scope-checked `id`. */
+  async setListing(id, listing) {
+    return query(
+      `UPDATE properties SET offer_rent=$1, offer_buy=$2, rent_price=$3, rent_period=$4, summary=$5, features=$6,
+         public_listing=$7, public_listing_status=CASE WHEN $7 THEN 'approved' ELSE 'private' END
+       WHERE id=$8 AND organization_id=$9`,
+      [listing.offer_rent, listing.offer_buy, listing.rent_price, listing.rent_period, listing.summary, listing.features, listing.public_listing, id, await organizationId()],
+    );
+  },
+};
+
+export const ProjectImage = {
+  async listFor(projectId) { const o=await organizationId(); return query("SELECT * FROM project_images WHERE project_id=$1 AND organization_id=$2 ORDER BY id",[projectId,o]).then((x)=>x.rows); },
+  async get(projectId,imageId) { const o=await organizationId(); return queryOne("SELECT * FROM project_images WHERE project_id=$1 AND id=$2 AND organization_id=$3",[projectId,imageId,o]); },
+  async countFor(projectId) { const o=await organizationId(); return (await queryOne("SELECT COUNT(*)::int AS count FROM project_images WHERE project_id=$1 AND organization_id=$2",[projectId,o])).count; },
+  create(projectId,data) { return createPlain("INSERT INTO project_images(organization_id,project_id,original_filename,stored_name,file_size,mime_type) VALUES($1,$2,$3,$4,$5,$6) RETURNING id",[projectId,data.original_filename||null,data.stored_name,data.file_size??null,data.mime_type||null]); },
+  async remove(imageId) { const o=await organizationId(); return query("DELETE FROM project_images WHERE id=$1 AND organization_id=$2",[imageId,o]); },
 };
 
 export const PropertyImage = {

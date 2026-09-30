@@ -2036,6 +2036,71 @@ function linkedClientOptions(selected = "") {
   return `${manual}${state.clients.map((c) => `<option value="${c.id}" ${String(c.id) === String(selected) ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("")}`;
 }
 
+/**
+ * "Public website" section of the property and project forms. The Sales
+ * Officer chooses Rent, Buy or both, sets the prices, and publishes directly
+ * (no management approval). The server refuses to publish a listing with no
+ * service or a service without a price.
+ */
+function websiteListingFields(kind, record) {
+  const checked = (value) => (value ? "checked" : "");
+  const property = kind === "property";
+  return `${formSection("Public website")}
+    <div class="field full"><span class="field-label">Offered for</span>
+      <div class="inline-checks">
+        <label class="checkbox-field"><input type="checkbox" name="offer_buy" ${checked(record?.offer_buy)}><span>Buy (for sale)</span></label>
+        <label class="checkbox-field"><input type="checkbox" name="offer_rent" ${checked(record?.offer_rent)}><span>Rent</span></label>
+      </div>
+      <div class="field-help">Choose where this ${property ? "property" : "project"} appears on the public website: under Buy, Rent, or both.</div>
+    </div>
+    ${property ? `<div class="field"><label for="field-rent-price">Rent price (TZS)</label><input id="field-rent-price" name="rent_price" type="number" min="0" step="0.01" value="${escapeHtml(record?.rent_price ?? "")}" placeholder="Only if offered to rent"></div>
+    <div class="field"><label for="field-rent-period">Rent is per</label><select id="field-rent-period" name="rent_period"><option value="month" ${record?.rent_period !== "year" ? "selected" : ""}>Month</option><option value="year" ${record?.rent_period === "year" ? "selected" : ""}>Year</option></select></div>` : ""}
+    <div class="field full"><label for="field-${kind}-summary">Short summary for the website</label><input id="field-${kind}-summary" name="summary" maxlength="${property ? 200 : 400}" value="${escapeHtml(record?.summary || "")}" placeholder="One line shown on the listing card"></div>
+    ${property ? `<div class="field full"><label for="field-features">Features</label><textarea id="field-features" name="features" maxlength="2000" placeholder="One feature per line, e.g.&#10;Private garden&#10;Backup power">${escapeHtml(record?.features || "")}</textarea></div>` : ""}
+    <div class="field full"><label class="checkbox-field"><input type="checkbox" name="public_listing" ${checked(record?.public_listing)}><span><strong>Show on the public website</strong></span></label>
+      <div class="field-help">Publishes straight away. ${property ? "A sold or leased property leaves the website listings by itself." : "Untick to take it off the website."}</div>
+    </div>`;
+}
+
+/** Listing fields from a submitted form, as the API expects them. */
+function readListingFields(data, kind) {
+  data.offer_buy = data.offer_buy ? 1 : 0;
+  data.offer_rent = data.offer_rent ? 1 : 0;
+  data.public_listing = data.public_listing ? 1 : 0;
+  if (kind === "property") data.rent_price = data.rent_price === "" || data.rent_price === undefined ? null : numberValue(data.rent_price);
+  return data;
+}
+
+// Project photos, loaded on demand (kept in state.projectPhotos).
+function renderProjectPhotoStrip(project) {
+  const photos = (state.projectPhotos && state.projectPhotos[project.id]) || null;
+  if (photos === null) return `<span class="muted">Loading photos…</span>`;
+  const renderable = photos.filter((photo) => photo.available !== false);
+  if (!renderable.length) return `<span class="muted">No photos yet.</span>`;
+  return renderable.map((photo, index) => `<span class="photo-chip"><img data-src="${photo.file_url}" alt="${escapeHtml(photo.original_filename || "Photo")}" loading="lazy">${index === 0 ? `<span class="photo-cover-tag">Cover</span>` : ""}<button type="button" class="photo-remove" data-action="remove-project-photo" data-project="${project.id}" data-image="${photo.id}" title="Remove photo">×</button></span>`).join("");
+}
+
+async function loadProjectPhotos(projectId) {
+  if (!state.projectPhotos) state.projectPhotos = {};
+  try { state.projectPhotos[projectId] = await api(`/projects/${projectId}/images`); }
+  catch (_) { state.projectPhotos[projectId] = []; }
+  const strip = document.getElementById("project-photo-strip");
+  if (strip && String(strip.dataset.projectId) === String(projectId)) {
+    strip.innerHTML = renderProjectPhotoStrip({ id: projectId });
+    hydrateImages(strip);
+  }
+}
+
+async function removeProjectPhoto(projectId, imageId) {
+  try {
+    await api(`/projects/${projectId}/images/${imageId}`, { method: "DELETE" });
+    if (state.projectPhotos) delete state.projectPhotos[projectId];
+    clearImageBlobCache();
+    showToast("Photo removed.");
+    if (document.getElementById("project-photo-strip")) loadProjectPhotos(projectId);
+  } catch (error) { showToast(error.message || "Unable to remove photo."); }
+}
+
 // Photos are loaded per property on demand (kept in state.propertyPhotos).
 function renderPhotoStrip(property) {
   const photos = (state.propertyPhotos && state.propertyPhotos[property.id]) || null;
@@ -3294,7 +3359,12 @@ function openModal(type, record = null) {
   if (type === "project") {
     title = record ? "Edit project" : "New project";
     subtitle = record ? "Update this development." : "Create a development portfolio.";
-    body = `<div class="form-grid"><div class="field full"><label for="field-name">Project name</label><input id="field-name" name="name" required maxlength="120" value="${escapeHtml(record?.name || "")}" placeholder="e.g. Riverside Heights"></div><div class="field"><label for="field-status">Status</label><select id="field-status" name="status"><option value="active" ${record?.status !== "archived" ? "selected" : ""}>Active</option><option value="archived" ${record?.status === "archived" ? "selected" : ""}>Archived</option></select></div></div>`;
+    body = `<div class="form-grid"><div class="field full"><label for="field-name">Project name</label><input id="field-name" name="name" required maxlength="120" value="${escapeHtml(record?.name || "")}" placeholder="e.g. Riverside Heights"></div><div class="field"><label for="field-status">Status</label><select id="field-status" name="status"><option value="active" ${record?.status !== "archived" ? "selected" : ""}>Active</option><option value="archived" ${record?.status === "archived" ? "selected" : ""}>Archived</option></select></div>
+      <div class="field"><label for="field-project-location">Location</label><input id="field-project-location" name="location" maxlength="120" value="${escapeHtml(record?.location || "")}" placeholder="City or area"></div>
+      ${websiteListingFields("project", record)}
+      ${record ? `<div class="field full"><label>Project photos</label><div class="photo-strip" id="project-photo-strip" data-project-id="${record.id}">${renderProjectPhotoStrip(record)}</div></div>` : ""}
+      <div class="field full"><label for="field-project-photo">Add a photo</label><input id="field-project-photo" name="photo" type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp">${record ? "" : `<div class="field-help">Choose Rent and/or Buy above first. You can add more photos after saving.</div>`}</div>
+    </div>`;
   }
   if (type === "contract") {
     title = record ? "Edit contract" : "New contract";
@@ -3351,7 +3421,7 @@ function openModal(type, record = null) {
       <div class="field"><label for="field-property-type">Type</label><select id="field-property-type" name="property_type"><option value="land" ${record?.property_type === "land" ? "selected" : ""}>Land</option><option value="house" ${record?.property_type === "house" ? "selected" : ""}>House</option><option value="apartment" ${record?.property_type === "apartment" ? "selected" : ""}>Apartment</option><option value="villa" ${record?.property_type === "villa" ? "selected" : ""}>Villa</option><option value="commercial" ${record?.property_type === "commercial" ? "selected" : ""}>Commercial</option><option value="penthouse" ${record?.property_type === "penthouse" ? "selected" : ""}>Penthouse</option></select></div>
       <div class="field"><label for="field-property-status">Status</label><select id="field-property-status" name="status"><option value="available" ${record?.status === "available" ? "selected" : ""}>Available</option><option value="reserved" ${record?.status === "reserved" ? "selected" : ""}>Reserved</option><option value="sold" ${record?.status === "sold" ? "selected" : ""}>Sold</option><option value="leased" ${record?.status === "leased" ? "selected" : ""}>Leased</option></select></div>
       ${formSection("Price & size")}
-      <div class="field"><label for="field-price">Price</label><input id="field-price" name="price" type="number" min="0" step="0.01" value="${escapeHtml(record?.price ?? "")}" placeholder="0"></div>
+      <div class="field"><label for="field-price">Sale price (TZS)</label><input id="field-price" name="price" type="number" min="0" step="0.01" value="${escapeHtml(record?.price ?? "")}" placeholder="0"></div>
       <div class="field"><label for="field-area">Area (m²)</label><input id="field-area" name="area" type="number" min="0" step="0.01" value="${escapeHtml(record?.area ?? "")}" placeholder="0"></div>
       <div class="field"><label for="field-bedrooms">Bedrooms</label><input id="field-bedrooms" name="bedrooms" type="number" min="0" value="${escapeHtml(record?.bedrooms ?? "")}" placeholder="0"></div>
       <div class="field"><label for="field-bathrooms">Bathrooms</label><input id="field-bathrooms" name="bathrooms" type="number" min="0" value="${escapeHtml(record?.bathrooms ?? "")}" placeholder="0"></div>
@@ -3360,6 +3430,7 @@ function openModal(type, record = null) {
       <div class="field"><label class="checkbox-field"><input type="checkbox" name="featured" ${record?.featured ? "checked" : ""}><span>Featured listing</span></label></div>
       ${record ? `<div class="field full"><label>Photos (optional)</label><div class="photo-strip" id="photo-strip" data-property-id="${record.id}">${renderPhotoStrip(record)}</div></div>` : ""}
       <div class="field full"><label for="field-photo">Photo (optional)</label><input id="field-photo" name="photo" type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp" data-photo-upload>${record ? "" : `<div class="field-help">Optional. You can add more photos after saving.</div>`}</div>
+      ${websiteListingFields("property", record)}
     </div>`;
   }
   if (type === "client") {
@@ -3529,6 +3600,7 @@ function openModal(type, record = null) {
   }
   // Property modal: load the optional gallery after render.
   if (type === "property" && record?.id) loadPropertyPhotos(record.id);
+  if (type === "project" && record?.id) loadProjectPhotos(record.id);
   const reportTypeSelect = document.getElementById("field-report-type");
   if (reportTypeSelect && document.getElementById("report-filter-fields")) {
     // The filter set follows the selected report type.
@@ -3640,9 +3712,24 @@ async function handleFormSubmit(event) {
   button.textContent = "Saving…";
   try {
     if (type === "project") {
-      if (id) await api(`/projects/${id}`, { method: "PUT", body: JSON.stringify(data) });
-      else await api("/projects", { method: "POST", body: JSON.stringify(data) });
-      showToast(id ? "Project updated." : "Project created.");
+      readListingFields(data, "project");
+      const photoFile = form.querySelector('input[type="file"][name="photo"]')?.files?.[0] || null;
+      delete data.photo;
+      const saved = id
+        ? await api(`/projects/${id}`, { method: "PUT", body: JSON.stringify(data) })
+        : await api("/projects", { method: "POST", body: JSON.stringify(data) });
+      let message = id ? "Project updated." : "Project created.";
+      if (photoFile && saved?.id) {
+        // Photos are optional: a failed upload reports but never blocks the save.
+        const payload = new FormData();
+        payload.append("file", photoFile);
+        try {
+          await api(`/projects/${saved.id}/images`, { method: "POST", form: true, body: payload });
+          if (state.projectPhotos) delete state.projectPhotos[saved.id];
+          message = id ? "Project and photo updated." : "Project and photo created.";
+        } catch (photoError) { message = photoError.message || "Photo could not be uploaded."; }
+      }
+      showToast(saved?.public_listing ? `${message} It is on the public website.` : message);
     } else if (type === "contract") {
       data.project_id = Number(data.project_id);
       // Only the two pricing inputs are sent. The discount amount and final price
@@ -3699,6 +3786,7 @@ async function handleFormSubmit(event) {
       data.bedrooms = numberValue(data.bedrooms, 0);
       data.bathrooms = numberValue(data.bathrooms, 0);
       data.featured = data.featured ? 1 : 0;
+      readListingFields(data, "property");
       const photoFile = form.querySelector('input[type="file"][name="photo"]')?.files?.[0] || null;
       delete data.photo;
       const saved = id
@@ -4222,6 +4310,7 @@ document.addEventListener("click", async (event) => {
   if (action === "open-receipt") openFileInTab(`/payments/${id}/receipt`).catch((error) => showToast(error.message));
   if (action === "dismiss-reminder") dismissReminder(id);
   if (action === "remove-photo") removePropertyPhoto(target.dataset.property, target.dataset.image);
+  if (action === "remove-project-photo") removeProjectPhoto(target.dataset.project, target.dataset.image);
   // Small-screen navigation. The button existed in the markup with no handler,
   // so the sidebar was unreachable below the mobile breakpoint.
   if (action === "toggle-menu") {

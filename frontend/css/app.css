@@ -1979,3 +1979,6 @@ label.btn { cursor: pointer; }
 
 /* Informational note inside a modal (e.g. a contract produced on a Word template). */
 .notice { margin-bottom: 12px; padding: 10px 12px; border-radius: var(--radius); background: var(--info-soft); color: var(--info); font-size: 13px; line-height: 1.5; }
+
+/* Property / project form: Rent and Buy choices side by side. */
+.inline-checks { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 6px 0 4px; }

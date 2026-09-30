@@ -44,6 +44,12 @@ app.use(cors((request, callback) => {
   if (!origin || corsOrigins.includes("*") || corsOrigins.includes(origin) || isSameOrigin(origin, request)) {
     return callback(null, { origin: true });
   }
+  // The public website's read-only API may be read from any origin (the public
+  // site is served separately). It carries no credentials and returns only
+  // what the Sales Officer has published, so nothing private is exposed.
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method) && String(request.originalUrl || request.url).startsWith("/api/v1/public/")) {
+    return callback(null, { origin: true, credentials: false });
+  }
   const refused = new Error("origin is not allowed");
   refused.status = 403;
   return callback(refused);
