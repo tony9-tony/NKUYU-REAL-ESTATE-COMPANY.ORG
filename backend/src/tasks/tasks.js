@@ -101,7 +101,9 @@ export async function listComments(taskId) {
 export async function listHistory(taskId) {
   const org = await organizationId();
   return (await query(
-    `SELECT a.*, u.display_name AS actor_name FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id WHERE a.organization_id=$1 AND a.module='task' AND a.record_id=$2 ORDER BY a.created_at, a.id`,
+    `SELECT a.*, u.display_name AS actor_name, au.display_name AS assignee_name FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id
+      LEFT JOIN users au ON au.id = CASE WHEN (a.details_json->>'assigned_to') ~ '^[0-9]+$' THEN (a.details_json->>'assigned_to')::int END
+      WHERE a.organization_id=$1 AND a.module='task' AND a.record_id=$2 ORDER BY a.created_at, a.id`,
     [org, String(taskId)],
   )).rows;
 }

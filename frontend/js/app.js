@@ -1302,7 +1302,15 @@ async function refreshAttention() {
   }
   if (state.organization.me) state.organization.me.attention = state.attention;
   updateNavigation();
+  updateNotificationDot();
 }
+
+// New assignments reach a signed-in person without a page reload: the badge
+// and the bell are refreshed every minute while the tab is visible.
+const attentionTimer = setInterval(() => {
+  if (document.visibilityState === "visible" && state.organization?.me) refreshAttention();
+}, 60000);
+attentionTimer?.unref?.();
 
 async function openTask(id) {
   let task;
@@ -1312,7 +1320,7 @@ async function openTask(id) {
     showToast(error.message || "Unable to open this task.");
     return;
   }
-  const history = (task.history || []).map((entry) => `<tr><td>${formatDateTime(entry.created_at, true)}</td><td>${escapeHtml(entry.actor_name || "System")}</td><td>${escapeHtml(String(entry.action || "").replace(/^task_/, "").replace(/_/g, " "))}</td><td>${escapeHtml(entry.details_json?.from || "—")} → ${escapeHtml(entry.details_json?.to || "—")}</td></tr>`).join("");
+  const history = (task.history || []).map((entry) => `<tr><td>${formatDateTime(entry.created_at, true)}</td><td>${escapeHtml(entry.actor_name || "System")}</td><td>${escapeHtml(String(entry.action || "").replace(/^task_/, "").replace(/_/g, " "))}${["task_assigned", "task_reassigned"].includes(entry.action) && entry.assignee_name ? ` → ${escapeHtml(entry.assignee_name)}` : ""}</td><td>${escapeHtml(entry.details_json?.from || "—")} → ${escapeHtml(entry.details_json?.to || "—")}</td></tr>`).join("");
   const comments = (task.comments || []).map((comment) => `<tr><td>${escapeHtml(comment.author_name || "—")}</td><td>${escapeHtml(comment.body)}</td><td>${formatDateTime(comment.created_at, true)}</td></tr>`).join("");
   modal.dataset.type = "task";
   modal.innerHTML = `<div class="modal-head"><div><h2>${escapeHtml(task.title)}</h2><p>${escapeHtml(TASK_STATUS_LABELS[task.status] || task.status)} · ${escapeHtml(TASK_PRIORITY_LABELS[task.priority] || task.priority)}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
@@ -1369,6 +1377,20 @@ function wireTaskDepartment(assignees, lockTo = null, departmentList = null) {
     people.innerHTML = `<option value="">${deptId ? (members.length ? "Choose an officer" : "No active officer in this department") : "Choose a department first"}</option>${members.map((p) => `<option value="${p.id}">${escapeHtml(p.display_name)}</option>`).join("")}`;
     people.disabled = !members.length;
     if (members.length === 1) people.value = String(members[0].id);
+    // Reviewer: only reviewers from the chosen department, plus the person
+    // assigning (who normally checks the work they hand out). Never a mix of
+    // other departments.
+    const reviewer = form.querySelector('[name="reviewer_id"]');
+    if (reviewer) {
+      const me = state.organization.me?.user?.id;
+      const pool = state.taskReviewers || [];
+      const inDept = deptId ? pool.filter((p) => (p.departments || []).some((d) => Number(d.id) === deptId) && Number(p.id) !== Number(me)) : [];
+      const self = pool.find((p) => Number(p.id) === Number(me));
+      const keep = reviewer.value;
+      reviewer.innerHTML = `<option value="">None</option>${self ? `<option value="${self.id}">Me (${escapeHtml(self.display_name)})</option>` : ""}${inDept.map((p) => `<option value="${p.id}">${escapeHtml(p.display_name)}</option>`).join("")}`;
+      if ([...reviewer.options].some((o) => o.value === keep)) reviewer.value = keep;
+      else if (self) reviewer.value = String(self.id);
+    }
   };
   if (lockTo) {
     const match = (departmentList || taskDepartments(assignees)).find((d) => d.name.toUpperCase() === lockTo.toUpperCase());
@@ -3368,6 +3390,9 @@ function alertSummary() {
   // broken, which is the worst failure mode for an alert. `summary` already
   // computes the overdue and pending figures with the same scope predicate.
   const summary = state.summary || {};
+  const attention = state.attention || {};
+  if (Number(attention.mine || 0)) alerts.push({ label: `${attention.mine} new task${attention.mine === 1 ? "" : "s"} assigned to you`, view: "assignments" });
+  if (Number(attention.review || 0)) alerts.push({ label: `${attention.review} task${attention.review === 1 ? "" : "s"} waiting for your review`, view: "assignments" });
   if (canModule("debts") && canSeeFinancial()) {
     const overdue = Number(summary.debts_overdue?.count || 0);
     if (overdue) alerts.push({ label: `${overdue} overdue installment${overdue === 1 ? "" : "s"}`, view: "debts" });

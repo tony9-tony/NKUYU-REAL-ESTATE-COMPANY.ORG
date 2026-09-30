@@ -81,7 +81,9 @@ router.get("/departments", route(async (req, res) => {
 router.get("/reviewers", route(async (req, res) => {
   if (!await mayAssign(req)) return res.status(403).json({ error: "assignment requires the assign_tasks permission" });
   const org = await organizationId();
-  res.json((await query(`SELECT DISTINCT u.id, u.display_name, u.email FROM users u JOIN user_roles ur ON ur.user_id=u.id JOIN roles r ON r.id=ur.role_id AND r.active=TRUE JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.organization_id=$1 AND u.active=TRUE AND p.permission_key='review_tasks' ORDER BY u.display_name LIMIT 200`, [org])).rows);
+  res.json((await query(`SELECT DISTINCT u.id, u.display_name, u.email,
+      COALESCE((SELECT jsonb_agg(jsonb_build_object('id', d.id, 'name', d.name) ORDER BY d.name) FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=u.id AND d.active=TRUE), '[]'::jsonb) AS departments
+    FROM users u JOIN user_roles ur ON ur.user_id=u.id JOIN roles r ON r.id=ur.role_id AND r.active=TRUE JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.organization_id=$1 AND u.active=TRUE AND p.permission_key='review_tasks' ORDER BY u.display_name LIMIT 200`, [org])).rows);
 }));
 
 router.get("/", route(async (req, res) => {

@@ -223,6 +223,13 @@ try {
   const officerAll = (await call("/org/tasks?box=all", { as: officer })).body;
   check(officerAll.some((t) => t.id === task.body.id) && !officerAll.some((t) => t.id === sent2[1].id), "a Sales officer's All assignments shows their work, not Finance's");
   check((await call("/org/tasks?box=everything", { as: admin })).status === 400, "an unknown box is refused");
+  const reviewers = (await call("/org/tasks/reviewers", { as: officer })).body;
+  check(Array.isArray(reviewers) && reviewers.every((u) => Array.isArray(u.departments)), "reviewers come with their departments, so the form can keep them to the chosen department");
+  const detail = (await call(`/org/tasks/${sent2[0].id}`, { as: admin })).body;
+  const assignedEntry = (detail.history || []).find((h) => h.action === "task_assigned");
+  check(Boolean(assignedEntry) && assignedEntry.actor_name && assignedEntry.assignee_name, `the task history keeps who assigned it and to whom (${assignedEntry?.actor_name} -> ${assignedEntry?.assignee_name})`);
+  const csAttention = (await call("/org/tasks/attention", { as: await signIn("cs@demo.mkuyu.local") })).body;
+  check(csAttention.total >= 1, `the assignee's notification badge counts the new task (${csAttention.total})`);
 
   console.log("\n=== boundaries ===");
   const cors = await call("/public/properties", { auth: false, headers: { Origin: "http://localhost:5500" } });
