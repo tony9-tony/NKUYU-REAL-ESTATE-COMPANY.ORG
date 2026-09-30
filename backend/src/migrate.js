@@ -226,6 +226,17 @@ export const defaultRoles = [
   ["Customer Service Officer", "Customer communication, viewings and follow-up; escalates contract questions to Legal", 15, "own", ["access_clients", "access_appointments", "access_leads", "access_follow_ups", "access_properties", "access_reports", "view", "create", "edit", "view_reports"]],
 
   ["Staff Member", "Basic operational access to own records", 10, "own", ["access_clients", "access_appointments", "view", "create", "edit"]],
+
+  // Small-office structure (under 10 staff): one person covers each desk, so
+  // these roles carry the whole department's work without a manager above
+  // them. Only the Managing Director assigns work. Added alongside the older
+  // roles above; those are retired once this structure has been reviewed.
+  // The MD, Legal Officer and Customer Service Officer keep their existing roles.
+  ["Sales & Marketing Officer", "Leads, clients, properties, listings and viewings for the whole sales desk. Creates and submits contracts; never approves them.", 25, "department", ["access_leads", "access_clients", "access_properties", "access_projects", "access_contracts", "access_appointments", "access_documents", "access_follow_ups", "access_reports", "view", "create", "edit", "delete", "export", "view_reports", "submit_contract", "request_changes", "upload_contract_templates"]],
+  // Organization scope on purpose: installments belong to the SALES department
+  // that made the deal, so a department-scoped accountant would not see them.
+  ["Accountant", "Deposits, installments, payments and overdue follow-up for the whole finance desk. Checks the money on every contract.", 25, "organization", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "access_follow_ups", "view", "create", "edit", "delete", "export", "view_financial", "view_reports", "validate_finance", "request_changes"]],
+  ["ICT Officer", "Staff accounts, settings, security, backups and technical support. No business authority.", 35, "organization", [...systemAccess, "upload_contract_templates"]],
 ];
 
 

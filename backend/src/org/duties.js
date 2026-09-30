@@ -61,6 +61,9 @@ export const ROLE_HOME_DEPARTMENT = {
   "Customer Service Manager": "CUSTOMER SERVICE",
   "Customer Service Officer": "CUSTOMER SERVICE",
   "Staff Member": "CUSTOMER SERVICE",
+  "Sales & Marketing Officer": "SALES, MARKETING & OPERATIONS",
+  Accountant: "FINANCE & ACCOUNTS",
+  "ICT Officer": SYSTEM_ADMIN_DEPARTMENT,
 };
 
 /** Placeholder roles being retired, mapped to the role that absorbs members. */
@@ -192,6 +195,30 @@ export const ROLE_DUTIES = {
   "Staff Member": [
     { key: "customer_records", label: "Maintain customer records", description: "Keeps basic contact and relationship data accurate.", permissions: ["access_clients", "view", "create", "edit"] },
     { key: "appointment_coordination", label: "Coordinate appointments", description: "Books and confirms appointments on behalf of the office.", permissions: ["access_appointments", "view", "create", "edit"] },
+  ],
+  "Sales & Marketing Officer": [
+    { key: "deal_initiation", label: "Initiate the deal", description: "Creates the customer, property and project detail a contract needs.", permissions: ["access_clients", "access_properties", "access_projects", "view", "create", "edit"] },
+    { key: "contract_submission", label: "Create and submit contracts", description: "Starts the contract lifecycle and answers Legal's corrections. Does not approve it.", permissions: ["submit_contract", "access_contracts", "request_changes"] },
+    { key: "lead_management", label: "Manage leads and enquiries", description: "Captures, qualifies and converts enquiries into clients.", permissions: ["access_leads", "view", "create", "edit"] },
+    { key: "property_listings", label: "Maintain property listings and photos", description: "Keeps prices, photos, documents and availability current, and removes listings that are no longer valid.", permissions: ["access_properties", "access_documents", "view", "create", "edit", "delete"] },
+    { key: "viewings_and_follow_up", label: "Run viewings and follow-ups", description: "Schedules site visits and closes follow-ups so deals do not go cold.", permissions: ["access_appointments", "access_follow_ups", "view", "create", "edit"] },
+    { key: "sales_reporting", label: "Report on sales activity", description: "Reports pipeline and conversion for the MD.", permissions: ["access_reports", "view_reports", "export"] },
+    { key: "contract_templates", label: "Maintain contract templates", description: "Uploads the Word templates contracts are generated on and chooses the default.", permissions: ["upload_contract_templates"] },
+  ],
+  "Accountant": [
+    { key: "payment_recording", label: "Record deposits and payments", description: "Logs money received, attaches receipts and corrects mistaken entries.", permissions: ["access_payments", "access_debts", "view", "create", "edit", "delete", "view_financial"] },
+    { key: "installment_tracking", label: "Track installments and due dates", description: "Maintains the installment register and payment reminders.", permissions: ["access_debts", "access_reminders", "view", "create", "edit", "view_financial"] },
+    { key: "financial_term_validation", label: "Check the money on contracts", description: "Confirms price, deposit, payment plan and due dates before the MD approves.", permissions: ["validate_finance", "request_changes", "access_contracts", "access_clients"] },
+    { key: "overdue_follow_up", label: "Follow up overdue balances", description: "Chases arrears and records what the customer promised.", permissions: ["access_debts", "access_follow_ups", "view", "create", "edit", "view_financial"] },
+    { key: "finance_reporting", label: "Report on income and balances", description: "Reports income, debt and collections for the MD.", permissions: ["access_reports", "view_reports", "export", "view_financial"] },
+  ],
+  "ICT Officer": [
+    { key: "account_administration", label: "Manage staff accounts", description: "Creates, activates and deactivates staff accounts and handles access requests.", permissions: ["manage_users", "view"] },
+    { key: "role_and_permission_design", label: "Design roles and permissions", description: "Defines what each role may do, in consultation with the MD.", permissions: ["manage_roles", "manage_permissions", "view"] },
+    { key: "system_settings", label: "Maintain system settings and backups", description: "Owns organization configuration, security settings and backup discipline.", permissions: ["manage_settings", "view"] },
+    { key: "security_and_audit", label: "Own security and audit logs", description: "Reads the system audit trail to investigate access and security incidents. Read-only.", permissions: ["view_audit", "view_reports"] },
+    { key: "technical_support", label: "Provide technical support", description: "Resolves device and system issues for staff. Deliberately holds no business authority.", permissions: ["view"] },
+    { key: "contract_templates", label: "Maintain contract templates", description: "Uploads the Word templates contracts are generated on and chooses the default.", permissions: ["upload_contract_templates"] },
   ],
 };
 /**

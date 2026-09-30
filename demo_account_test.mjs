@@ -148,9 +148,9 @@ console.log("\n=== organization shape (Task 5) ===");
 const matrix = (await call("/org/access-matrix", admin.token)).body;
 const EXPECTED_ROLES = {
   MANAGEMENT: ["Managing Director"],
-  "FINANCE & ACCOUNTS": ["Finance Manager", "Finance Officer"],
-  "SALES, MARKETING & OPERATIONS": ["Department Manager", "Sales, Marketing & Operations Officer", "Sales Officer", "Marketing Officer", "Property Officer"],
-  "ICT & ADMINISTRATION": ["ICTO", "Administration & IT Support Officer", "System Administrator"],
+  "FINANCE & ACCOUNTS": ["Finance Manager", "Finance Officer", "Accountant"],
+  "SALES, MARKETING & OPERATIONS": ["Department Manager", "Sales, Marketing & Operations Officer", "Sales Officer", "Marketing Officer", "Property Officer", "Sales & Marketing Officer"],
+  "ICT & ADMINISTRATION": ["ICTO", "Administration & IT Support Officer", "System Administrator", "ICT Officer"],
   LEGAL: ["Legal Manager", "Legal Officer"],
   "CUSTOMER SERVICE": ["Customer Service Manager", "Customer Service Officer"],
 };
