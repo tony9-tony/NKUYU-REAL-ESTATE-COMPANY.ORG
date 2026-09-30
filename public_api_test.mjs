@@ -191,11 +191,30 @@ try {
   check((await act(officer, "begin_review")).status === 200 && (await act(officer, "approve")).status === 200, "Sales reviews and approves the report");
   check((await stageOf())?.task_status === "approved", "Requests shows the customer as contacted");
   const client = await call(`/org/leads/${leadId}/convert`, { method: "POST", as: officer, body: {} });
-  check(client.status === 201, `Sales converts the request into a client (${client.status})`);
+  check([200, 201].includes(client.status), `Sales converts the request into a client (${client.status})`);
   row = await stageOf();
   check(Number(row?.client_id) === Number(client.body.id), "Requests shows it became a client");
   check((await call(`/org/requests/${leadId}/handed-off`, { method: "POST", as: officer, body: { task_id: task.body.id } })).status === 409, "a request that is already a client cannot be handed off again");
   check((await call("/org/requests", { as: await signIn("finance@demo.mkuyu.local") })).status === 403, "staff without the Leads module (Finance) cannot read Requests");
+
+  console.log("\n=== a returning customer is recognised ===");
+  const tailPhone = `+255 74${String(Date.now()).slice(-7)}`;
+  const firstVisit = await call("/public/requests", { method: "POST", auth: false, body: { property: (await call("/properties", { method: "POST", body: { name: `Repeat ${tag}`, property_type: "house", status: "available", price: 50000000, location: "Arusha", area: 100, offer_buy: 1, public_listing: 1 } })).body.id, service: "buy", name: "Repeat Customer", phone: tailPhone, email: `repeat.${tag}@example.com`, budget: 45000000, preferred_contact: "phone" } });
+  const firstId = Number(firstVisit.body.reference.slice(2));
+  let firstRow = (await call("/org/requests", { as: officer })).body.find((r) => r.id === firstId);
+  check(firstRow && !firstRow.existing_client_id && !firstRow.client_id, "a first-time customer is a plain new request (not a client)");
+  const madeClient = await call(`/org/leads/${firstId}/convert`, { method: "POST", as: officer, body: {} });
+  check(madeClient.status === 201, "the first request is converted into a client");
+  const repeatProperty = (await call("/properties", { method: "POST", body: { name: `Repeat Two ${tag}`, property_type: "house", status: "available", price: 60000000, location: "Arusha", area: 110, offer_buy: 1, public_listing: 1 } })).body.id;
+  const again = await call("/public/requests", { method: "POST", auth: false, body: { property: repeatProperty, service: "buy", name: "Repeat Customer", phone: "07" + tailPhone.slice(-8), email: "", budget: 55000000, preferred_contact: "phone" } });
+  const againId = Number(again.body.reference.slice(2));
+  const againRow = (await call("/org/requests", { as: officer })).body.find((r) => r.id === againId);
+  check(Number(againRow?.existing_client_id) === Number(madeClient.body.id) && !againRow?.client_id && !againRow?.task_id, "the same customer requesting again (same phone, other format) is shown as an existing client, still waiting for hand-off");
+  const clientsBefore = Number((await query("SELECT COUNT(*) FROM clients WHERE right(regexp_replace(phone,'\\D','','g'),9)=$1", [tailPhone.replace(/\D/g, "").slice(-9)])).rows[0].count);
+  const reuse = await call(`/org/leads/${againId}/convert`, { method: "POST", as: officer, body: {} });
+  const clientsAfter = Number((await query("SELECT COUNT(*) FROM clients WHERE right(regexp_replace(phone,'\\D','','g'),9)=$1", [tailPhone.replace(/\D/g, "").slice(-9)])).rows[0].count);
+  check(reuse.status === 200 && Number(reuse.body.id) === Number(madeClient.body.id) && clientsAfter === clientsBefore, "converting the repeat request reuses the existing client: no duplicate client record");
+  check((await call(`/org/leads/${againId}/convert`, { method: "POST", as: officer, body: {} })).status === 409, "a request cannot be converted twice");
 
   console.log("\n=== Customer Service reports the outcome back to Sales ===");
   const home = await call("/properties", { method: "POST", body: { project_id: project.body.id, name: `Flat ${tag}`, property_type: "apartment", status: "available", price: 90000000, location: "Dar es Salaam", area: 90, bedrooms: 2, bathrooms: 1, offer_buy: 1, public_listing: 1 } });

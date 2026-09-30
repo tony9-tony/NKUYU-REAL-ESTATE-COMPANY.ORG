@@ -1042,7 +1042,7 @@ function updateNavigation() {
       // correct after a refresh and cannot include another department's work.
       assignments: Number((state.attention || {}).total || 0),
       // New requests and reports waiting for Sales.
-      requests: (state.requests || []).filter((row) => ["new", "reported"].includes(requestStage(row))).length,
+      requests: (state.requests || []).filter((row) => ["new", "existing", "reported"].includes(requestStage(row))).length,
     };
     let lastGroup = null;
     nav.innerHTML = allowed.map((item) => {
@@ -3052,6 +3052,7 @@ function renderLeads() {
 // is new, who is contacting the customer, and which reports wait for Sales.
 const REQUEST_STAGES = [
   ["new", "New", "open"],
+  ["existing", "Existing client", "open"],
   ["with_cs", "With Customer Service", "task-in-progress"],
   ["reported", "Report waiting for you", "submitted"],
   ["appointment", "Appointment booked", "approved"],
@@ -3064,7 +3065,7 @@ const REQUEST_STAGES = [
 function requestStage(row) {
   if (row.appointment_id) return "appointment";
   if (row.client_id) return "client";
-  if (!row.task_id || row.task_status === "cancelled") return "new";
+  if (!row.task_id || row.task_status === "cancelled") return row.existing_client_id ? "existing" : "new";
   if (["submitted", "under_review"].includes(row.task_status)) return "reported";
   if (["approved", "completed"].includes(row.task_status)) {
     return { declined: "closed", unreachable: "unreachable", appointment: "appointment" }[row.outcome] || "contacted";
@@ -3099,13 +3100,15 @@ function renderRequests() {
     const key = requestStage(row);
     const [, label, tone] = REQUEST_STAGES.find(([k]) => k === key);
     const who = row.task_assignee && key !== "new" && key !== "client" ? `<span class="cell-sub">Customer Service: ${escapeHtml(row.task_assignee)}</span>` : "";
+    const known = row.existing_client_id ? `<span class="cell-sub">Already a client${row.existing_client_name && row.existing_client_name !== row.name ? ` (${escapeHtml(row.existing_client_name)})` : ""}: no new client record will be made</span>` : "";
     const reported = row.outcome && key !== "new" ? `<span class="cell-sub">${outcomeText(row.outcome, row.outcome_note, row.appointment_at, row.appointment_type)}</span>` : "";
     const cancelled = !row.client_id && row.task_status === "cancelled" ? `<span class="cell-sub">The last hand-off was cancelled</span>` : "";
     const openTaskBtn = (primary) => row.task_id ? `<button class="btn btn-small${primary ? " btn-primary" : ""}" data-action="open-task" data-id="${row.task_id}">${primary ? "Review report" : "Open assignment"}</button>` : "";
     const handOff = mayHandOff ? `<button class="btn btn-small btn-primary" data-action="hand-off-lead" data-id="${row.id}">Hand to Customer Service</button>` : "";
     const convert = (primary) => mayCreate ? `<button class="btn btn-small${primary ? " btn-primary" : ""}" data-action="convert-lead" data-id="${row.id}" title="Register this customer as a client (prospect)">Convert to client</button>` : "";
     const next = {
-      new: handOff + convert(false),
+      new: handOff,
+      existing: handOff,
       with_cs: openTaskBtn(false),
       reported: openTaskBtn(true),
       contacted: convert(true) + openTaskBtn(false),
@@ -3119,7 +3122,7 @@ function renderRequests() {
       <td>${row.service ? badge(row.service === "rent" ? "Rent" : "Buy", "open") : ""}<span class="cell-sub">${escapeHtml(row.property_name || "Property no longer listed")}</span></td>
       <td>${row.budget ? `TZS ${escapeHtml(Number(row.budget).toLocaleString("en-US"))}` : "—"}<span class="cell-sub">Contact by ${escapeHtml(means[row.preferred_contact] || "Phone")}</span></td>
       <td>${formatDate(row.created_at)}</td>
-      <td>${badge(label, tone)}${who}${reported}${cancelled}</td>
+      <td>${badge(label, tone)}${known}${who}${reported}${cancelled}</td>
       <td class="cell-note">${escapeHtml(String(row.notes || "").replace(/^Website request to [^\n]*\n*/, "") || "—")}</td>
       <td class="align-right"><div class="row-actions">${next}</div></td>
     </tr>`;

@@ -7,6 +7,7 @@ import { Router } from "express";
 import { query, queryOne } from "../db.js";
 import { organizationId } from "../org/rbac.js";
 import { currentAccess, ownershipFields } from "../org/access.js";
+import { findExistingClient } from "../org/clientMatch.js";
 import { audit } from "../org/audit.js";
 import { TASK_PRIORITIES, TASK_STATUSES, TASK_LINK_ENTITIES, canTransitionTask, normalizeTaskPriority, normalizeTaskStatus, taskActionsFor } from "../tasks/workflow.js";
 import { attentionCount, linkedRecordExists, listComments, listHistory, listTasks, taskVisible } from "../tasks/tasks.js";
@@ -231,7 +232,7 @@ async function applyApprovedOutcome(req, taskId) {
   }
   const own = ownershipFields(req.access || (await currentAccess()));
   const org = request.organization_id;
-  let clientId = request.client_id;
+  let clientId = request.client_id || (await findExistingClient(org, { email: request.email, phone: request.phone }))?.id || null;
   if (!clientId) {
     const client = await queryOne("INSERT INTO clients(organization_id,name,email,phone,client_type,status,notes,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,'buyer','lead',$5,$6,$7,$8,$9) RETURNING id",
       [org, request.name, request.email, request.phone, request.notes, own.owner_id, own.created_by, own.department_id, own.visibility]);

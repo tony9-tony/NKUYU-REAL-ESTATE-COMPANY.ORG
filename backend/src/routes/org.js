@@ -17,6 +17,7 @@ import { REPORT_TYPES, PAYMENT_METHODS, reportTypeIsFinancial } from "../models/
 import { CONTRACT_ACTIONS, WORKFLOW_STAGES, WORKFLOW_EXCEPTIONS, availableActions, canTransition, workflowGraph, workflowStagePermissions } from "../contracts/workflow.js";
 import { ROLE_DUTIES, CONTRACT_OWNERSHIP, ROLE_HOME_DEPARTMENT, TASK_HANDOFF, SYSTEM_PERMISSIONS, departmentDutyTree, checkRoleDuties, checkContractOwnership, checkNoSystemAdminLeak, checkDeadPermissions } from "../org/duties.js";
 import taskRoutes from "./tasks.js";
+import { EXISTING_CLIENT_SQL, findExistingClient } from "../org/clientMatch.js";
 import { cleanupUploadedFile, profileImageExtensions, profileUploadsDir, removeStoredFile, resolveStoredFile, uploadProfileImageFile, validateUploadedFile } from "../uploads.js";
 
 const router = Router();
@@ -829,8 +830,10 @@ router.post("/leads", requireModuleAccess("leads"), requirePermission("create"),
 // from arrival to client. Same module and record scope as Leads.
 router.get("/requests", requireModuleAccess("leads"), async(req,res,next)=>{try{
   const values=[await organizationId()];const visible=scopeCondition("l","lead",req.access,values);
-  res.json(await rows(`SELECT l.*, p.name AS property_name, t.status AS task_status, t.assigned_to AS task_assignee_id, u.display_name AS task_assignee, t.submitted_at AS task_submitted_at, t.approved_at AS task_approved_at
+  res.json(await rows(`SELECT l.*, p.name AS property_name, t.status AS task_status, t.assigned_to AS task_assignee_id, u.display_name AS task_assignee, t.submitted_at AS task_submitted_at, t.approved_at AS task_approved_at,
+      ec.id AS existing_client_id, ec.name AS existing_client_name
     FROM leads l LEFT JOIN properties p ON p.id=l.property_id LEFT JOIN tasks t ON t.id=l.task_id LEFT JOIN users u ON u.id=t.assigned_to
+    LEFT JOIN clients ec ON l.client_id IS NULL AND ec.id = ${EXISTING_CLIENT_SQL}
     WHERE l.organization_id=$1 AND l.source='website' AND ${visible} ORDER BY l.created_at DESC LIMIT 500`,values));
 }catch(e){next(e);}});
 // Records which Customer Service task a request was handed to. The task must
@@ -853,7 +856,10 @@ router.post("/requests/:id/handed-off", requireModuleAccess("leads"), requirePer
 // record is therefore created as a PROSPECT ('lead'), so the completed-client rule
 // (a client must have a contract) is never violated by converting a lead. Sales
 // attaches the contract and completes the client afterwards.
-router.post("/leads/:id/convert", requireModuleAccess("leads"), requirePermission("create"), async(req,res,next)=>{try{const leadId=id(req.params.id,"lead_id");const values=[leadId,await organizationId()];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND ${scopeCondition("l","lead",req.access,values)}`,values);if(!lead)return res.status(404).json({error:"lead not found"});const client=await queryOne("INSERT INTO clients(organization_id,name,email,phone,client_type,status,notes,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,'buyer','lead',$5,$6,$7,$8,$9) RETURNING *",[values[1],lead.name,lead.email,lead.phone,lead.notes,lead.owner_id,lead.created_by,lead.department_id,lead.visibility]);await query("UPDATE leads SET client_id=$1,status='converted',converted_at=NOW() WHERE id=$2",[client.id,lead.id]);await audit(req,"converted","lead",lead.id,{client_id:client.id});res.status(201).json(client);}catch(e){next(e);}});
+router.post("/leads/:id/convert", requireModuleAccess("leads"), requirePermission("create"), async(req,res,next)=>{try{const leadId=id(req.params.id,"lead_id");const values=[leadId,await organizationId()];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND ${scopeCondition("l","lead",req.access,values)}`,values);if(!lead)return res.status(404).json({error:"lead not found"});if(lead.client_id)return res.status(409).json({error:"already a client"});
+    const existing=await findExistingClient(values[1],{email:lead.email,phone:lead.phone});
+    if(existing){await query("UPDATE leads SET client_id=$1,status='converted',converted_at=NOW() WHERE id=$2",[existing.id,lead.id]);await audit(req,"converted","lead",lead.id,{client_id:existing.id,existing:true});return res.json(await queryOne("SELECT * FROM clients WHERE id=$1",[existing.id]));}
+    const client=await queryOne("INSERT INTO clients(organization_id,name,email,phone,client_type,status,notes,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,'buyer','lead',$5,$6,$7,$8,$9) RETURNING *",[values[1],lead.name,lead.email,lead.phone,lead.notes,lead.owner_id,lead.created_by,lead.department_id,lead.visibility]);await query("UPDATE leads SET client_id=$1,status='converted',converted_at=NOW() WHERE id=$2",[client.id,lead.id]);await audit(req,"converted","lead",lead.id,{client_id:client.id});res.status(201).json(client);}catch(e){next(e);}});
 // Follow-ups. Opt-in pagination; the default response is the bare array the
 // workspace aggregate and the existing tests depend on.
 router.get("/follow-ups", requireModuleAccess("follow_ups"), async(req,res,next)=>{try{
