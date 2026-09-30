@@ -15,7 +15,7 @@ import { Report } from "../models/report.js";
 import { Appointment, Client, Document, Property } from "../models/catalog.js";
 import { REPORT_TYPES, PAYMENT_METHODS, reportTypeIsFinancial } from "../models/reportTypes.js";
 import { CONTRACT_ACTIONS, WORKFLOW_STAGES, WORKFLOW_EXCEPTIONS, availableActions, canTransition, workflowGraph, workflowStagePermissions } from "../contracts/workflow.js";
-import { ROLE_DUTIES, CONTRACT_OWNERSHIP, ROLE_HOME_DEPARTMENT, SYSTEM_PERMISSIONS, departmentDutyTree, checkRoleDuties, checkContractOwnership, checkNoSystemAdminLeak, checkDeadPermissions } from "../org/duties.js";
+import { ROLE_DUTIES, CONTRACT_OWNERSHIP, ROLE_HOME_DEPARTMENT, TASK_HANDOFF, SYSTEM_PERMISSIONS, departmentDutyTree, checkRoleDuties, checkContractOwnership, checkNoSystemAdminLeak, checkDeadPermissions } from "../org/duties.js";
 import taskRoutes from "./tasks.js";
 import { cleanupUploadedFile, profileImageExtensions, profileUploadsDir, removeStoredFile, resolveStoredFile, uploadProfileImageFile, validateUploadedFile } from "../uploads.js";
 
@@ -432,7 +432,7 @@ router.get("/workspace", async (req, res, next) => {
       scopedCounts({ financial, has }),
       // Staff administration data goes to whoever holds the duty for it (the
       // administrator account, or the ICT Officer), not only to the admin account.
-      staffAdmin ? rows("SELECT * FROM departments WHERE organization_id=$1 ORDER BY name", [org]) : [],
+      staffAdmin ? rows(`${DEPARTMENT_SELECT} WHERE d.organization_id=$1 ORDER BY d.name`, [org]).then((list) => list.map(withCore)) : [],
       staffAdmin ? rows("SELECT r.*, COALESCE((SELECT json_agg(p.permission_key ORDER BY p.permission_key) FROM role_permissions rpx JOIN permissions p ON p.id=rpx.permission_id WHERE rpx.role_id=r.id),'[]'::json) AS permissions FROM roles r WHERE r.organization_id=$1 ORDER BY r.rank DESC, r.name", [org]) : [],
       can(access, "manage_users") ? rows(`SELECT u.id,u.email,u.display_name,u.role,u.active,${USER_ROLES_JSON} AS roles,${USER_DEPARTMENTS_JSON} AS departments FROM users u WHERE u.organization_id=$1 ORDER BY u.display_name`, [org]) : [],
       can(access, "manage_permissions") ? rows("SELECT permission_key, label FROM permissions ORDER BY permission_key") : [],
@@ -581,9 +581,60 @@ router.get("/users/:id/photo", async (req, res, next) => {
 router.get("/me", async (req, res, next) => {
   try { res.json(await buildMe(req)); } catch (error) { next(error); }
 });
-router.get("/departments", requireAnyPermission("manage_users", "manage_roles"), async (req,res,next)=>{try{res.json(await rows("SELECT * FROM departments WHERE organization_id=$1 ORDER BY name",[await organizationId()]));}catch(e){next(e);}});
-router.post("/departments", requirePermission("manage_roles"), async (req,res,next)=>{try{const org=await organizationId();const r=await queryOne("INSERT INTO departments (organization_id,name,description) VALUES ($1,$2,$3) RETURNING *",[org,text(req.body?.name,"name"),req.body?.description||null]);await audit(req,"created","department",r.id);res.status(201).json(r);}catch(e){next(e);}});
-router.put("/departments/:id", requirePermission("manage_roles"), async (req,res,next)=>{try{const r=await queryOne("UPDATE departments SET name=COALESCE($1,name),description=COALESCE($2,description),active=COALESCE($3,active) WHERE id=$4 AND organization_id=$5 RETURNING *",[req.body?.name||null,req.body?.description||null,req.body?.active===undefined?null:Boolean(req.body.active),id(req.params.id,"department_id"),await organizationId()]);if(!r)return res.status(404).json({error:"department not found"});clearAccessCache();await audit(req,"updated","department",r.id);res.json(r);}catch(e){next(e);}});
+// Departments: full CRUD for staff administration (MD, ICT, administrator).
+//
+// Core departments are named in the role design (ROLE_HOME_DEPARTMENT) and the
+// hand-off rules (TASK_HANDOFF), so they cannot be renamed, deactivated or
+// deleted - that would silently break who belongs where. A department that
+// still has active staff cannot be deactivated or deleted either: its people
+// would vanish from every department list. Names are unique (any case).
+const CORE_DEPARTMENTS = new Set([...Object.values(ROLE_HOME_DEPARTMENT), ...Object.keys(TASK_HANDOFF), ...Object.values(TASK_HANDOFF).flat()]);
+const departmentName = (value) => text(value, "name", 80).replace(/\s+/g, " ").trim().toUpperCase();
+const httpError = (status, message) => { const e = new Error(message); e.status = status; return e; };
+async function assertUniqueDepartment(org, name, exceptId = null) {
+  const clash = await queryOne("SELECT id FROM departments WHERE organization_id=$1 AND UPPER(name)=$2 AND ($3::int IS NULL OR id<>$3)", [org, name, exceptId]);
+  if (clash) throw httpError(409, `a department called "${name}" already exists`);
+}
+const DEPARTMENT_SELECT = `SELECT d.*,
+  (SELECT COUNT(*) FROM user_departments ud JOIN users u ON u.id=ud.user_id WHERE ud.department_id=d.id AND u.active)::int AS active_members,
+  (SELECT COUNT(*) FROM user_departments ud WHERE ud.department_id=d.id)::int AS all_members
+  FROM departments d`;
+const withCore = (row) => row && ({ ...row, core: CORE_DEPARTMENTS.has(row.name) });
+
+router.get("/departments", requireAnyPermission("manage_users", "manage_roles"), async (req,res,next)=>{try{res.json((await rows(`${DEPARTMENT_SELECT} WHERE d.organization_id=$1 ORDER BY d.name`,[await organizationId()])).map(withCore));}catch(e){next(e);}});
+router.post("/departments", requirePermission("manage_roles"), async (req,res,next)=>{try{
+  const org=await organizationId();const name=departmentName(req.body?.name);await assertUniqueDepartment(org,name);
+  const r=await queryOne("INSERT INTO departments (organization_id,name,description) VALUES ($1,$2,$3) RETURNING *",[org,name,req.body?.description||null]);
+  clearAccessCache();await audit(req,"created","department",r.id,{name});res.status(201).json(withCore({...r,active_members:0,all_members:0}));
+}catch(e){next(e);}});
+router.put("/departments/:id", requirePermission("manage_roles"), async (req,res,next)=>{try{
+  const org=await organizationId();const deptId=id(req.params.id,"department_id");
+  const current=await queryOne(`${DEPARTMENT_SELECT} WHERE d.id=$1 AND d.organization_id=$2`,[deptId,org]);
+  if(!current)return res.status(404).json({error:"department not found"});
+  const name=req.body?.name!==undefined&&req.body?.name!==null&&req.body?.name!==""?departmentName(req.body.name):null;
+  const active=req.body?.active===undefined?null:Boolean(req.body.active);
+  const core=CORE_DEPARTMENTS.has(current.name);
+  if(name&&name!==current.name){if(core)return res.status(409).json({error:`"${current.name}" is a core department and cannot be renamed`});await assertUniqueDepartment(org,name,deptId);}
+  if(active===false&&current.active){
+    if(core)return res.status(409).json({error:`"${current.name}" is a core department and cannot be deactivated`});
+    if(current.active_members)return res.status(409).json({error:`move its ${current.active_members} active staff to another department first`});
+  }
+  const r=await queryOne("UPDATE departments SET name=COALESCE($1,name),description=COALESCE($2,description),active=COALESCE($3,active) WHERE id=$4 AND organization_id=$5 RETURNING *",[name,req.body?.description||null,active,deptId,org]);
+  clearAccessCache();await audit(req,"updated","department",r.id,{name:r.name,active:r.active});res.json(withCore({...current,...r}));
+}catch(e){next(e);}});
+// Delete: only an empty, non-core department that no record points at. Any
+// department that has been used is deactivated instead, to keep history whole.
+router.delete("/departments/:id", requirePermission("manage_roles"), async (req,res,next)=>{try{
+  const org=await organizationId();const deptId=id(req.params.id,"department_id");
+  const current=await queryOne(`${DEPARTMENT_SELECT} WHERE d.id=$1 AND d.organization_id=$2`,[deptId,org]);
+  if(!current)return res.status(404).json({error:"department not found"});
+  if(CORE_DEPARTMENTS.has(current.name))return res.status(409).json({error:`"${current.name}" is a core department and cannot be deleted`});
+  if(current.all_members)return res.status(409).json({error:`it still has ${current.all_members} staff member(s); move them first`});
+  const tables=(await rows("SELECT table_name FROM information_schema.columns WHERE table_schema='public' AND column_name='department_id' AND table_name<>'user_departments'")).map((row)=>row.table_name);
+  for(const table of tables){const used=await queryOne(`SELECT 1 FROM "${table.replace(/"/g,"")}" WHERE department_id=$1 LIMIT 1`,[deptId]);if(used)return res.status(409).json({error:"records already belong to this department; deactivate it instead"});}
+  await query("DELETE FROM departments WHERE id=$1 AND organization_id=$2",[deptId,org]);
+  clearAccessCache();await audit(req,"deleted","department",deptId,{name:current.name});res.json({ok:true});
+}catch(e){next(e);}});
 router.get("/roles", requireAnyPermission("manage_users", "manage_roles"), async (req,res,next)=>{try{res.json(await rows("SELECT r.*,COUNT(rp.permission_id)::int AS permission_count,COALESCE((SELECT json_agg(p.permission_key ORDER BY p.permission_key) FROM role_permissions rpx JOIN permissions p ON p.id=rpx.permission_id WHERE rpx.role_id=r.id),'[]'::json) AS permissions FROM roles r LEFT JOIN role_permissions rp ON rp.role_id=r.id WHERE r.organization_id=$1 GROUP BY r.id ORDER BY r.rank DESC, r.name",[await organizationId()]));}catch(e){next(e);}});
 router.post("/roles", requirePermission("manage_roles"), async (req,res,next)=>{try{const r=await queryOne("INSERT INTO roles (organization_id,name,description,rank,scope) VALUES ($1,$2,$3,$4,$5) RETURNING *",[await organizationId(),text(req.body?.name,"name"),req.body?.description||null,guardRank(req,rank(req.body?.rank)),scope(req.body?.scope)]);await audit(req,"created","role",r.id);res.status(201).json(r);}catch(e){next(e);}});
 router.put("/roles/:id", requirePermission("manage_roles"), async (req,res,next)=>{try{await guardRoleChange(req,id(req.params.id,"role_id"),await organizationId());if(req.body?.rank!==undefined)guardRank(req,rank(req.body.rank));const r=await queryOne("UPDATE roles SET name=COALESCE($1,name),description=COALESCE($2,description),rank=COALESCE($3,rank),scope=COALESCE($4,scope),active=COALESCE($5,active) WHERE id=$6 AND organization_id=$7 RETURNING *",[req.body?.name||null,req.body?.description||null,req.body?.rank===undefined?null:rank(req.body.rank),req.body?.scope===undefined?null:scope(req.body.scope),req.body?.active===undefined?null:Boolean(req.body.active),id(req.params.id,"role_id"),await organizationId()]);if(!r)return res.status(404).json({error:"role not found"});clearAccessCache();await audit(req,"updated","role",r.id);res.json(r);}catch(e){next(e);}});
@@ -701,7 +752,13 @@ router.get("/access-matrix", requireAdmin(), async (req, res, next) => {
 });
 router.put("/roles/:id/permissions", requirePermission("manage_permissions"), async (req,res,next)=>{try{const roleId=id(req.params.id,"role_id");await guardRoleChange(req,roleId,await organizationId());const keys=(Array.isArray(req.body?.permissions)?req.body.permissions:[]).map(String);if(!isAdminAccount(req)){const reserved=keys.filter((key)=>RESERVED_ROLE_PERMISSIONS.has(key));if(reserved.length)return res.status(403).json({error:`only the System Administrator can grant ${reserved.join(", ")}`});}await withTransaction(async(client)=>{await client.query("DELETE FROM role_permissions WHERE role_id=$1",[roleId]);for(const key of keys)await client.query("INSERT INTO role_permissions(role_id,permission_id) SELECT $1,id FROM permissions WHERE permission_key=$2 ON CONFLICT DO NOTHING",[roleId,String(key)]);});clearAccessCache();await audit(req,"updated","role_permissions",roleId);res.json({ok:true});}catch(e){next(e);}});
 router.get("/users", requirePermission("manage_users"), async (req,res,next)=>{try{const result=await rows(`SELECT u.id,u.email,u.display_name,u.role,u.active,u.created_at,${USER_ROLES_JSON} AS roles,${USER_DEPARTMENTS_JSON} AS departments FROM users u WHERE u.organization_id=$1 ORDER BY u.display_name`,[await organizationId()]);res.json(result);}catch(e){next(e);}});
-router.post("/users", requirePermission("manage_users"), async (req,res,next)=>{try{const password=String(req.body?.password||"");if(password.length<8)return res.status(400).json({error:"password must be at least 8 characters"});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map(Number))];const departmentIds=[...new Set((Array.isArray(req.body?.department_ids)?req.body.department_ids:[]).map(Number))].filter(Boolean);if(!roleIds.length)return res.status(400).json({error:"select at least one role for the staff member"});if(roleIds.some((roleId)=>!Number.isInteger(roleId)||roleId<1))return res.status(400).json({error:"one or more selected roles are invalid"});const org=await organizationId();await assignableRoles(req,roleIds,org);const r=await queryOne("INSERT INTO users(organization_id,email,password_hash,display_name,role) VALUES($1,$2,$3,$4,'staff') RETURNING id,email,display_name,role,active,created_at",[org,text(req.body?.email,"email").toLowerCase(),hashPassword(password),text(req.body?.display_name,"display_name",80)]);for(const roleId of roleIds)await query("INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE id=$2 AND organization_id=$3",[r.id,id(roleId,"role_id"),org]);for(const departmentId of departmentIds)await query("INSERT INTO user_departments(user_id,department_id) SELECT $1,id FROM departments WHERE id=$2 AND organization_id=$3",[r.id,id(departmentId,"department_id"),org]);clearAccessCache();await audit(req,"created","user",r.id,{role_ids:roleIds});res.status(201).json(r);}catch(e){next(e);}});
+router.post("/users", requirePermission("manage_users"), async (req,res,next)=>{try{const password=String(req.body?.password||"");if(password.length<8)return res.status(400).json({error:"password must be at least 8 characters"});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map(Number))];let departmentIds=[...new Set((Array.isArray(req.body?.department_ids)?req.body.department_ids:[]).map(Number))].filter(Boolean);if(!roleIds.length)return res.status(400).json({error:"select at least one role for the staff member"});if(roleIds.some((roleId)=>!Number.isInteger(roleId)||roleId<1))return res.status(400).json({error:"one or more selected roles are invalid"});const org=await organizationId();await assignableRoles(req,roleIds,org);
+    // Every staff member belongs to a department, or no department list would
+    // ever show them. Without a choice, the role's home department is used.
+    if(!departmentIds.length){const roleNames=await rows("SELECT name FROM roles WHERE id=ANY($1::int[]) AND organization_id=$2",[roleIds,org]);const homes=roleNames.map((row)=>ROLE_HOME_DEPARTMENT[row.name]).filter(Boolean);if(homes.length)departmentIds=(await rows("SELECT id FROM departments WHERE organization_id=$1 AND active AND name=ANY($2::text[])",[org,homes])).map((row)=>Number(row.id));}
+    if(!departmentIds.length)return res.status(400).json({error:"choose a department for the staff member"});
+    const liveDepartments=await rows("SELECT id FROM departments WHERE organization_id=$1 AND active AND id=ANY($2::int[])",[org,departmentIds]);
+    if(liveDepartments.length!==departmentIds.length)return res.status(400).json({error:"one or more selected departments do not exist or are inactive"});const newEmail=text(req.body?.email,"email").toLowerCase();if(await queryOne("SELECT 1 FROM users WHERE LOWER(email)=$1",[newEmail]))return res.status(409).json({error:"a staff account with this email already exists"});const r=await queryOne("INSERT INTO users(organization_id,email,password_hash,display_name,role) VALUES($1,$2,$3,$4,'staff') RETURNING id,email,display_name,role,active,created_at",[org,text(req.body?.email,"email").toLowerCase(),hashPassword(password),text(req.body?.display_name,"display_name",80)]);for(const roleId of roleIds)await query("INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE id=$2 AND organization_id=$3",[r.id,id(roleId,"role_id"),org]);for(const departmentId of departmentIds)await query("INSERT INTO user_departments(user_id,department_id) SELECT $1,id FROM departments WHERE id=$2 AND organization_id=$3",[r.id,id(departmentId,"department_id"),org]);clearAccessCache();await audit(req,"created","user",r.id,{role_ids:roleIds});res.status(201).json(r);}catch(e){next(e);}});
 router.put("/users/:id", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");const org=await organizationId();const target=await guardTargetUser(req,userId,org,{allowSelf:false});const r=await queryOne("UPDATE users SET display_name=COALESCE($1,display_name),active=COALESCE($2,active) WHERE id=$3 AND organization_id=$4 RETURNING id,email,display_name,role,active,created_at",[req.body?.display_name||null,req.body?.active===undefined?null:Boolean(req.body.active),userId,org]);
     // A password reset changes the credential and nothing else: the user id, role,
     // department, permissions and every owned record are untouched. Live sessions
@@ -709,7 +766,12 @@ router.put("/users/:id", requirePermission("manage_users"), async (req,res,next)
     if(req.body?.password){if(String(req.body.password).length<8)return res.status(400).json({error:"password must be at least 8 characters"});await query("UPDATE users SET password_hash=$1 WHERE id=$2",[hashPassword(req.body.password),userId]);await query("DELETE FROM sessions WHERE user_id=$1",[userId]);clearAccessCache();await audit(req,"password_reset","user",userId,{email:target.email,sessions_invalidated:true});}
     if(!r)return res.status(404).json({error:"user not found"});clearAccessCache();await audit(req,"updated","user",userId);res.json(r);}catch(e){next(e);}});
 router.put("/users/:id/roles", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");const org=await organizationId();await guardTargetUser(req,userId,org,{allowSelf:false});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map((roleId)=>id(roleId,"role_id")))];if(roleIds.length)await assignableRoles(req,roleIds,org);await withTransaction(async(c)=>{await c.query("DELETE FROM user_roles WHERE user_id=$1",[userId]);for(const roleId of roleIds)await c.query("INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE id=$2 AND organization_id=$3 ON CONFLICT DO NOTHING",[userId,roleId,org]);});clearAccessCache();await audit(req,"changed_role","user",userId);res.json({ok:true});}catch(e){next(e);}});
-router.put("/users/:id/departments", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");await guardTargetUser(req,userId,await organizationId());await withTransaction(async(c)=>{await c.query("DELETE FROM user_departments WHERE user_id=$1",[userId]);for(const departmentId of(req.body?.department_ids||[]))await c.query("INSERT INTO user_departments(user_id,department_id) SELECT $1,id FROM departments WHERE id=$2 AND organization_id=$3 ON CONFLICT DO NOTHING",[userId,id(departmentId,"department_id"),await organizationId()]);});clearAccessCache();await audit(req,"changed_department","user",userId);res.json({ok:true});}catch(e){next(e);}});
+router.put("/users/:id/departments", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");await guardTargetUser(req,userId,await organizationId());
+    const wanted=[...new Set((Array.isArray(req.body?.department_ids)?req.body.department_ids:[]).map((value)=>id(value,"department_id")))];
+    if(!wanted.length)return res.status(400).json({error:"a staff member must belong to at least one department"});
+    const live=await rows("SELECT id FROM departments WHERE organization_id=$1 AND active AND id=ANY($2::int[])",[await organizationId(),wanted]);
+    if(live.length!==wanted.length)return res.status(400).json({error:"one or more selected departments do not exist or are inactive"});
+    req.body.department_ids=wanted;await withTransaction(async(c)=>{await c.query("DELETE FROM user_departments WHERE user_id=$1",[userId]);for(const departmentId of(req.body?.department_ids||[]))await c.query("INSERT INTO user_departments(user_id,department_id) SELECT $1,id FROM departments WHERE id=$2 AND organization_id=$3 ON CONFLICT DO NOTHING",[userId,id(departmentId,"department_id"),await organizationId()]);});clearAccessCache();await audit(req,"changed_department","user",userId);res.json({ok:true});}catch(e){next(e);}});
 /**
  * Audit log.
  *

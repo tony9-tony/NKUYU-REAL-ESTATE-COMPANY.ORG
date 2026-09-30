@@ -67,6 +67,17 @@ router.get("/assignees", route(async (req, res) => {
     FROM users u WHERE u.organization_id=$1 AND u.active=TRUE ${scope} ORDER BY u.display_name LIMIT 200`, values)).rows);
 }));
 
+router.get("/departments", route(async (req, res) => {
+  if (!await mayAssign(req)) return res.status(403).json({ error: "assignment requires the assign_tasks permission" });
+  const org = await organizationId();
+  const access = req.access || (await currentAccess());
+  const everyone = req.user?.role === "admin" || access?.isAdmin || access?.scope === "organization";
+  const ids = everyone ? null : await assignableDepartmentIds(access?.departmentIds || []);
+  res.json((await query(`SELECT d.id, d.name,
+      (SELECT COUNT(*) FROM user_departments ud JOIN users u ON u.id=ud.user_id WHERE ud.department_id=d.id AND u.active)::int AS active_members
+    FROM departments d WHERE d.organization_id=$1 AND d.active AND ($2::int[] IS NULL OR d.id = ANY($2::int[])) ORDER BY d.name`, [org, ids])).rows);
+}));
+
 router.get("/reviewers", route(async (req, res) => {
   if (!await mayAssign(req)) return res.status(403).json({ error: "assignment requires the assign_tasks permission" });
   const org = await organizationId();

@@ -66,7 +66,42 @@ const created = await call("/org/users", ictoToken, "POST", {
 });
 check(created.status === 201, `ICTO creates a staff account in the new department (${created.status})`);
 check((await signIn(staffEmail, "TempPass#2026")).status === 200, "the new staff member can sign in");
+check((await call("/org/users", ictoToken, "POST", { display_name: "Again", email: staffEmail.toUpperCase(), password: "TempPass#2026", role_ids: [roleId("Accountant")] })).status === 409, "a second account with the same email is refused clearly (409, not a crash)");
 const staffId = created.body.id;
+
+console.log("\n=== the system knows every department and every officer (CRUD) ===");
+const deptId = department.body.id;
+const deptRow = async () => (await call("/org/departments", adminToken)).body.find((d) => d.id === deptId);
+check((await call("/org/departments", ictoToken, "POST", { name: `construction ${tag}` })).status === 409, "a duplicate department name (any case) is refused");
+check((await deptRow())?.active_members === 1, "the department list counts its staff");
+check((await call("/org/departments", adminToken)).body.find((d) => d.name === "CUSTOMER SERVICE")?.core === true, "core departments are marked");
+const register = (await call("/org/workspace", ictoToken)).body.admin.users.find((u) => u.id === staffId);
+check(register?.departments?.some((d) => d.id === deptId), "the new staff member appears under the new department in the staff register");
+check((await call("/org/tasks/departments", adminToken)).body.some((d) => d.id === deptId && d.active_members === 1), "the Assignments department picker knows the new department");
+check((await call("/org/tasks/assignees", adminToken)).body.some((u) => u.id === staffId && u.departments.some((d) => d.id === deptId)), "the Assignments officer list knows the new staff member and their department");
+const emptyDept = await call("/org/departments", ictoToken, "POST", { name: `Surveying ${tag}` });
+check(emptyDept.status === 201 && emptyDept.body.name === `SURVEYING ${tag}`.toUpperCase(), "a new department is stored in the house style (capitals)");
+check((await call("/org/tasks/departments", adminToken)).body.some((d) => d.id === emptyDept.body.id && d.active_members === 0), "an empty department is still offered in Assignments (as 'no staff yet')");
+const auto = await call("/org/users", ictoToken, "POST", { display_name: "Auto Dept", email: `auto.${tag}@test.mkuyu.local`, password: "TempPass#2026", role_ids: [roleId("Accountant")] });
+const autoDepts = (await query("SELECT d.name FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=$1", [auto.body.id])).rows.map((r) => r.name);
+check(auto.status === 201 && autoDepts.includes("FINANCE & ACCOUNTS"), `staff added without a department get their role's department (${autoDepts})`);
+check((await call(`/org/users/${staffId}/departments`, ictoToken, "PUT", { department_ids: [] })).status === 400, "a staff member cannot be left without a department");
+check((await call(`/org/departments/${deptId}`, ictoToken, "PUT", { active: false })).status === 409, "a department with active staff cannot be deactivated");
+check((await call(`/org/departments/${deptId}`, ictoToken, "DELETE")).status === 409, "a department with staff cannot be deleted");
+const csDept = (await call("/org/departments", adminToken)).body.find((d) => d.name === "CUSTOMER SERVICE");
+check((await call(`/org/departments/${csDept.id}`, adminToken, "PUT", { name: "HELP DESK" })).status === 409, "a core department cannot be renamed");
+check((await call(`/org/departments/${csDept.id}`, adminToken, "DELETE")).status === 409, "a core department cannot be deleted");
+check((await call(`/org/departments/${deptId}`, ictoToken, "PUT", { name: `Site Works ${tag}` })).status === 200 && (await deptRow())?.name === `SITE WORKS ${tag}`.toUpperCase(), "a department is renamed and its staff stay in it");
+check((await deptRow())?.active_members === 1, "(still one person in it after the rename)");
+const finance = (await call("/org/departments", adminToken)).body.find((d) => d.name === "FINANCE & ACCOUNTS");
+check((await call(`/org/users/${staffId}/departments`, ictoToken, "PUT", { department_ids: [finance.id] })).status === 200, "a staff member is moved to another department");
+check((await call("/org/tasks/assignees", adminToken)).body.find((u) => u.id === staffId)?.departments.every((d) => d.id === finance.id), "Assignments follows the move at once");
+check((await call(`/org/departments/${deptId}`, ictoToken, "PUT", { active: false })).status === 200, "the emptied department can now be deactivated");
+check(!(await call("/org/tasks/departments", adminToken)).body.some((d) => d.id === deptId), "an inactive department is no longer offered in Assignments");
+check((await call("/org/users", ictoToken, "POST", { display_name: "x", email: `inactive.${tag}@test.mkuyu.local`, password: "TempPass#2026", role_ids: [roleId("Accountant")], department_ids: [deptId] })).status === 400, "nobody can be added to an inactive department");
+check((await call(`/org/departments/${deptId}`, ictoToken, "PUT", { active: true })).status === 200, "a department is re-activated");
+check((await call(`/org/departments/${emptyDept.body.id}`, mdToken, "DELETE")).status === 403, "the MD cannot delete a department");
+check((await call(`/org/departments/${emptyDept.body.id}`, ictoToken, "DELETE")).status === 200 && !(await call("/org/departments", adminToken)).body.some((d) => d.id === emptyDept.body.id), "an unused empty department is deleted");
 
 for (const role of ["Managing Director", "System Administrator"]) {
   const refused = await call("/org/users", ictoToken, "POST", {

@@ -1358,7 +1358,7 @@ function taskDepartments(assignees) {
 }
 
 /** Officers follow the chosen department; nobody from another department is offered. */
-function wireTaskDepartment(assignees, lockTo = null) {
+function wireTaskDepartment(assignees, lockTo = null, departmentList = null) {
   const form = document.getElementById("task-form");
   const deptSelect = form?.querySelector('[data-role="task-department"]');
   const people = form?.querySelector('[name="assigned_to"]');
@@ -1371,7 +1371,7 @@ function wireTaskDepartment(assignees, lockTo = null) {
     if (members.length === 1) people.value = String(members[0].id);
   };
   if (lockTo) {
-    const match = taskDepartments(assignees).find((d) => d.name.toUpperCase() === lockTo.toUpperCase());
+    const match = (departmentList || taskDepartments(assignees)).find((d) => d.name.toUpperCase() === lockTo.toUpperCase());
     if (match) { deptSelect.value = String(match.id); deptSelect.disabled = true; }
   }
   deptSelect.addEventListener("change", fill);
@@ -1393,7 +1393,7 @@ async function openTaskModal(prefill = {}) {
   };
   // A hand-off lists only its department (a request goes to Customer Service).
   const assigneePath = prefill.department ? `/org/tasks/assignees?department=${encodeURIComponent(prefill.department)}` : "/org/tasks/assignees";
-  const [assignees, reviewers] = await Promise.all([loadList(assigneePath), loadList("/org/tasks/reviewers")]);
+  const [assignees, reviewers, departmentList] = await Promise.all([loadList(assigneePath), loadList("/org/tasks/reviewers"), loadList("/org/tasks/departments")]);
   if (assignees === null) {
     showToast("You are not allowed to assign work.");
     return;
@@ -1415,7 +1415,7 @@ async function openTaskModal(prefill = {}) {
     <form id="task-form" class="form-grid">
       <div class="field"><label for="task-title">Task title <span class="req">*</span></label><input id="task-title" name="title" required maxlength="160" placeholder="Prepare Monthly Sales Report"></div>
       <div class="field full"><label for="task-description">Description / instructions</label><textarea id="task-description" name="description" rows="3" placeholder="What exactly must be produced?"></textarea></div>
-      <div class="field"><label for="task-department">Department <span class="req">*</span></label><select id="task-department" data-role="task-department" required><option value="">Choose a department</option>${taskDepartments(assignees).map((d) => `<option value="${d.id}">${escapeHtml(titleCase(d.name))}</option>`).join("")}</select></div>
+      <div class="field"><label for="task-department">Department <span class="req">*</span></label><select id="task-department" data-role="task-department" required><option value="">Choose a department</option>${(departmentList || taskDepartments(assignees)).map((d) => `<option value="${d.id}">${escapeHtml(titleCase(d.name))}${d.active_members === 0 ? " (no staff yet)" : ""}</option>`).join("")}</select></div>
       <div class="field"><label for="task-assignee">Assign to <span class="req">*</span></label><select id="task-assignee" name="assigned_to" required><option value="">Select authorized staff</option>${people}</select></div>
       ${reviewerField}
       <div class="field"><label for="task-priority-input">Priority</label><select id="task-priority-input" name="priority">${priorities}</select></div>
@@ -1424,7 +1424,7 @@ async function openTaskModal(prefill = {}) {
       <div class="field"><label for="task-link-id">Linked record id</label><input id="task-link-id" name="linked_record_id" type="number" min="1" step="1" placeholder="e.g. 21"></div>
       <div class="form-actions full"><button type="button" class="btn" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="submit">Assign work</button></div>
     </form>`;
-  wireTaskDepartment(assignees, prefill.department || null);
+  wireTaskDepartment(assignees, prefill.department || null, departmentList);
   // Hand-offs (e.g. a website lead to Customer Service) arrive pre-filled.
   if (prefill.title || prefill.description) {
     const form = document.getElementById("task-form");
@@ -1887,7 +1887,7 @@ function renderOrganization() {
   // administrator account, their own account, or anyone ranked above them.
   const canManageAccount = (user) => isAdmin() || (user.role !== "admin" && user.id !== org.me?.user?.id
     && Math.max(0, ...(user.roles || []).map((role) => Number(role.rank || 0))) <= Number(org.me?.rank || 0));
-  const userRow = (user) => `<tr><td><strong>${escapeHtml(user.display_name)}</strong><div class="table-sub">${escapeHtml(user.email)}</div></td><td>${user.roles?.map((role) => badge(role.name)).join(" ") || "No role"}</td><td>${user.active ? badge("Active", "approved") : badge("Inactive", "archived")}</td><td><div class="row-actions">${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="reset-password" data-id="${user.id}" title="Set a new sign-in password without changing the account">Reset password</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="toggle-user" data-id="${user.id}" data-active="${user.active ? 0 : 1}">${user.active ? "Deactivate" : "Activate"}</button>` : ""}</div></td></tr>`;
+  const userRow = (user) => `<tr><td><strong>${escapeHtml(user.display_name)}</strong><div class="table-sub">${escapeHtml(user.email)}</div></td><td>${user.roles?.map((role) => badge(role.name)).join(" ") || "No role"}</td><td>${user.active ? badge("Active", "approved") : badge("Inactive", "archived")}</td><td><div class="row-actions">${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="reset-password" data-id="${user.id}" title="Set a new sign-in password without changing the account">Reset password</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="change-staff-department" data-id="${user.id}" title="Move this person to another department">Change department</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="toggle-user" data-id="${user.id}" data-active="${user.active ? 0 : 1}">${user.active ? "Deactivate" : "Activate"}</button>` : ""}</div></td></tr>`;
 
   const usersByDepartment = new Map(DEPARTMENT_ORDER.map((name) => [name, []]));
   const unassigned = [];
@@ -1903,11 +1903,16 @@ function renderOrganization() {
   const byRank = (a, b) => Math.max(...(a.roles || []).map((r) => Number(r.rank || 0)), 0) - Math.max(...(b.roles || []).map((r) => Number(r.rank || 0)), 0)
     || String(a.display_name).localeCompare(String(b.display_name));
 
-  const departmentGroups = DEPARTMENT_ORDER.filter((name) => usersByDepartment.get(name).length)
+  const activeDepartmentNames = new Set(org.departments.filter((d) => d.active !== false).map((d) => d.name));
+  const departmentGroups = DEPARTMENT_ORDER.filter((name) => usersByDepartment.get(name).length || activeDepartmentNames.has(name))
     .map((name) => {
       const members = usersByDepartment.get(name).slice().sort(byRank);
+      if (!members.length) return `<div class="dept-group" data-department="${escapeHtml(name)}">
+        <div class="dept-group-head"><span class="dept-group-name">${escapeHtml(DEPARTMENT_LABELS[name] || titleCase(name))}</span><span class="dept-group-count">No staff yet</span></div>
+        <p class="muted" style="margin:.4rem 0 0">Add a staff member above and choose this department.</p>
+      </div>`;
       return `<div class="dept-group" data-department="${escapeHtml(name)}">
-        <div class="dept-group-head"><span class="dept-group-name">${escapeHtml(DEPARTMENT_LABELS[name] || name)}</span><span class="dept-group-count">${members.length} ${members.length === 1 ? "person" : "people"}</span></div>
+        <div class="dept-group-head"><span class="dept-group-name">${escapeHtml(DEPARTMENT_LABELS[name] || titleCase(name))}</span><span class="dept-group-count">${members.length} ${members.length === 1 ? "person" : "people"}</span></div>
         <div class="table-wrap"><table><thead><tr><th>Name</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead><tbody>${members.map(userRow).join("")}</tbody></table></div>
       </div>`;
     }).join("");
@@ -1931,20 +1936,80 @@ function renderOrganization() {
   const RESERVED_KEYS = new Set(["manage_users", "manage_roles", "manage_permissions", "manage_settings", "view_audit", "approve_management", "approve_legal", "validate_finance"]);
   const roleOptions = org.roles.filter(editableRole).map((role) => `<option value="${role.id}" data-rank="${Number(role.rank || 0)}" data-permissions="${escapeHtml(JSON.stringify(role.permissions || []))}">${escapeHtml(role.name)} · rank ${Number(role.rank || 0)} · ${role.permission_count || 0} privileges</option>`).join("");
   const staffRoleOptions = org.roles.filter(assignable).map((role) => `<option value="${role.id}">${escapeHtml(role.name)} · rank ${Number(role.rank || 0)}</option>`).join("");
-  const departmentOptions = org.departments.map((department) => `<option value="${department.id}">${escapeHtml(department.name)}</option>`).join("");
+  const departmentOptions = org.departments.filter((department) => department.active !== false).map((department) => `<option value="${department.id}">${escapeHtml(titleCase(department.name))}</option>`).join("");
   const permissionOptions = org.permissions.filter((permission) => isAdmin() || !RESERVED_KEYS.has(permission.permission_key)).map((permission) => `<label class="check-field"><input type="checkbox" name="permissions" value="${escapeHtml(permission.permission_key)}">${escapeHtml(permission.permission_key)}</label>`).join("");
   return `<div class="section-grid org-grid">
     <section class="card glass org-intro"><div><div class="eyebrow">Workspace governance</div><h2>Organization control center</h2><p>Keep people, access, approvals, and operational activity aligned across MKUYU.</p></div><div class="org-intro-stats"><span><strong>${permissions.length}</strong> permissions</span><span><strong>${org.users.filter((user) => user.active).length}</strong> active staff</span><span><strong>${org.approvals.filter((item) => item.status === "pending").length}</strong> pending approvals</span></div></section>
     <section class="card glass"><div class="section-head"><div><h2 class="section-title">Management overview</h2><div class="section-note">Live organization records and financial position</div></div></div><div class="metric-grid"><div class="metric"><span>Projects</span><strong>${metrics.projects ?? 0}</strong></div><div class="metric"><span>Properties</span><strong>${metrics.properties ?? 0}</strong></div><div class="metric"><span>Available</span><strong>${metrics.available_properties ?? 0}</strong></div><div class="metric"><span>Clients</span><strong>${metrics.clients ?? 0}</strong></div><div class="metric"><span>Leads</span><strong>${metrics.leads ?? 0}</strong></div><div class="metric"><span>Contracts</span><strong>${metrics.contracts ?? 0}</strong></div><div class="metric"><span>Income</span><strong>${money(metrics.payments)}</strong></div><div class="metric"><span>Outstanding</span><strong>${money(metrics.outstanding)}</strong></div><div class="metric"><span>Overdue</span><strong>${money(metrics.overdue)}</strong></div></div></section>
-    <section class="card glass"><div class="section-head"><div><h2 class="section-title">Access map</h2><div class="section-note">${escapeHtml(org.me?.user?.display_name || "Workspace")} · ${permissions.length} permissions</div></div></div><div class="table-wrap"><table><thead><tr><th>Departments</th><th>Roles</th><th>Staff</th></tr></thead><tbody><tr><td>${org.departments.length}</td><td>${org.roles.length}</td><td>${org.users.length}</td></tr></tbody></table></div>${canManage ? `<div class="form-grid" style="margin-top:18px"><div class="field"><label for="org-department">New department</label><input id="org-department" data-org-field="department" placeholder="Department name"></div><button class="btn btn-primary" data-action="create-department">Add department</button><div class="field"><label for="org-role">New role</label><input id="org-role" data-org-field="role" placeholder="Role name"></div><div class="field"><label for="org-role-rank">Role rank</label><input id="org-role-rank" data-org-field="role-rank" type="number" min="0" max="100" value="20" placeholder="20"></div><div class="field"><label for="org-role-scope">Data scope</label><select id="org-role-scope" data-org-field="role-scope"><option value="own">Own records only</option><option value="department">Department records</option><option value="organization">Whole organization</option></select></div><button class="btn btn-primary" data-action="create-role">Add role</button><div class="field"><label for="org-role-select">Assign permissions to role</label><select id="org-role-select" data-org-field="role-id"><option value="">Select role</option>${roleOptions}</select></div><div class="field"><label for="org-role-rank-edit">Selected role rank</label><input id="org-role-rank-edit" data-org-field="role-rank-edit" type="number" min="0" max="100" value="0" placeholder="20"></div><div class="field"><label for="org-role-scope-edit">Selected role scope</label><select id="org-role-scope-edit" data-org-field="role-scope-edit"><option value="">Keep current</option><option value="own">Own records only</option><option value="department">Department records</option><option value="organization">Whole organization</option></select></div><div class="field full check-grid">${permissionOptions}</div><button class="btn btn-gold" data-action="save-role-permissions">Save role permissions</button><button class="btn btn-soft" data-action="save-role-rank">Save role rank</button></div>` : ""}</section>
+    <section class="card glass"><div class="section-head"><div><h2 class="section-title">Access map</h2><div class="section-note">${escapeHtml(org.me?.user?.display_name || "Workspace")} · ${permissions.length} permissions</div></div></div><div class="table-wrap"><table><thead><tr><th>Departments</th><th>Roles</th><th>Staff</th></tr></thead><tbody><tr><td>${org.departments.length}</td><td>${org.roles.length}</td><td>${org.users.length}</td></tr></tbody></table></div>${canManage ? `<div class="form-grid" style="margin-top:18px"><div class="field"><label for="org-role">New role</label><input id="org-role" data-org-field="role" placeholder="Role name"></div><div class="field"><label for="org-role-rank">Role rank</label><input id="org-role-rank" data-org-field="role-rank" type="number" min="0" max="100" value="20" placeholder="20"></div><div class="field"><label for="org-role-scope">Data scope</label><select id="org-role-scope" data-org-field="role-scope"><option value="own">Own records only</option><option value="department">Department records</option><option value="organization">Whole organization</option></select></div><button class="btn btn-primary" data-action="create-role">Add role</button><div class="field"><label for="org-role-select">Assign permissions to role</label><select id="org-role-select" data-org-field="role-id"><option value="">Select role</option>${roleOptions}</select></div><div class="field"><label for="org-role-rank-edit">Selected role rank</label><input id="org-role-rank-edit" data-org-field="role-rank-edit" type="number" min="0" max="100" value="0" placeholder="20"></div><div class="field"><label for="org-role-scope-edit">Selected role scope</label><select id="org-role-scope-edit" data-org-field="role-scope-edit"><option value="">Keep current</option><option value="own">Own records only</option><option value="department">Department records</option><option value="organization">Whole organization</option></select></div><div class="field full check-grid">${permissionOptions}</div><button class="btn btn-gold" data-action="save-role-permissions">Save role permissions</button><button class="btn btn-soft" data-action="save-role-rank">Save role rank</button></div>` : ""}</section>
+    ${canManage || permissions.includes("manage_users") ? renderDepartmentAdmin(org.departments, canManage) : ""}
     <section class="card glass"><div class="section-head"><div><h2 class="section-title">Lead intake</h2><div class="section-note">Sales and marketing queue</div></div></div><form id="lead-form" class="form-grid"><div class="field"><label for="lead-name">Name</label><input id="lead-name" name="name" required placeholder="Customer inquiry"></div><div class="field"><label for="lead-contact">Email</label><input id="lead-contact" name="email" type="email" placeholder="customer@example.com"></div><div class="field"><label for="lead-source">Source</label><input id="lead-source" name="source" placeholder="Public website"></div><button class="btn btn-primary" type="submit">Add lead</button></form><div class="table-wrap" style="margin-top:18px"><table><thead><tr><th>Lead</th><th>Status</th><th>Source</th><th>Next</th></tr></thead><tbody>${leadRows || `<tr><td colspan="4" class="empty">No leads yet</td></tr>`}</tbody></table></div></section>
     <section class="card glass"><div class="section-head"><div><h2 class="section-title">Follow-up desk</h2><div class="section-note">Sales, service, and collections activity</div></div></div><form id="follow-up-form" class="form-grid"><div class="field"><label for="follow-up-date">Due date</label><input id="follow-up-date" name="due_at" type="datetime-local" required></div><div class="field"><label for="follow-up-type">Type</label><select id="follow-up-type" name="follow_up_type"><option value="call">Call</option><option value="meeting">Meeting</option><option value="visit">Visit</option><option value="message">Message</option></select></div><div class="field"><label for="follow-up-notes">Notes</label><input id="follow-up-notes" name="notes" placeholder="Next action"></div><button class="btn btn-primary" type="submit">Schedule follow-up</button></form><div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Type</th><th>Due</th><th>Status</th><th>Outcome</th></tr></thead><tbody>${followUpRows || `<tr><td colspan="4" class="empty">No follow-ups yet</td></tr>`}</tbody></table></div></section>
-    ${permissions.includes("manage_users") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Staff access</h2><div class="section-note">Grouped by department · one role per person</div></div></div><form id="staff-form" class="form-grid"><div class="field"><label for="staff-name">Display name</label><input id="staff-name" name="display_name" required placeholder="Staff member"></div><div class="field"><label for="staff-email">Email</label><input id="staff-email" name="email" type="email" required placeholder="staff@company.com"></div><div class="field"><label for="staff-password">Temporary password</label><input id="staff-password" name="password" type="password" minlength="8" required placeholder="At least 8 characters"></div><div class="field"><label for="staff-role">Role and privilege rank</label><select id="staff-role" name="role_ids" required><option value="">Select role</option>${staffRoleOptions}</select></div><div class="field"><label for="staff-department">Department</label><select id="staff-department" name="department_ids"><option value="">No department</option>${departmentOptions}</select></div><button class="btn btn-primary" type="submit">Create staff</button></form><div style="margin-top:16px">${userRows || `<div class="card glass empty"><strong>No staff records</strong></div>`}</div></section>` : ""}
+    ${permissions.includes("manage_users") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Staff access</h2><div class="section-note">Grouped by department · one role per person</div></div></div><form id="staff-form" class="form-grid"><div class="field"><label for="staff-name">Display name</label><input id="staff-name" name="display_name" required placeholder="Staff member"></div><div class="field"><label for="staff-email">Email</label><input id="staff-email" name="email" type="email" required placeholder="staff@company.com"></div><div class="field"><label for="staff-password">Temporary password</label><input id="staff-password" name="password" type="password" minlength="8" required placeholder="At least 8 characters"></div><div class="field"><label for="staff-role">Role and privilege rank</label><select id="staff-role" name="role_ids" required><option value="">Select role</option>${staffRoleOptions}</select></div><div class="field"><label for="staff-department">Department</label><select id="staff-department" name="department_ids"><option value="">The role's own department</option>${departmentOptions}</select></div><button class="btn btn-primary" type="submit">Create staff</button></form><div style="margin-top:16px">${userRows || `<div class="card glass empty"><strong>No staff records</strong></div>`}</div></section>` : ""}
     ${permissions.includes("view_financial") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Collections pulse</h2><div class="section-note">Outstanding and due soon</div></div></div><div class="metric-grid"><div class="metric"><span>Outstanding</span><strong>${org.collections?.outstanding?.length || 0}</strong></div><div class="metric"><span>Overdue</span><strong>${org.collections?.overdue?.length || 0}</strong></div><div class="metric"><span>Due soon</span><strong>${org.collections?.due_soon?.length || 0}</strong></div><div class="metric"><span>Open follow-ups</span><strong>${org.collections?.follow_ups?.length || 0}</strong></div></div></section>` : ""}
     <section class="card glass"><div class="section-head"><div><h2 class="section-title">Activity</h2><div class="section-note">Recorded organization actions</div></div></div><div class="table-wrap"><table><thead><tr><th>User</th><th>Action</th><th>Module</th><th>When</th></tr></thead><tbody>${activityRows || `<tr><td colspan="4" class="empty">No activity recorded</td></tr>`}</tbody></table></div></section>
     ${permissions.includes("approve") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Approvals</h2><div class="section-note">Contracts, documents, and financial decisions</div></div></div><div class="table-wrap"><table><thead><tr><th>Module</th><th>Record</th><th>Status</th><th>Decision</th><th>Action</th></tr></thead><tbody>${approvalRows || `<tr><td colspan="5" class="empty">No approval requests</td></tr>`}</tbody></table></div></section>` : ""}
     ${isAdmin() ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Record allocation</h2><div class="section-note">Move records out of the office-wide pool into an owner and department</div></div><button class="btn btn-soft btn-small" data-action="reload-allocation">Refresh</button></div>${renderAllocation(state.allocationEntity || "client")}</section>` : ""}
   </div>`;
+}
+
+/**
+ * Departments register: every department with its active staff count.
+ * Core departments (named in the role design) can't be renamed, deactivated or
+ * deleted; others can be renamed, deactivated once empty, and deleted only
+ * while unused. The server enforces the same rules.
+ */
+function renderDepartmentAdmin(departments, canManage) {
+  const rows = (departments || []).slice().sort((a, b) => (b.active !== false) - (a.active !== false) || String(a.name).localeCompare(String(b.name))).map((d) => {
+    const members = Number(d.active_members || 0);
+    const actions = !canManage || d.core ? (d.core ? `<span class="muted cell-plain">Core department</span>` : "") : [
+      `<button class="btn btn-soft btn-small" data-action="rename-department" data-id="${d.id}">Rename</button>`,
+      d.active === false
+        ? `<button class="btn btn-soft btn-small" data-action="toggle-department" data-id="${d.id}" data-active="1">Activate</button>`
+        : `<button class="btn btn-soft btn-small" data-action="toggle-department" data-id="${d.id}" data-active="0"${members ? ` disabled title="Move its staff to another department first"` : ""}>Deactivate</button>`,
+      Number(d.all_members || 0) ? "" : `<button class="btn btn-danger btn-small" data-action="delete-department" data-id="${d.id}">Delete</button>`,
+    ].join("");
+    return `<tr><td><strong>${escapeHtml(titleCase(d.name))}</strong>${d.core ? `<div class="table-sub">Core</div>` : ""}</td><td>${members} ${members === 1 ? "person" : "people"}</td><td>${d.active === false ? badge("Inactive", "archived") : badge("Active", "approved")}</td><td><div class="row-actions">${actions}</div></td></tr>`;
+  }).join("");
+  return `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Departments</h2><div class="section-note">${(departments || []).filter((d) => d.active !== false).length} active · every staff member belongs to one</div></div></div>
+    ${canManage ? `<div class="form-grid"><div class="field"><label for="dept-new-name">New department</label><input id="dept-new-name" data-org-field="department" maxlength="80" placeholder="e.g. Property Management"></div><button class="btn btn-primary" data-action="create-department">Create department</button></div>` : ""}
+    <div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>Department</th><th>Staff</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows || `<tr><td colspan="4" class="empty">No departments yet</td></tr>`}</tbody></table></div></section>`;
+}
+
+/** Small modal with one form; `onSubmit` receives the form data. */
+function openSmallForm(heading, note, fieldsHtml, submitLabel, onSubmit) {
+  modal.dataset.type = "small-form";
+  modal.innerHTML = `<div class="modal-head"><div><h2>${escapeHtml(heading)}</h2><p>${escapeHtml(note)}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
+    <form id="small-form" class="form-grid">${fieldsHtml}<div class="form-actions full"><button type="button" class="btn" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="submit">${escapeHtml(submitLabel)}</button></div></form>`;
+  state.smallFormSubmit = onSubmit;
+  modalBackdrop.hidden = false;
+}
+
+function openStaffDepartment(userId) {
+  const user = (state.organization.users || []).find((row) => String(row.id) === String(userId));
+  if (!user) return;
+  const current = new Set((user.departments || []).map((d) => Number(d.id)));
+  const options = (state.organization.departments || []).filter((d) => d.active !== false)
+    .map((d) => `<option value="${d.id}"${current.has(Number(d.id)) ? " selected" : ""}>${escapeHtml(titleCase(d.name))}</option>`).join("");
+  openSmallForm(`Department for ${user.display_name}`, "They will appear under this department everywhere: staff lists, assignments and hand-offs.",
+    `<div class="field full"><label for="staff-dept-select">Department <span class="req">*</span></label><select id="staff-dept-select" name="department_id" required>${options}</select></div>`,
+    "Save department",
+    async (data) => {
+      await api(`/org/users/${user.id}/departments`, { method: "PUT", body: JSON.stringify({ department_ids: [Number(data.department_id)] }) });
+      return "Department updated.";
+    });
+}
+
+function openRenameDepartment(deptId) {
+  const dept = (state.organization.departments || []).find((d) => String(d.id) === String(deptId));
+  if (!dept) return;
+  openSmallForm("Rename department", "The staff in it stay where they are.",
+    `<div class="field full"><label for="dept-rename">Name <span class="req">*</span></label><input id="dept-rename" name="name" required maxlength="80" value="${escapeHtml(titleCase(dept.name))}"></div>`,
+    "Save name",
+    async (data) => {
+      await api(`/org/departments/${dept.id}`, { method: "PUT", body: JSON.stringify({ name: data.name }) });
+      return "Department renamed.";
+    });
 }
 
 /** One card per department: its roles, and every duty declared against each. */
@@ -3816,6 +3881,16 @@ async function handleFormSubmit(event) {
   const data = Object.fromEntries(new FormData(form));
   const type = modal.dataset.type;
   const id = form.dataset.id;
+  if (type === "small-form" && form.id === "small-form" && state.smallFormSubmit) {
+    try {
+      const message = await state.smallFormSubmit(data);
+      modalBackdrop.hidden = true;
+      state.smallFormSubmit = null;
+      await refresh();
+      showToast(message || "Saved.");
+    } catch (error) { showToast(error.message || "Unable to save."); }
+    return;
+  }
   if (type === "task" && form.id === "task-form") {
     // The server decides who may be assigned, who may review, and it stamps
     // assigned_by, priority, due date and the initial status itself. Only the
@@ -4568,8 +4643,22 @@ document.addEventListener("click", async (event) => {
   if (action === "reexport-report") openModal("report-generate", state.reportHistory.find((item) => String(item.id) === id));
   if (action === "delete-report") deleteRecord("report", id);
   if (action === "create-department") {
-    const name = document.querySelector('[data-org-field="department"]')?.value;
-    if (name) { try { await api("/org/departments", { method: "POST", body: JSON.stringify({ name }) }); await refresh(); } catch (error) { showToast(error.message); } }
+    const name = document.querySelector('[data-org-field="department"]')?.value?.trim();
+    if (!name) { showToast("Type the new department's name first."); return; }
+    try { await api("/org/departments", { method: "POST", body: JSON.stringify({ name }) }); await refresh(); showToast("Department created. Add staff to it below."); }
+    catch (error) { showToast(error.message); }
+  }
+  if (action === "rename-department") openRenameDepartment(id);
+  if (action === "change-staff-department") openStaffDepartment(id);
+  if (action === "toggle-department") {
+    try { await api(`/org/departments/${id}`, { method: "PUT", body: JSON.stringify({ active: target.dataset.active === "1" }) }); await refresh(); showToast(target.dataset.active === "1" ? "Department activated." : "Department deactivated."); }
+    catch (error) { showToast(error.message || "Unable to update the department."); }
+  }
+  if (action === "delete-department") {
+    const dept = (state.organization.departments || []).find((d) => String(d.id) === String(id));
+    if (!window.confirm(`Delete the department "${titleCase(dept?.name || "")}"? This cannot be undone.`)) return;
+    try { await api(`/org/departments/${id}`, { method: "DELETE" }); await refresh(); showToast("Department deleted."); }
+    catch (error) { showToast(error.message || "Unable to delete the department."); }
   }
   if (action === "create-role") {
     const name = document.querySelector('[data-org-field="role"]')?.value;
