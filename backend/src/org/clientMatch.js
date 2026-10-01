@@ -3,6 +3,7 @@
 // and "0712000111" match). Used so a repeat website request is shown as an
 // existing client and never creates a second client record.
 import { queryOne } from "../db.js";
+import { currentAccess, scopeCondition } from "./access.js";
 
 const digits = (value) => String(value || "").replace(/\D/g, "");
 
@@ -18,11 +19,15 @@ export async function findExistingClient(organizationId, { email, phone } = {}) 
   const mail = String(email || "").trim().toLowerCase();
   const tail = digits(phone).slice(-9);
   if (!mail && tail.length < 9) return null;
+  const values = [organizationId];
+  const visible = scopeCondition("c", "client", currentAccess(), values);
+  const emailParam = values.length + 1;
+  const phoneParam = values.length + 2;
   return queryOne(
-    `SELECT id, name FROM clients WHERE organization_id = $1 AND (
-       ($2 <> '' AND LOWER(email) = $2)
-       OR ($3 <> '' AND right(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 9) = $3)
-     ) ORDER BY id LIMIT 1`,
-    [organizationId, mail, tail.length >= 9 ? tail : ""],
+    `SELECT c.id, c.name FROM clients c WHERE c.organization_id = $1 AND ${visible} AND (
+       ($${emailParam} <> '' AND LOWER(c.email) = $${emailParam})
+       OR ($${phoneParam} <> '' AND right(regexp_replace(COALESCE(c.phone, ''), '\\D', '', 'g'), 9) = $${phoneParam})
+     ) ORDER BY c.id LIMIT 1`,
+    [...values, mail, tail.length >= 9 ? tail : ""],
   );
 }

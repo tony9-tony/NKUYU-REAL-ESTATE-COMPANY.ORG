@@ -14,6 +14,12 @@ The application runs at `http://localhost:3003`.
 
 The first account is created from the private setup screen and receives the initial System Administrator role. There is no public signup after the workspace is configured.
 
+## Production deployment security
+
+Before exposing a production instance, set `NODE_ENV=production` and configure a unique `SETUP_TOKEN`; first-account setup is denied in production unless that token is supplied. Use HTTPS at the edge. If a reverse proxy sits in front of Node, set `TRUST_PROXY` to only the proxy IPs/CIDRs that connect directly to this server. Leave it unset when users can reach Node directly. Never use `*` or a public client subnet as the trusted proxy list.
+
+`npm run seed` is for development only and refuses to run with `NODE_ENV=production`. Normal startup runs schema migrations but does not create or reset demo accounts. For local proxy testing, configure `TRUST_PROXY` explicitly rather than relying on forwarded headers from arbitrary clients.
+
 ## Organization API
 
 Authenticated organization endpoints are under `/api/v1/org`:

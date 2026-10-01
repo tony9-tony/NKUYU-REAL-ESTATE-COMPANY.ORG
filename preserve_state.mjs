@@ -32,13 +32,15 @@ const TABLES = [
   "user_roles", "user_departments", "duties", "duty_permissions",
   "projects", "clients", "properties", "property_images", "contracts", "contract_revisions",
   "debts", "payments", "reminders", "documents", "appointments", "leads", "follow_ups",
-  "approvals", "audit_logs", "record_shares", "settings", "sessions",
+  "approvals", "audit_logs", "record_shares", "settings",
 ];
 const current = {};
 const counts = {};
 for (const table of TABLES) {
   try {
-    const rows = (await query(`SELECT * FROM ${table}`)).rows;
+    const rows = (await query(table === "users"
+      ? "SELECT id,organization_id,email,display_name,role,active,created_at FROM users"
+      : `SELECT * FROM ${table}`)).rows;
     current[table] = rows;
     counts[table] = rows.length;
   } catch (error) {
@@ -58,13 +60,13 @@ fs.writeFileSync(copyPath, JSON.stringify({
   source_database: conn.db,
   table_counts: counts,
   data: current,
-}));
+}), { mode: 0o600 });
 console.log(`\n=== 2. safety copy of the CURRENT state ===`);
 console.log(`  written : ${path.basename(copyPath)}`);
 console.log(`  size    : ${(fs.statSync(copyPath).size / 1024).toFixed(1)} KB`);
 console.log(`  contents: ${TABLES.length} tables, ${Object.values(counts).reduce((a, b) => a + (b || 0), 0)} rows`);
 console.log("\n  current row counts:");
-for (const table of ["users", "projects", "clients", "properties", "property_images", "contracts", "debts", "payments", "documents", "audit_logs", "sessions"]) {
+for (const table of ["users", "projects", "clients", "properties", "property_images", "contracts", "debts", "payments", "documents", "audit_logs"]) {
   console.log(`    ${table.padEnd(20)} ${counts[table]}`);
 }
 

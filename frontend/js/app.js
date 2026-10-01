@@ -250,8 +250,10 @@ const viewMeta = {
   "admin-dashboard": ["Admin overview", "Staff access, privileges and organization health"],
   duties: ["Duties & approvals", "The approval path, and every duty on every department"],
   assignments: ["Assignments", "Work assigned to you, and the decisions waiting on you"],
-  organization: ["Staff", "Staff accounts A to Z, roles and access, approvals and activity"],
+  organization: ["Staff", "Staff accounts A to Z: add, reset passwords, move, change roles, deactivate"],
   departments: ["Departments", "Every department A to Z, with its staff"],
+  roles: ["Roles & permissions", "Every role, its rank, its data scope and what it may do"],
+  system: ["System & backups", "Activity log, record ownership and workspace backups"],
 };
 
 // Contract lifecycle labels. The status vocabulary is defined server-side in
@@ -1038,6 +1040,10 @@ const NAV_ITEMS = [
   // refuses anything above their own rank.
   { view: "organization", label: "Staff", icon: "users", anyOf: ["manage_users", "manage_roles"], group: "Organization" },
   { view: "departments", label: "Departments", icon: "building", anyOf: ["manage_users", "manage_roles"], group: "Organization" },
+  // Roles and what each may do: its own page, apart from the staff list.
+  { view: "roles", label: "Roles & permissions", icon: "shield", anyOf: ["manage_roles", "manage_permissions"], group: "Organization" },
+  // Activity log, record allocation and backups: the administrator account only.
+  { view: "system", label: "System & backups", icon: "settings", adminOnly: true, group: "Organization" },
 ];
 
 /** Whether the caller is entitled to a navigation entry at all. */
@@ -1131,8 +1137,10 @@ function upcomingAppointments() {
   return (state.appointments || []).filter((apt) => apt.status === "scheduled" && new Date(String(apt.starts_at).replace(" ", "T")) >= start);
 }
 
-// The administrator's menu, in this order, under one heading.
-const ADMIN_NAV_ORDER = ["organization", "departments", "assignments", "templates", "duties"];
+// The administrator's menu, in this order, under one heading: the five agreed
+// pages first, then the two pages that hold the rest of the administrator's
+// job (roles, and the system itself).
+const ADMIN_NAV_ORDER = ["organization", "departments", "assignments", "templates", "duties", "roles", "system"];
 
 function updateNavigation() {
   const nav = document.getElementById("primary-nav");
@@ -1244,17 +1252,12 @@ function renderAllocation(entityKey = "client") {
         ${["own", "department", "organization"].map((value) => `<option value="${value}" ${record.visibility === value ? "selected" : ""}>${value}</option>`).join("")}
       </select>
       <button class="btn btn-small" data-action="save-allocation" data-entity="${active.entity}" data-id="${record.id}">Save</button>
-      <button class="btn btn-soft btn-small" data-action="open-shares" data-entity="${active.entity}" data-id="${record.id}">Shares</button>
     </div></td>
   </tr>`).join("");
   const tabs = entities.filter((entry) => entry.unassigned > 0 || entry.total > 0).map((entry) => `<button class="btn btn-small ${entry.entity === active.entity ? "btn-primary" : "btn-soft"}" data-action="select-allocation" data-entity="${entry.entity}">${escapeHtml(entry.entity)} (${entry.unassigned})</button>`).join(" ");
-  return `<section class="card glass">
-      <button class="btn btn-soft btn-small" data-action="reload-allocation">${state.allocationUnassigned === false ? "Show all" : "Unassigned only"}</button>
-    </div>
-    <div class="row-actions" style="margin-bottom:12px">${tabs}</div>
+  return `<div class="row-actions" style="margin-bottom:12px">${tabs}</div>
     ${rows ? `<div class="table-wrap"><table><thead><tr><th>Record</th><th>Owner</th><th>Department</th><th>Shares</th><th class="align-right">Assign</th></tr></thead><tbody>${rows}</tbody></table></div>`
-      : `<div class="empty"><strong>Nothing to allocate</strong>Every ${escapeHtml(active.entity)} record already has an owner.</div>`}
-  </section>`;
+      : `<div class="empty"><strong>Nothing to allocate</strong>Every ${escapeHtml(active.entity)} record already has an owner.</div>`}`;
 }
 
 async function loadAllocation() {
@@ -2233,7 +2236,8 @@ function renderOrganization(section = "staff") {
 
   // Mirrors the server's account guard: a staff administrator never manages the
   // administrator account, their own account, or anyone ranked above them.
-  const canManageAccount = (user) => isAdmin() || (user.role !== "admin" && user.id !== org.me?.user?.id
+  // Nobody resets or deactivates their own account from here (the server refuses it).
+  const canManageAccount = (user) => (isAdmin() && user.id !== org.me?.user?.id) || (user.role !== "admin" && user.id !== org.me?.user?.id
     && Math.max(0, ...(user.roles || []).map((role) => Number(role.rank || 0))) <= Number(org.me?.rank || 0));
   const meId = org.me?.user?.id;
   const userRow = (user) => `<tr><td><strong>${escapeHtml(user.display_name)}</strong>${user.id === meId ? ` ${badge("You", "open")}` : ""}<div class="table-sub">${escapeHtml(user.email)}${(user.departments || []).length ? ` · ${escapeHtml((user.departments || []).map((d) => titleCase(d.name)).join(", "))}` : ""}</div></td><td>${user.roles?.map((role) => badge(role.name)).join(" ") || "No role"}</td><td>${user.active ? badge("Active", "approved") : badge("Inactive", "archived")}</td><td><div class="row-actions">${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="reset-password" data-id="${user.id}" title="Set a new sign-in password without changing the account">Reset password</button>` : ""}${canManageAccount(user) || user.id === meId ? `<button class="btn btn-soft btn-small" data-action="change-staff-department" data-id="${user.id}" title="Move to another department">Move department</button><button class="btn btn-soft btn-small" data-action="change-staff-role" data-id="${user.id}" title="Give a different role">Change role</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="toggle-user" data-id="${user.id}" data-active="${user.active ? 0 : 1}">${user.active ? "Deactivate" : "Activate"}</button>` : ""}</div></td></tr>`;
@@ -2275,7 +2279,7 @@ function renderOrganization(section = "staff") {
   const activityRows = (metrics.activity || org.audit).slice(0, 8).map((entry) => `<tr><td>${escapeHtml(entry.user_name || "System")}</td><td>${escapeHtml(entry.action)}</td><td>${escapeHtml(entry.module)}</td><td>${formatDate(entry.created_at, true)}</td></tr>`).join("");
   const followUpRows = org.followUps.slice(0, 6).map((item) => `<tr><td>${escapeHtml(item.follow_up_type || "Follow-up")}</td><td>${formatDate(item.due_at)}</td><td>${badge(item.status)}</td><td>${escapeHtml(item.outcome || "Pending")}</td></tr>`).join("");
   const approvalRows = org.approvals.slice(0, 8).map((item) => `<tr><td><strong>${escapeHtml(item.module)}</strong><div class="table-sub">Requested by ${escapeHtml(item.requested_by_name || "System")}</div></td><td>#${item.record_id}</td><td>${badge(item.status)}</td><td>${item.decided_at ? `${escapeHtml(item.decided_by_name || "Reviewer")} · ${formatDate(item.decided_at, true)}` : "Awaiting decision"}</td><td>${item.status === "pending" && permissions.includes("approve") ? `<div class="row-actions"><button class="btn btn-soft btn-small" data-action="decide-approval" data-id="${item.id}" data-status="approved">Approve</button><button class="btn btn-danger btn-small" data-action="decide-approval" data-id="${item.id}" data-status="rejected">Reject</button></div>` : ""}</td></tr>`).join("");
-  const roleRows = org.roles.map((role) => `<tr><td><strong>${escapeHtml(role.name)}</strong>${role.system_role ? `<div class="table-sub">System role</div>` : ""}</td><td>${badge(`Rank ${Number(role.rank || 0)}`, "neutral")}</td><td>${role.permission_count || 0} privileges</td><td>${(role.permissions || []).map((permission) => badge(permission, "approved")).join(" ")}</td></tr>`).join("");
+  const SCOPE_LABELS = { own: "Own records", department: "Department", organization: "Whole organization" };
   // Offer only what the server would accept from this caller. The administrator
   // account may do anything; a staff administrator (ICT) works at or below their
   // own rank, on custom roles only, and never hands out the reserved keys.
@@ -2292,7 +2296,7 @@ function renderOrganization(section = "staff") {
 
   // Departments page: every department (A-Z) with its staff behind "Show staff".
   if (section === "departments") {
-    return `<div class="section-grid org-grid">
+    return `<div class="section-grid org-grid admin-pages">
       ${mayAdminister ? renderAdminConsole(org, { canManage, canAddStaff: false, userRow }) : `<section class="card glass">${emptyState("No access", "Departments are managed by the administrator.", { iconName: "settings", compact: true })}</section>`}
     </div>`;
   }
@@ -2303,17 +2307,53 @@ function renderOrganization(section = "staff") {
       ${permissions.includes("manage_users") ? `<details class="panel add-panel"><summary>${icon("plus")}Add a staff member</summary>${staffForm}</details>` : ""}
       <div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>Name · department</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead><tbody>${staffAlphabetical.map(userRow).join("")}</tbody></table></div>
     </section>` : "";
-  return `<div class="section-grid org-grid">
-    <section class="card glass org-intro"><div><div class="eyebrow">System administration</div><h2>Staff</h2><p>Staff accounts, roles and access. Departments have their own page. Business work stays with the departments.</p></div><div class="org-intro-stats"><span><strong>${permissions.length}</strong> permissions</span><span><strong>${org.users.filter((user) => user.active).length}</strong> active staff</span><span><strong>${org.approvals.filter((item) => item.status === "pending").length}</strong> pending approvals</span></div></section>
+  const accessMapSection = `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Roles</h2><div class="section-note">${org.roles.length} roles · highest rank first · a person's access is the sum of their role's permissions, limited to its data scope</div></div></div>
+      <div class="table-wrap"><table><thead><tr><th>Role</th><th>Rank</th><th>Scope</th><th>Permissions</th></tr></thead><tbody>${org.roles.map((role) => `<tr><td><strong>${escapeHtml(role.name)}</strong>${role.system_role ? `<div class="table-sub">System role</div>` : ""}</td><td>${badge(`Rank ${Number(role.rank || 0)}`, "neutral")}</td><td>${escapeHtml(SCOPE_LABELS[role.scope] || role.scope || "—")}</td><td>${(role.permissions || []).length} · <span class="table-sub">${escapeHtml((role.permissions || []).join(", "))}</span></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No roles</td></tr>`}</tbody></table></div>
+      ${canManage ? `<details class="panel add-panel" style="margin-top:14px"><summary>${icon("plus")}Add a role</summary><div class="form-grid"><div class="field"><label for="org-role">New role</label><input id="org-role" data-org-field="role" placeholder="Role name"></div><div class="field"><label for="org-role-rank">Role rank</label><input id="org-role-rank" data-org-field="role-rank" type="number" min="0" max="100" value="20" placeholder="20"></div><div class="field"><label for="org-role-scope">Data scope</label><select id="org-role-scope" data-org-field="role-scope"><option value="own">Own records only</option><option value="department">Department records</option><option value="organization">Whole organization</option></select></div><button class="btn btn-primary" data-action="create-role">Add role</button></div></details>
+      <details class="panel add-panel" style="margin-top:10px"><summary>${icon("settings")}Change a role's permissions, rank or scope</summary><div class="form-grid"><div class="field"><label for="org-role-select">Role</label><select id="org-role-select" data-org-field="role-id"><option value="">Select role</option>${roleOptions}</select></div><div class="field"><label for="org-role-rank-edit">Rank</label><input id="org-role-rank-edit" data-org-field="role-rank-edit" type="number" min="0" max="100" value="0" placeholder="20"></div><div class="field"><label for="org-role-scope-edit">Data scope</label><select id="org-role-scope-edit" data-org-field="role-scope-edit"><option value="">Keep current</option><option value="own">Own records only</option><option value="department">Department records</option><option value="organization">Whole organization</option></select></div><div class="field full check-grid">${permissionOptions}</div><button class="btn btn-gold" data-action="save-role-permissions">Save role permissions</button><button class="btn btn-soft" data-action="save-role-rank">Save role rank</button></div></details>` : ""}
+    </section>`;
+
+  // Roles & permissions page.
+  if (section === "roles") {
+    return `<div class="section-grid org-grid admin-pages">${accessMapSection}</div>`;
+  }
+
+  // System & backups page (administrator account only): who did what, who owns
+  // which record, and copies of the whole workspace.
+  if (section === "system") {
+    const backups = state.backups;
+    const backupRows = (backups?.list || []).slice(0, 10).map((entry) => `<tr><td><strong>${escapeHtml(entry.name)}</strong></td><td>${escapeHtml(entry.format === "json" ? "JSON snapshot" : "PostgreSQL dump")}</td><td>${(Number(entry.size || 0) / 1048576).toFixed(1)} MB</td><td>${formatDateTime(entry.created_at, true)}</td><td class="align-right"><div class="row-actions"><button class="btn btn-soft btn-small" data-action="download-backup" data-name="${escapeHtml(entry.name)}">Download</button><button class="btn btn-danger btn-small" data-action="delete-backup" data-name="${escapeHtml(entry.name)}">Delete</button></div></td></tr>`).join("");
+    const fullActivity = (org.audit || []).slice(0, 50).map((entry) => `<tr><td>${escapeHtml(entry.user_name || "System")}</td><td>${escapeHtml(entry.action)}</td><td>${escapeHtml(entry.module)}${entry.record_id ? ` #${escapeHtml(String(entry.record_id))}` : ""}</td><td>${formatDate(entry.created_at, true)}</td></tr>`).join("");
+    return `<div class="section-grid org-grid admin-pages">
+      <section class="card glass"><div class="section-head"><div><h2 class="section-title">Backups</h2><div class="section-note">${backups?.error ? escapeHtml(backups.error) : `${(backups?.list || []).length} backup${(backups?.list || []).length === 1 ? "" : "s"} kept on the server${(backups?.list || []).length > 10 ? " · the 10 newest are listed" : ""} · make one before any big change`}</div></div><button class="btn btn-primary btn-small" data-action="backup-now">Create backup</button></div>
+        ${backupRows ? `<div class="table-wrap"><table><thead><tr><th>File</th><th>Type</th><th>Size</th><th>Made</th><th class="align-right">Actions</th></tr></thead><tbody>${backupRows}</tbody></table></div>` : `<div class="empty">${backups ? "No backup yet." : "Loading…"}</div>`}
+      </section>
+      <section class="card glass"><div class="section-head"><div><h2 class="section-title">Activity log</h2><div class="section-note">The latest 50 recorded actions, newest first · read-only</div></div></div><div class="table-wrap"><table><thead><tr><th>User</th><th>Action</th><th>Module</th><th>When</th></tr></thead><tbody>${fullActivity || `<tr><td colspan="4" class="empty">No activity recorded</td></tr>`}</tbody></table></div></section>
+      <section class="card glass"><div class="section-head"><div><h2 class="section-title">Record ownership</h2><div class="section-note">Records from before ownership existed: give each an owner and a department so the right people see it</div></div><button class="btn btn-soft btn-small" data-action="reload-allocation">${state.allocationUnassigned === false ? "Unassigned only" : "Show all"}</button></div>${renderAllocation(state.allocationEntity || "client")}</section>
+    </div>`;
+  }
+
+  // What the administrator should look at first: people who cannot work yet.
+  const noDepartment = org.users.filter((u) => u.active && !(u.departments || []).length);
+  const noRole = org.users.filter((u) => u.active && u.role !== "admin" && !(u.roles || []).length);
+  const todo = [
+    noDepartment.length ? `<li><strong>${noDepartment.length}</strong> active ${noDepartment.length === 1 ? "person has" : "people have"} no department: ${escapeHtml(noDepartment.map((u) => u.display_name).slice(0, 4).join(", "))}${noDepartment.length > 4 ? "…" : ""} <button class="btn btn-soft btn-small" data-action="open-alert-view" data-view="departments">Place them</button></li>` : "",
+    noRole.length ? `<li><strong>${noRole.length}</strong> active ${noRole.length === 1 ? "person has" : "people have"} no role, so they can open nothing: ${escapeHtml(noRole.map((u) => u.display_name).slice(0, 4).join(", "))}${noRole.length > 4 ? "…" : ""}. Use Change role below.</li>` : "",
+  ].filter(Boolean);
+  const intro = `<section class="card glass org-intro"><div><div class="eyebrow">${isSystemAdminOnly() ? "System administration" : "Staff administration"}</div><h2>Staff</h2><p>${isSystemAdminOnly()
+    ? "Your job: staff accounts (this page), departments, roles & permissions, contract templates, and the system itself (backups, activity, record ownership). Business work - contracts, clients, money - stays with the departments."
+    : "Staff accounts, roles and access. Departments have their own page."}</p>
+    ${todo.length ? `<ul class="admin-todo">${todo.join("")}</ul>` : `<p class="muted" style="margin:.4rem 0 0">Everyone active has a role and a department.</p>`}</div>
+    <div class="org-intro-stats"><span><strong>${org.users.filter((user) => user.active).length}</strong> active staff</span><span><strong>${(org.departments || []).filter((d) => d.active !== false).length}</strong> departments</span><span><strong>${org.roles.length}</strong> roles</span></div></section>`;
+  return `<div class="section-grid org-grid admin-pages">
+    ${intro}
     ${staffRegister}
     ${canSeeFinancial() && canModule("reports") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Management overview</h2><div class="section-note">Live organization records and financial position</div></div></div><div class="metric-grid"><div class="metric"><span>Projects</span><strong>${metrics.projects ?? 0}</strong></div><div class="metric"><span>Properties</span><strong>${metrics.properties ?? 0}</strong></div><div class="metric"><span>Available</span><strong>${metrics.available_properties ?? 0}</strong></div><div class="metric"><span>Clients</span><strong>${metrics.clients ?? 0}</strong></div><div class="metric"><span>Leads</span><strong>${metrics.leads ?? 0}</strong></div><div class="metric"><span>Contracts</span><strong>${metrics.contracts ?? 0}</strong></div><div class="metric"><span>Income</span><strong>${money(metrics.payments)}</strong></div><div class="metric"><span>Outstanding</span><strong>${money(metrics.outstanding)}</strong></div><div class="metric"><span>Overdue</span><strong>${money(metrics.overdue)}</strong></div></div></section>` : ""}
-    <section class="card glass"><div class="section-head"><div><h2 class="section-title">Access map</h2><div class="section-note">${escapeHtml(org.me?.user?.display_name || "Workspace")} · ${permissions.length} permissions</div></div></div><div class="table-wrap"><table><thead><tr><th>Departments</th><th>Roles</th><th>Staff</th></tr></thead><tbody><tr><td>${org.departments.length}</td><td>${org.roles.length}</td><td>${org.users.length}</td></tr></tbody></table></div>${canManage ? `<div class="form-grid" style="margin-top:18px"><div class="field"><label for="org-role">New role</label><input id="org-role" data-org-field="role" placeholder="Role name"></div><div class="field"><label for="org-role-rank">Role rank</label><input id="org-role-rank" data-org-field="role-rank" type="number" min="0" max="100" value="20" placeholder="20"></div><div class="field"><label for="org-role-scope">Data scope</label><select id="org-role-scope" data-org-field="role-scope"><option value="own">Own records only</option><option value="department">Department records</option><option value="organization">Whole organization</option></select></div><button class="btn btn-primary" data-action="create-role">Add role</button><div class="field"><label for="org-role-select">Assign permissions to role</label><select id="org-role-select" data-org-field="role-id"><option value="">Select role</option>${roleOptions}</select></div><div class="field"><label for="org-role-rank-edit">Selected role rank</label><input id="org-role-rank-edit" data-org-field="role-rank-edit" type="number" min="0" max="100" value="0" placeholder="20"></div><div class="field"><label for="org-role-scope-edit">Selected role scope</label><select id="org-role-scope-edit" data-org-field="role-scope-edit"><option value="">Keep current</option><option value="own">Own records only</option><option value="department">Department records</option><option value="organization">Whole organization</option></select></div><div class="field full check-grid">${permissionOptions}</div><button class="btn btn-gold" data-action="save-role-permissions">Save role permissions</button><button class="btn btn-soft" data-action="save-role-rank">Save role rank</button></div>` : ""}</section>
     ${canModule("leads") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Lead intake</h2><div class="section-note">Sales and marketing queue</div></div></div><form id="lead-form" class="form-grid"><div class="field"><label for="lead-name">Name</label><input id="lead-name" name="name" required placeholder="Customer inquiry"></div><div class="field"><label for="lead-contact">Email</label><input id="lead-contact" name="email" type="email" placeholder="customer@example.com"></div><div class="field"><label for="lead-source">Source</label><input id="lead-source" name="source" placeholder="Public website"></div><button class="btn btn-primary" type="submit">Add lead</button></form><div class="table-wrap" style="margin-top:18px"><table><thead><tr><th>Lead</th><th>Status</th><th>Source</th><th>Next</th></tr></thead><tbody>${leadRows || `<tr><td colspan="4" class="empty">No leads yet</td></tr>`}</tbody></table></div></section>` : ""}
     ${canModule("follow_ups") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Follow-up desk</h2><div class="section-note">Sales, service, and collections activity</div></div></div><form id="follow-up-form" class="form-grid"><div class="field"><label for="follow-up-date">Due date</label><input id="follow-up-date" name="due_at" type="datetime-local" required></div><div class="field"><label for="follow-up-type">Type</label><select id="follow-up-type" name="follow_up_type"><option value="call">Call</option><option value="meeting">Meeting</option><option value="visit">Visit</option><option value="message">Message</option></select></div><div class="field"><label for="follow-up-notes">Notes</label><input id="follow-up-notes" name="notes" placeholder="Next action"></div><button class="btn btn-primary" type="submit">Schedule follow-up</button></form><div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Type</th><th>Due</th><th>Status</th><th>Outcome</th></tr></thead><tbody>${followUpRows || `<tr><td colspan="4" class="empty">No follow-ups yet</td></tr>`}</tbody></table></div></section>` : ""}
     ${permissions.includes("view_financial") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Collections pulse</h2><div class="section-note">Outstanding and due soon</div></div></div><div class="metric-grid"><div class="metric"><span>Outstanding</span><strong>${org.collections?.outstanding?.length || 0}</strong></div><div class="metric"><span>Overdue</span><strong>${org.collections?.overdue?.length || 0}</strong></div><div class="metric"><span>Due soon</span><strong>${org.collections?.due_soon?.length || 0}</strong></div><div class="metric"><span>Open follow-ups</span><strong>${org.collections?.follow_ups?.length || 0}</strong></div></div></section>` : ""}
-    <section class="card glass"><div class="section-head"><div><h2 class="section-title">Activity</h2><div class="section-note">Recorded organization actions</div></div></div><div class="table-wrap"><table><thead><tr><th>User</th><th>Action</th><th>Module</th><th>When</th></tr></thead><tbody>${activityRows || `<tr><td colspan="4" class="empty">No activity recorded</td></tr>`}</tbody></table></div></section>
+    ${isAdmin() ? "" : `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Activity</h2><div class="section-note">Recorded organization actions</div></div></div><div class="table-wrap"><table><thead><tr><th>User</th><th>Action</th><th>Module</th><th>When</th></tr></thead><tbody>${activityRows || `<tr><td colspan="4" class="empty">No activity recorded</td></tr>`}</tbody></table></div></section>`}
     ${permissions.includes("approve") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Approvals</h2><div class="section-note">Contracts, documents, and financial decisions</div></div></div><div class="table-wrap"><table><thead><tr><th>Module</th><th>Record</th><th>Status</th><th>Decision</th><th>Action</th></tr></thead><tbody>${approvalRows || `<tr><td colspan="5" class="empty">No approval requests</td></tr>`}</tbody></table></div></section>` : ""}
-    ${isAdmin() ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Record allocation</h2><div class="section-note">Move records out of the office-wide pool into an owner and department</div></div><button class="btn btn-soft btn-small" data-action="reload-allocation">Refresh</button></div>${renderAllocation(state.allocationEntity || "client")}</section>` : ""}
   </div>`;
 }
 
@@ -3571,7 +3611,9 @@ function requestStage(row) {
   if (!row.task_id || row.task_status === "cancelled") return row.existing_client_id ? "existing" : "new";
   if (["submitted", "under_review"].includes(row.task_status)) return "reported";
   if (["approved", "completed"].includes(row.task_status)) {
-    return { declined: "closed", unreachable: "unreachable", appointment: "appointment" }[row.outcome] || "contacted";
+    // An "appointment" outcome whose appointment was since deleted goes back to
+    // Sales to arrange again, instead of claiming a booking that no longer exists.
+    return { declined: "closed", unreachable: "unreachable" }[row.outcome] || "contacted";
   }
   return "with_cs";
 }
@@ -4020,6 +4062,11 @@ function render() {
   if (state.view === "reports") renderReports();
   if (state.view === "organization") content.innerHTML = renderOrganization("staff");
   if (state.view === "departments") content.innerHTML = renderOrganization("departments");
+  if (state.view === "roles") content.innerHTML = renderOrganization("roles");
+  if (state.view === "system") {
+    content.innerHTML = renderOrganization("system");
+    if (!state.backups && !state.backupsRequested) loadBackups().then(() => { if (state.view === "system") render(); });
+  }
   if (state.view === "assignments") {
     content.innerHTML = renderAssignments();
     // Loaded on demand, like the duty catalogue. The guard stops a failed
@@ -4035,7 +4082,7 @@ function render() {
   // The record-allocation panel is administrator-only and loads on demand. The
   // `allocationRequested` guard means a failed load is not retried on every
   // render, which previously produced an unbounded request loop.
-  if (state.view === "organization" && isAdmin() && !state.allocation && !state.allocationRequested) loadAllocation().then(() => { if (state.view === "organization") render(); });
+  if (state.view === "system" && isAdmin() && !state.allocation && !state.allocationRequested) loadAllocation().then(() => { if (state.view === "system") render(); });
   // Authenticated image blobs for property covers, etc.
   hydrateImages(content);
   applySearch();
@@ -5093,10 +5140,24 @@ async function removePropertyPhoto(propertyId, imageId) {
 // One-click PostgreSQL dump backup, then downloads it.
 async function createBackup() {
   try {
+    showToast("Making a backup…");
     const backup = await api("/backups", { method: "POST", body: "{}" });
     showToast(`Backup created: ${backup.name}`);
+    await loadBackups();
+    if (state.view === "system") render();
     await downloadFile(`/backups/${encodeURIComponent(backup.name)}/download`, backup.name);
   } catch (error) { showToast(error.message || "Backup failed."); }
+}
+
+/** The backups kept on the server (System & backups page, administrator only). */
+async function loadBackups() {
+  if (!isAdmin()) return;
+  state.backupsRequested = true;
+  try {
+    state.backups = { list: await api("/backups") };
+  } catch (error) {
+    state.backups = { list: [], error: error.message || "Unable to load backups." };
+  }
 }
 
 async function previewReport() {
@@ -5703,6 +5764,17 @@ document.addEventListener("click", async (event) => {
     if (!window.confirm(`Delete the department "${titleCase(dept?.name || "")}"? This cannot be undone.`)) return;
     try { await api(`/org/departments/${id}`, { method: "DELETE" }); await refresh(); showToast("Department deleted."); }
     catch (error) { showToast(error.message || "Unable to delete the department."); }
+  }
+  if (action === "download-backup") {
+    const name = target.dataset.name;
+    try { await downloadFile(`/backups/${encodeURIComponent(name)}/download`, name); }
+    catch (error) { showToast(error.message || "Unable to download the backup."); }
+  }
+  if (action === "delete-backup") {
+    const name = target.dataset.name;
+    if (!window.confirm(`Delete the backup "${name}"? This cannot be undone.`)) return;
+    try { await api(`/backups/${encodeURIComponent(name)}`, { method: "DELETE" }); await loadBackups(); render(); showToast("Backup deleted."); }
+    catch (error) { showToast(error.message || "Unable to delete the backup."); }
   }
   if (action === "create-role") {
     const name = document.querySelector('[data-org-field="role"]')?.value;

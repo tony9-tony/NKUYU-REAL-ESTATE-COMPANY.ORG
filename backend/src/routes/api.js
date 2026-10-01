@@ -78,7 +78,7 @@ import { CONTRACT_PLACEHOLDERS, placeholdersUsed, unknownPlaceholders, writeCont
 import { shareContractWithHandoverDesks } from "../contracts/handover.js";
 import { templateTextFromUpload } from "../contracts/docxText.js";
 import { generateFromWordTemplate, templateFileUnknownPlaceholders, templateWordFile } from "../contracts/docxFill.js";
-import { contractSignature, signContractDocument } from "../contracts/signature.js";
+import { clearContractSignatureDocument, contractSignature, signContractDocument } from "../contracts/signature.js";
 import { docxToPreview } from "../contracts/docxPreview.js";
 import { announceWrites, liveStream } from "../live.js";
 import { RENT_STATUSES, SALE_STATUSES, categoryStatusesFrom, overallStatus } from "../models/propertyStatus.js";
@@ -354,9 +354,11 @@ function validateSchedule(body) {
   return { installments, deposit, firstDueDate, frequency };
 }
 
-function validateDebt(body, current = {}) {
+async function validateDebt(body, current = {}) {
+  const contractId = parseId(body.contract_id ?? current.contract_id, "contract_id");
+  requireRecord(await Contract.get(contractId), "Contract");
   return {
-    contract_id: parseId(body.contract_id ?? current.contract_id, "contract_id"),
+    contract_id: contractId,
     client_name: requiredText(body.client_name ?? current.client_name, "client_name"),
     amount: nonNegativeNumber(body.amount ?? current.amount, "amount"),
     due_date: optionalDate(body.due_date ?? current.due_date, "due_date"),
@@ -484,7 +486,7 @@ async function clientHasContract(clientId) {
   return Boolean(await queryOne("SELECT 1 AS ok FROM contracts WHERE organization_id=$1 AND client_id=$2 LIMIT 1", [org, clientId]));
 }
 
-function validateAppointment(body, current = {}) {
+async function validateAppointment(body, current = {}) {
   const data = {
     client_id: parseId(body.client_id ?? current.client_id, "client_id"),
     property_id: parseId(body.property_id ?? current.property_id, "property_id", true),
@@ -496,13 +498,19 @@ function validateAppointment(body, current = {}) {
     status: enumValue(body.status ?? current.status, appointmentStatuses, "scheduled", "status"),
     notes: optionalText(body.notes ?? current.notes, "notes"),
   };
+  requireRecord(await Client.get(data.client_id), "Client");
+  const property = data.property_id ? requireRecord(await Property.get(data.property_id), "Property") : null;
+  const project = data.project_id ? requireRecord(await Project.get(data.project_id), "Project") : null;
+  if (property?.project_id && project && Number(property.project_id) !== Number(project.id)) {
+    throw new HttpError(400, "property_id does not belong to the selected project");
+  }
   if (!data.starts_at) throw new HttpError(400, "starts_at is required");
   if (data.starts_at && data.ends_at && data.ends_at <= data.starts_at) throw new HttpError(400, "ends_at must be after starts_at");
   return data;
 }
 
-function validateDocument(body, current = {}) {
-  return {
+async function validateDocument(body, current = {}) {
+  const data = {
     project_id: parseId(body.project_id ?? current.project_id, "project_id", true),
     contract_id: parseId(body.contract_id ?? current.contract_id, "contract_id", true),
     client_id: parseId(body.client_id ?? current.client_id, "client_id", true),
@@ -512,6 +520,17 @@ function validateDocument(body, current = {}) {
     file_reference: optionalText(body.file_reference ?? current.file_reference, "file_reference", 300),
     notes: optionalText(body.notes ?? current.notes, "notes"),
   };
+  if (data.category === "template") throw new HttpError(403, "contract templates must be managed through the contract-template endpoints");
+  const project = data.project_id ? requireRecord(await Project.get(data.project_id), "Project") : null;
+  const contract = data.contract_id ? requireRecord(await Contract.get(data.contract_id), "Contract") : null;
+  const client = data.client_id ? requireRecord(await Client.get(data.client_id), "Client") : null;
+  if (contract && project && contract.project_id && Number(contract.project_id) !== Number(project.id)) {
+    throw new HttpError(400, "contract_id does not belong to the selected project");
+  }
+  if (contract && client && contract.client_id && Number(contract.client_id) !== Number(client.id)) {
+    throw new HttpError(400, "client_id does not belong to the selected contract");
+  }
+  return data;
 }
 
 function positiveNumber(value, field) {
@@ -613,6 +632,14 @@ export function mayAuthorContracts(access) {
 }
 function requireContractAuthor(access) {
   if (!mayAuthorContracts(access)) throw new HttpError(403, "contracts are created by Sales, Legal or the MD; Finance receives them once they are created");
+}
+
+const LOCKED_CONTRACT_STATUSES = new Set(["legal_approved", "pending_management_approval", "approved", "customer_pending", "active", "completed", "rejected", "cancelled"]);
+function requireEditableContract(contract) {
+  const correctionRequested = contract?.status === "changes_requested";
+  if (LOCKED_CONTRACT_STATUSES.has(contract?.status) || (contract?.legal_signed_by && !correctionRequested)) {
+    throw new HttpError(409, "this contract has reached approval or signature; request changes through the contract workflow before editing");
+  }
 }
 
 // Statuses in which a contract is still "before approval".
@@ -727,13 +754,21 @@ function isDemoPassword(email, password) {
   return String(password) === demoPasswordFor(String(email).toLowerCase());
 }
 
+// A real scrypt hash of a random secret, used only to keep failed sign-ins for
+// unknown addresses as slow as those for real ones.
+const TIMING_DUMMY_HASH = hashPassword(crypto.randomBytes(16).toString("hex"));
+
 const setupLimit = rateLimit({ name: "setup", limit: 10, windowMs: 60 * 60 * 1000 });
 router.post("/auth/setup", setupLimit, route(async (req, res) => {
   if (Number((await queryOne("SELECT COUNT(*) AS count FROM users")).count) > 0) throw new HttpError(409, "workspace already configured");
   // In production the very first account also needs the setup token the
   // operator configured, so an unattended fresh install cannot be claimed by
   // whoever reaches it first.
-  if (isProduction() && process.env.SETUP_TOKEN && String(req.get("x-setup-token") || req.body?.setup_token || "") !== process.env.SETUP_TOKEN) {
+  const setupToken = String(process.env.SETUP_TOKEN || "");
+  const suppliedSetupToken = String(req.get("x-setup-token") || req.body?.setup_token || "");
+  const tokenMatches = setupToken.length > 0 && Buffer.byteLength(setupToken) === Buffer.byteLength(suppliedSetupToken)
+    && crypto.timingSafeEqual(Buffer.from(setupToken), Buffer.from(suppliedSetupToken));
+  if (isProduction() && !tokenMatches) {
     throw new HttpError(403, "the setup token is missing or wrong");
   }
   const body = req.body || {};
@@ -763,7 +798,7 @@ router.post("/auth/setup", setupLimit, route(async (req, res) => {
 router.post("/auth/login", route(async (req, res) => {
   const body = req.body || {};
   const email = validEmail(body.email, "email");
-  const password = typeof body.password === "string" ? body.password : "";
+  const password = typeof body.password === "string" ? body.password.slice(0, 256) : "";
   // MK-02: repeated failures from one address (for one account, or overall)
   // are stopped for a while. Checked before the password is even hashed.
   const blocked = loginBlocked(req, email);
@@ -772,7 +807,11 @@ router.post("/auth/login", route(async (req, res) => {
     throw new HttpError(429, `Too many failed sign-in attempts. Try again in ${Math.ceil(blocked.retryAfter / 60)} minute(s).`);
   }
   const user = await queryOne("SELECT * FROM users WHERE LOWER(email) = LOWER($1)", [email]);
-  if (!user || !verifyPassword(password, user.password_hash)) {
+  // An unknown address still pays for one password hash, so the response time
+  // does not tell an attacker which addresses have accounts. A deactivated
+  // account is refused exactly like a wrong password.
+  const passwordOk = verifyPassword(password, user?.password_hash || TIMING_DUMMY_HASH);
+  if (!user || !passwordOk || user.active === false) {
     recordLoginFailure(req, email);
     throw new HttpError(401, "email or password is incorrect");
   }
@@ -952,6 +991,14 @@ router.post("/contracts/:id/transition", route(async (req, res) => {
   const notes = optionalText(req.body?.notes, "notes", 2000);
   const signedBy = optionalText(req.body?.signed_by, "signed_by", 160);
   if (name === "record_signature" && !signedBy) throw new HttpError(400, "signed_by is required to record a customer signature");
+  if (name === "request_changes" && contract.legal_signed_by) {
+    try {
+      await clearContractSignatureDocument(contract);
+    } catch (error) {
+      console.error("failed to invalidate prior contract signature:", error?.stack || error);
+      throw new HttpError(409, "the prior signed document could not be safely invalidated; contact the administrator");
+    }
+  }
   await Contract.transition(id, { ...action, action: name }, {
     notes,
     actorId: req.user.id,
@@ -1372,6 +1419,7 @@ router.put("/contracts/:id/document-content", route(async (req, res) => {
   if (!can(req.access, "access_documents")) throw new HttpError(403, "Documents access is required to edit the generated contract");
   if (!can(req.access, "edit")) throw new HttpError(403, "edit permission is required to revise the generated contract");
   const contract = requireRecord(await Contract.get(parseId(req.params.id)), "Contract");
+  requireEditableContract(contract);
   if (!contract.generated_document_id) throw new HttpError(404, "This contract has no generated document");
   const document = requireRecord(await Document.get(contract.generated_document_id), "Generated document");
   if (Number(document.contract_id) !== Number(contract.id) || document.category !== "agreement") throw new HttpError(404, "The generated document is not linked to this contract");
@@ -1433,6 +1481,7 @@ router.put("/contracts/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   requireContractAuthor(req.access);
   const current = requireRecord(await Contract.get(id), "Contract");
+  requireEditableContract(current);
   // The lifecycle is owned by Legal, so an edit that tries to change the status
   // is refused outright rather than silently ignored.
   if (req.body?.status && req.body.status !== current.status) {
@@ -1510,7 +1559,7 @@ router.get("/debts", route(async (req, res) => {
 }));
 router.get("/debts/:id", route(async (req, res) => res.json(requireRecord(await Debt.get(parseId(req.params.id)), "Debt"))));
 router.post("/debts", route(async (req, res) => {
-  const data = validateDebt(req.body || {});
+  const data = await validateDebt(req.body || {});
   const result = await Debt.create(data);
   const id = result.id;
   await syncDebtReminder(id, data.due_date, data.status || "pending");
@@ -1519,7 +1568,7 @@ router.post("/debts", route(async (req, res) => {
 router.put("/debts/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   const current = requireRecord(await Debt.get(id), "Debt");
-  const data = validateDebt(req.body || {}, current);
+  const data = await validateDebt(req.body || {}, current);
   await Debt.update(id, data);
   await syncDebtReminder(id, data.due_date, data.status || "pending");
   res.json(await Debt.get(id));
@@ -1984,21 +2033,27 @@ router.get("/appointments", route(async (req, res) => {
 }));
 router.get("/appointments/:id", route(async (req, res) => res.json(requireRecord(await Appointment.get(parseId(req.params.id)), "Appointment"))));
 router.post("/appointments", route(async (req, res) => {
-  const data = validateAppointment(req.body || {});
+  const data = await validateAppointment(req.body || {});
   const result = await Appointment.create(data);
   res.status(201).json(await Appointment.get(result.id));
 }));
 router.put("/appointments/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   const current = requireRecord(await Appointment.get(id), "Appointment");
-  const data = validateAppointment(req.body || {}, current);
+  const data = await validateAppointment(req.body || {}, current);
   await Appointment.update(id, data);
   res.json(await Appointment.get(id));
 }));
 router.delete("/appointments/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   requireRecord(await Appointment.get(id), "Appointment");
+  // A website request booked on this appointment goes back to Sales to arrange
+  // again, rather than still reading "appointment booked".
+  const requests = (await query("SELECT id FROM leads WHERE appointment_id = $1", [id])).rows.map((row) => row.id);
   await Appointment.remove(id);
+  if (requests.length) {
+    await query("UPDATE leads SET appointment_at = NULL, appointment_type = NULL, status = 'contacted' WHERE id = ANY($1::int[]) AND status = 'appointment'", [requests]);
+  }
   res.json({ ok: true });
 }));
 
@@ -2018,14 +2073,14 @@ router.get("/documents/:id/file", route(async (req, res) => {
 }));
 router.get("/documents/:id", route(async (req, res) => res.json(documentResponse(requireRecord(await Document.get(parseId(req.params.id)), "Document")))));
 router.post("/documents", route(async (req, res) => {
-  const data = validateDocument(req.body || {});
+  const data = await validateDocument(req.body || {});
   const result = await Document.create(data);
   res.status(201).json(documentResponse(await Document.get(result.id)));
 }));
 router.post("/documents/upload", uploadDocumentFile, route(async (req, res) => {
   const fileInfo = validateUploadedFile(req.file, documentExtensions);
   try {
-    const data = validateDocument({ ...(req.body || {}), file_reference: req.body?.file_reference || null });
+    const data = await validateDocument({ ...(req.body || {}), file_reference: req.body?.file_reference || null });
     const result = await Document.create({
       ...data,
       original_filename: fileInfo.displayName,
@@ -2043,13 +2098,19 @@ router.post("/documents/upload", uploadDocumentFile, route(async (req, res) => {
 router.put("/documents/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   const current = requireRecord(await Document.get(id), "Document");
-  const data = validateDocument(req.body || {}, current);
+  if (current.category === "template" || (current.category === "agreement" && current.contract_id)) {
+    throw new HttpError(409, "contract templates and generated agreements must be changed through their dedicated workflow");
+  }
+  const data = await validateDocument(req.body || {}, current);
   await Document.update(id, data);
   res.json(documentResponse(await Document.get(id)));
 }));
 router.delete("/documents/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   const current = requireRecord(await Document.get(id), "Document");
+  if (current.category === "template" || (current.category === "agreement" && current.contract_id)) {
+    throw new HttpError(409, "contract templates and generated agreements cannot be deleted through the generic document endpoint");
+  }
   removeStoredFile(documentUploadsDir, current.stored_name);
   await Document.remove(id);
   res.json({ ok: true });

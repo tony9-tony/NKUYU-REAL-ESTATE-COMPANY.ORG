@@ -63,6 +63,13 @@ for (const [name, email] of Object.entries(ACCOUNTS)) {
 
 // A real business record to link a task to, created only in the test database.
 const clientRow = await queryOne("INSERT INTO clients (organization_id,name,client_type,status) SELECT id,'Task Test Client','buyer','active' FROM organizations LIMIT 1 RETURNING id");
+const hiddenClient = await queryOne(
+  `INSERT INTO clients (organization_id,name,client_type,status,owner_id,created_by,department_id,visibility)
+   SELECT u.organization_id,'Task Hidden Legal Client','buyer','lead',u.id,u.id,d.id,'department'
+     FROM users u JOIN user_departments ud ON ud.user_id=u.id JOIN departments d ON d.id=ud.department_id
+    WHERE u.email=$1 AND d.name='LEGAL' RETURNING id`,
+  [ACCOUNTS.legalManager],
+);
 
 // The attention badge counts REAL rows, so a stale fixture from an earlier run
 // would make the expected numbers wrong. The test database is a throwaway, so
@@ -120,6 +127,11 @@ try {
   const cancelled = await act(sessions.salesManager, scoped.payload.id, { action: "cancel" });
   check(cancelled.status === 200 && cancelled.payload.status === "cancelled", "3b. the assigner may cancel a task");
   check((await assign(sessions.salesManager, { title: "Not my department", assigned_to: ids.finance })).status === 403, "4a. a department manager may NOT assign outside their department (403)");
+  const legalDepartment = (await queryOne("SELECT id FROM departments WHERE name='LEGAL' AND organization_id=(SELECT id FROM organizations ORDER BY id LIMIT 1)"))?.id;
+  const forgedDepartment = await assign(sessions.salesManager, { title: "Forged department visibility", assigned_to: ids.sales, department_id: legalDepartment });
+  check(forgedDepartment.status === 403, "4a2. a manager cannot move an in-scope task into an unrelated department");
+  const forgedReviewer = await assign(sessions.salesManager, { title: "Out-of-scope reviewer", assigned_to: ids.sales, reviewer_id: ids.legalManager });
+  check(forgedReviewer.status === 400, "4a3. a manager cannot name a reviewer outside their assignment scope");
   check((await assign(sessions.sales, { title: "Self assigned work", assigned_to: ids.sales })).status === 403, "4b. an unauthorized staff member cannot assign (403)");
   check((await assign(sessions.cs, { title: "Self assignment", assigned_to: ids.cs })).status === 403, "4c. a staff member cannot assign themselves unauthorized work (403)");
 
@@ -224,6 +236,8 @@ try {
   // Linked records are pointers, never copies of the business record.
   const linked = await assign(sessions.md, { title: "Review client follow-up", assigned_to: ids.salesManager, linked_entity: "client", linked_record_id: clientRow.id, priority: "urgent" });
   check(linked.status === 201 && Number(linked.payload.linked_record_id) === Number(clientRow.id), "22. a task may reference an existing client record");
+  const hiddenLink = await assign(sessions.salesManager, { title: "Link hidden legal client", assigned_to: ids.sales, linked_entity: "client", linked_record_id: hiddenClient.id });
+  check(hiddenLink.status === 400, "22f. a task cannot link a client outside the assigner's record scope");
   const clientStillThere = await queryOne("SELECT id, name FROM clients WHERE id=$1", [clientRow.id]);
   check(Boolean(clientStillThere) && clientStillThere.name === "Task Test Client", "22b. the linked business record is untouched");
   check((await assign(sessions.md, { title: "Broken link", assigned_to: ids.salesManager, linked_entity: "client", linked_record_id: 99999999 })).status === 400, "22c. a link to a record that does not exist is refused");
@@ -268,6 +282,8 @@ try {
   check(mdAssignees.status === 200 && Array.isArray(mdAssignees.payload) && mdAssignees.payload.length > 0, "the MD can list the people they may assign to");
   const mdReviewers = await call("/org/tasks/reviewers", { token: sessions.md });
   check(mdReviewers.status === 200 && mdReviewers.payload.length > 0, "the MD can list the people who may review");
+  const scopedReviewers = await call("/org/tasks/reviewers", { token: sessions.salesManager });
+  check(scopedReviewers.status === 200 && !scopedReviewers.payload.some((person) => Number(person.id) === Number(ids.legalManager)), "a department manager cannot enumerate reviewers outside the assignment scope");
   const managerAssignees = await call("/org/tasks/assignees", { token: sessions.salesManager });
   check(managerAssignees.status === 200 && managerAssignees.payload.some((person) => person.id === ids.sales), "a department manager is offered their own department staff");
   check(!managerAssignees.payload.some((person) => person.id === ids.finance), "a department manager is NOT offered anybody outside their department");

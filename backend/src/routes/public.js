@@ -32,7 +32,16 @@ const parseId = (value) => {
 // Public vocabulary: the website says "rented", the internal system "leased".
 const PUBLIC_STATUS = { available: "available", reserved: "reserved", leased: "rented", sold: "sold" };
 const titleCase = (value) => String(value || "").replace(/^\w/, (c) => c.toUpperCase());
-const base = (req) => `${req.protocol}://${req.get("host")}/api/v1/public`;
+// Picture links are absolute (the website lives on another origin). When
+// PUBLIC_API_URL is configured it is used, so a forged Host header can never
+// end up inside a cached public response; otherwise the request's own host is
+// used, which is what a local install needs.
+const base = (req) => {
+  const configured = String(process.env.PUBLIC_API_URL || "").trim().replace(/\/+$/, "");
+  if (configured) return `${configured}/api/v1/public`;
+  const host = String(req.get("host") || "");
+  return /^[a-z0-9.-]+(:\d{1,5})?$/i.test(host) ? `${req.protocol}://${host}/api/v1/public` : "/api/v1/public";
+};
 
 /* ---------------------------------------------------------------------------
    Reads
@@ -326,7 +335,7 @@ router.post("/enquiries", route(async (req, res) => {
     ...details.value,
     source: "website-contact",
     notes: `Website enquiry · ${topic}\n\n${details.value.message}`,
-    budget: Number.isFinite(budget) && budget > 0 ? budget : null,
+    budget: Number.isFinite(budget) && budget > 0 && budget <= 1e13 ? budget : null,
     service: ["rent", "buy"].includes(body.topic) ? body.topic : null,
     property_id: null,
     preferred_contact: CONTACT_METHODS.has(body.preferred_contact) ? body.preferred_contact : "phone",

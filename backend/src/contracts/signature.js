@@ -68,3 +68,43 @@ export async function signContractDocument(contractId, userId) {
   if (document.stored_name && document.stored_name !== file.stored_name) removeStoredFile(documentUploadsDir, document.stored_name);
   return true;
 }
+
+/** Rebuilds the current generated agreement without the superseded Legal signature. */
+export async function clearContractSignatureDocument(contract) {
+  if (!contract?.legal_signed_by) return false;
+  if (!contract.generated_document_id) {
+    await query("UPDATE contracts SET legal_signed_by=NULL, legal_signed_at=NULL WHERE id=$1 AND organization_id=$2", [contract.id, contract.organization_id]);
+    return true;
+  }
+
+  const document = await queryOne(
+    "SELECT * FROM documents WHERE id=$1 AND organization_id=$2 AND contract_id=$3 AND category='agreement'",
+    [contract.generated_document_id, contract.organization_id, contract.id],
+  );
+  if (!document) throw new Error("the signed contract document is missing; signature invalidation was refused");
+
+  const template = document.fill_values && contract.template_document_id
+    ? await queryOne("SELECT stored_name, original_filename FROM documents WHERE id=$1 AND organization_id=$2 AND category='template'", [contract.template_document_id, contract.organization_id])
+    : null;
+  const templatePath = templateWordFile(template);
+  let file;
+  if (templatePath) {
+    const values = typeof document.fill_values === "string" ? JSON.parse(document.fill_values) : document.fill_values;
+    file = await generateFromWordTemplate({ templatePath, values, title: document.title || "Sale Agreement", contractNumber: contract.contract_number });
+  } else {
+    if (!document.body_text) throw new Error("the signed contract has no source text; signature invalidation was refused");
+    file = await generateContractDocument({ text: document.body_text, title: document.title || "Sale Agreement", contractNumber: contract.contract_number });
+  }
+
+  const updated = await query(
+    "UPDATE documents SET original_filename=$1, stored_name=$2, file_size=$3, mime_type=$4, uploaded_at=NOW() WHERE id=$5 AND organization_id=$6 AND contract_id=$7 AND category='agreement'",
+    [file.original_filename, file.stored_name, file.file_size, file.mime_type, document.id, contract.organization_id, contract.id],
+  );
+  if (!updated.rowCount) {
+    removeStoredFile(documentUploadsDir, file.stored_name);
+    throw new Error("the generated contract changed while its signature was being invalidated");
+  }
+  await query("UPDATE contracts SET legal_signed_by=NULL, legal_signed_at=NULL WHERE id=$1 AND organization_id=$2", [contract.id, contract.organization_id]);
+  if (document.stored_name && document.stored_name !== file.stored_name) removeStoredFile(documentUploadsDir, document.stored_name);
+  return true;
+}

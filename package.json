@@ -40,6 +40,14 @@
   "engines": {
     "node": ">=20"
   },
+  "overrides": {
+    "exceljs": {
+      "uuid": "^11.1.1"
+    },
+    "pptxgenjs": {
+      "image-size": "^2.0.4"
+    }
+  },
   "dependencies": {
     "cors": "^2.8.5",
     "docx": "^9.7.2",

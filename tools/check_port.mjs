@@ -3,7 +3,12 @@
 // application than the one you edited. Changes nothing.
 import { execFileSync } from 'node:child_process';
 
-const port = process.argv[2] || '3001';
+const rawPort = process.argv[2] || "3001";
+if (!/^\d{1,5}$/.test(rawPort) || Number(rawPort) < 1 || Number(rawPort) > 65535) {
+  console.error("port must be an integer between 1 and 65535");
+  process.exit(1);
+}
+const port = String(Number(rawPort));
 
 const ps = (args) => {
   try {

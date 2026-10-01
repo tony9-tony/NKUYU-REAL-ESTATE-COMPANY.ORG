@@ -2,7 +2,7 @@
 // The frontend renders filters dynamically from GET /api/v1/reports/types.
 // `financial: true` marks reports that expose money, so they require the
 // `view_financial` permission and are hidden from staff that lack it.
-export const FINANCIAL_REPORT_TYPE_IDS = new Set(["income", "clients", "payments", "debt", "overdue", "installments", "summary"]);
+export const FINANCIAL_REPORT_TYPE_IDS = new Set(["income", "payments", "debt", "overdue", "installments", "summary", "properties", "projects", "contracts"]);
 
 export function reportTypeIsFinancial(id) {
   return FINANCIAL_REPORT_TYPE_IDS.has(id);

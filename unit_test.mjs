@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { deflateRawSync } from "node:zlib";
 import { assertTestDatabase } from "./test_support/harness.mjs";
 import { query, closeDatabase } from "./backend/src/db.js";
 import { propertyUploadsDir } from "./backend/src/uploads.js";
@@ -12,11 +13,17 @@ import { Debt } from "./backend/src/models/debt.js";
 import { Payment } from "./backend/src/models/payment.js";
 import { Reminder } from "./backend/src/models/reminder.js";
 import { Report } from "./backend/src/models/report.js";
+import { assertSafeDocxArchive, MAX_DOCX_ENTRIES, MAX_DOCX_ENTRY_BYTES } from "./backend/src/contracts/docxSafety.js";
 
 // Refuse to touch mkuyu_org before any write happens.
 await assertTestDatabase("unit_test");
 
 try {
+  assert.throws(() => assertSafeDocxArchive({ files: { "word/document.xml": { dir: false, _data: { compressedSize: 1, uncompressedSize: MAX_DOCX_ENTRY_BYTES + 1 } } } }), /oversized archive entry/);
+  const expandedEntry = deflateRawSync(Buffer.alloc(4096));
+  assert.throws(() => assertSafeDocxArchive({ files: { "word/document.xml": { dir: false, _data: { compressedSize: expandedEntry.length, uncompressedSize: 1, compressedContent: expandedEntry, compression: { magic: "\x08\x00" } } } } }), /invalid archive sizes/);
+  const tooManyEntries = Object.fromEntries(Array.from({ length: MAX_DOCX_ENTRIES + 1 }, (_, index) => [`entry-${index}`, { dir: true }]));
+  assert.throws(() => assertSafeDocxArchive({ files: tooManyEntries }), /too many archive entries/);
   await runMigrations();
   const suffix = Date.now();
   const project = await Project.create(`Unit Project ${suffix}`);

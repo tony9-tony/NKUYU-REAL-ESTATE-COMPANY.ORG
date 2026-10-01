@@ -13,10 +13,10 @@ dotenv.config({ path: path.resolve(__dirname, "..", "..", ".env") });
 
 const app = express();
 const PORT = process.env.PORT || 3003;
-// Behind a tunnel or reverse proxy (ngrok, nginx) the client address and the
-// original protocol come from X-Forwarded-*: needed for per-IP rate limits and
-// to know when to send Secure cookies and HSTS.
-app.set("trust proxy", 1);
+// Forwarded headers are trusted only from explicitly configured proxy IPs or
+// CIDRs. A client that can reach the app directly must not choose its own IP.
+const trustedProxies = String(process.env.TRUST_PROXY || "").split(",").map((value) => value.trim()).filter(Boolean);
+app.set("trust proxy", trustedProxies.length ? trustedProxies : false);
 app.disable("x-powered-by");
 app.use(securityHeaders());
 

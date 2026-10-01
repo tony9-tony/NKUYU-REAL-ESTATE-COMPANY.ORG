@@ -12,9 +12,12 @@
 // nothing about modules outside their role.
 // ---------------------------------------------------------------------------
 import { canReadModule, PATH_MODULES } from "./org/rbac.js";
+import { hashToken } from "./auth.js";
+import { queryOne } from "./db.js";
 
 const clients = new Set();
 const HEARTBEAT_MS = 25000;
+const MAX_STREAMS_PER_USER = 10;
 
 /** The area a write touched, from its path ("/contracts/12/transition" -> "contracts"). */
 export function areaForPath(path) {
@@ -35,14 +38,32 @@ function mayHear(access, area) {
 }
 
 export function liveStream(req, res) {
+  // One person has a handful of tabs at most; refusing more keeps a script
+  // from holding hundreds of open connections.
+  const userId = req.user?.id;
+  const open = [...clients].filter((client) => client.userId === userId).length;
+  if (open >= MAX_STREAMS_PER_USER) return res.status(429).json({ error: "too many live connections" });
   res.set({ "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" });
   res.flushHeaders?.();
   res.write("retry: 5000\n\n");
-  const client = { res, access: req.access };
+  const client = { res, access: req.access, userId };
   clients.add(client);
-  const beat = setInterval(() => { try { res.write(": ping\n\n"); } catch { /* closed */ } }, HEARTBEAT_MS);
+  const tokenHash = req.token ? hashToken(req.token) : null;
+  const close = () => { clearInterval(beat); clients.delete(client); };
+  // The heartbeat also re-checks the session: after sign-out, a password reset,
+  // a role change or deactivation the stream ends instead of living on with an
+  // old picture of the person's access.
+  const beat = setInterval(async () => {
+    try {
+      const alive = tokenHash && await queryOne(
+        `SELECT 1 AS ok FROM sessions s JOIN users u ON u.id = s.user_id
+          WHERE s.token_hash = $1 AND s.expires_at > NOW() AND u.active = TRUE`, [tokenHash]);
+      if (!alive) { close(); res.end(); return; }
+      res.write(": ping\n\n");
+    } catch { /* closed or database hiccup: the next beat tries again */ }
+  }, HEARTBEAT_MS);
   beat.unref?.();
-  req.on("close", () => { clearInterval(beat); clients.delete(client); });
+  req.on("close", close);
 }
 
 export function broadcastChange(area) {

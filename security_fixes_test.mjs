@@ -8,12 +8,14 @@
 // ---------------------------------------------------------------------------
 import { startIsolatedServer, prepareTestDatabase, reapOrphanServers } from "./test_support/harness.mjs";
 import { closeDatabase, query } from "./backend/src/db.js";
+import { runMigrations } from "./backend/src/migrate.js";
 import { demoPasswordFor, legacyPasswordFor } from "./backend/src/org/demoCredentials.js";
 
 let failures = 0;
 const check = (ok, label) => { console.log(`${ok ? "ok  " : "FAIL"}  ${label}`); if (!ok) failures += 1; };
 
 reapOrphanServers();
+process.env.TRUST_PROXY = "loopback";
 await prepareTestDatabase();
 const devServer = await startIsolatedServer({ label: "security-dev", port: 3230 });
 const tag = Date.now().toString(36);
@@ -157,6 +159,7 @@ try {
   await dev.call("/org/users", { method: "POST", token: adminToken, body: { display_name: "Prod Check", email: strong, password: "Str0ng-Prod-Pass#26", role_ids: [(await dev.call("/org/roles", { token: adminToken })).body.find((r) => r.name === "ICT Officer").id] } });
   process.env.NODE_ENV = "production";
   process.env.PUBLIC_SITE_ORIGINS = "https://www.mkuyu.example";
+  process.env.SETUP_TOKEN = "isolated-test-setup-token";
   prodServer = await startIsolatedServer({ label: "security-prod", port: 3231 });
   const prod = client(prodServer.base);
   const demoLogin = await prod.call("/auth/login", { method: "POST", body: { email: "sales@demo.mkuyu.local", password: demoPasswordFor("sales@demo.mkuyu.local") } });
@@ -170,12 +173,32 @@ try {
   const prodSite = await fetch(`${prodServer.base}/public/properties`, { headers: { Origin: "https://www.mkuyu.example" } });
   const prodLocal = await fetch(`${prodServer.base}/public/properties`, { headers: { Origin: "http://localhost:5500" } });
   check(prodSite.status === 200 && prodLocal.status === 403, "MK-08: production allows only the configured public site origin");
+
+  await query("DELETE FROM approvals");
+  await query("DELETE FROM users");
+  const setupBody = { email: `first.admin.${tag}@test.mkuyu.local`, display_name: "First Admin", password: "First-Admin#2026" };
+  const setupWithoutToken = await prod.call("/auth/setup", { method: "POST", body: setupBody });
+  check(setupWithoutToken.status === 403, "production first-admin setup fails closed without SETUP_TOKEN");
+  const setupWithToken = await prod.call("/auth/setup", { method: "POST", body: setupBody, headers: { "X-Setup-Token": process.env.SETUP_TOKEN } });
+  check(setupWithToken.status === 201 && setupWithToken.body.role === "admin", "the configured production setup token permits first-admin creation");
+
+  await prodServer.stop();
+  prodServer = null;
+  await query("DELETE FROM approvals");
+  await query("DELETE FROM users");
+  process.env.NODE_ENV = "production";
+  delete process.env.MKUYU_IS_TEST_DATABASE;
+  await runMigrations();
+  const productionUsers = Number((await query("SELECT COUNT(*) AS count FROM users")).rows[0].count);
+  check(productionUsers === 0, "production migrations do not create or reset demo accounts");
 } catch (error) {
   failures += 1;
   console.error(error);
 } finally {
   delete process.env.NODE_ENV;
   delete process.env.PUBLIC_SITE_ORIGINS;
+  delete process.env.TRUST_PROXY;
+  delete process.env.SETUP_TOKEN;
 }
 
 console.log(`\n${failures ? `${failures} SECURITY FIX CHECK(S) FAILED` : "SECURITY_FIXES_ALL_PASSED"}`);

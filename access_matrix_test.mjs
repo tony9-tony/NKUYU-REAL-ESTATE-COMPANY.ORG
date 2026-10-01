@@ -5,7 +5,7 @@
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { query, closeDatabase } from "./backend/src/db.js";
+import { query, queryOne, closeDatabase } from "./backend/src/db.js";
 import { assertTestDatabase } from "./test_support/harness.mjs";
 import { runMigrations } from "./backend/src/migrate.js";
 import { hashPassword } from "./backend/src/auth.js";
@@ -191,6 +191,15 @@ async function main() {
   res = await call("/contracts", { token: sessions.sales, method: "POST", body: { project_id: salesProject.id, client_id: salesClient.id, client_name: `Matrix Client ${stamp}`, contract_type: "new", deal_type: "buy", value: 500000, notes: `matrix-${stamp}` } });
   check(res.status === 201, "sales officer can create a contract");
   const salesContract = res.payload;
+  res = await call("/clients", { token: sessions.legal, method: "POST", body: { name: `Matrix Legal Client ${stamp}`, client_type: "buyer", status: "lead" } });
+  check(res.status === 201, "legal creates a client in its own scope");
+  const legalClient = res.payload;
+  res = await call("/appointments", { token: sessions.sales, method: "POST", body: { client_id: legalClient.id, title: `Matrix Cross-scope Appointment ${stamp}`, starts_at: "2026-10-15 10:00" } });
+  check(res.status === 404, "sales cannot create an appointment against a Legal-private client");
+  res = await call("/debts", { token: sessions.finance_manager, method: "POST", body: { contract_id: salesContract.id, client_name: "Hidden Sales Contract", amount: 100, due_date: "2027-01-05" } });
+  check(res.status === 404, "Finance cannot create debt against a Sales-private contract");
+  res = await call("/documents", { token: sessions.legal, method: "POST", body: { client_id: salesClient.id, title: `Matrix Cross-scope Document ${stamp}` } });
+  check(res.status === 404, "Legal cannot create a document linked to a Sales-private client");
   res = await call(`/contracts/${salesContract.id}/schedule`, { token: sessions.sales, method: "POST", body: { deposit: 0, installments: 2, first_due_date: "2027-01-05" } });
   check(res.status === 403, "sales officer cannot create a payment schedule (financial)");
   res = await call(`/contracts/${salesContract.id}/schedule`, { token: sessions.manager, method: "POST", body: { deposit: 0, installments: 2, first_due_date: "2027-01-05" } });
@@ -202,6 +211,12 @@ async function main() {
   const financeContract = res.payload;
   res = await call(`/contracts/${financeContract.id}/schedule`, { token: sessions.finance_manager, method: "POST", body: { deposit: 0, installments: 2, first_due_date: "2027-01-05" } });
   check(res.status === 201, "the finance manager generates a payment schedule on an organization-visible contract");
+  const visibleApproval = await queryOne("INSERT INTO approvals (organization_id,module,record_id,requested_by,status) VALUES ($1,'contract',$2,$3,'pending') RETURNING id", [org, String(financeContract.id), userId("director")]);
+  const hiddenApproval = await queryOne("INSERT INTO approvals (organization_id,module,record_id,requested_by,status) VALUES ($1,'contract',$2,$3,'pending') RETURNING id", [org, String(salesContract.id), userId("sales")]);
+  const financeApprovals = await call("/org/approvals", { token: sessions.finance_manager });
+  check(financeApprovals.status === 200 && financeApprovals.payload.some((approval) => approval.id === visibleApproval.id) && !financeApprovals.payload.some((approval) => approval.id === hiddenApproval.id), "approval inbox follows contract scope");
+  const hiddenDecision = await call(`/org/approvals/${hiddenApproval.id}`, { token: sessions.finance_manager, method: "PUT", body: { status: "approved" } });
+  check(hiddenDecision.status === 404, "Finance cannot decide an approval for a Sales-private contract");
   res = await call(`/contracts/${financeContract.id}/schedule`, { token: sessions.legal, method: "POST", body: { deposit: 0, installments: 3, first_due_date: "2027-01-05", replace: true } });
   check(res.status === 403, "legal cannot create or replace a payment schedule");
 
@@ -267,14 +282,18 @@ async function main() {
   check(res.status === 200, "sales officer can read the summary endpoint");
   check(res.payload.financial === false, "summary marks itself non-financial for sales");
   check(res.payload.debts_pending === null && res.payload.income_all === null && res.payload.income_30d === null, "summary withholds every monetary figure from sales");
-  check(typeof res.payload.contracts_new.total === "number", "summary still returns operational contract counters to sales");
+  check(typeof res.payload.contracts_new.count === "number" && res.payload.contracts_new.total === null, "summary returns contract counts but withholds contract value from sales");
   res = await call("/reports/summary", { token: sessions.finance });
   check(res.payload.financial === true && res.payload.income_all && typeof res.payload.income_all.total === "number", "finance officer receives income totals");
   res = await call("/reports/by-project", { token: sessions.sales });
-  check(res.payload.every((row) => row.open_debts === null), "by-project withholds open debt counts from sales");
+  check(res.payload.every((row) => row.open_debts === null && row.contract_value === null), "by-project withholds financial values from sales");
   res = await call("/reports/types", { token: sessions.sales });
   const salesTypes = res.payload.types.map((type) => type.id);
-  check(!salesTypes.includes("income") && !salesTypes.includes("debt") && !salesTypes.includes("payments"), "financial report types are not offered to sales");
+  check(!["income", "debt", "payments", "properties", "projects", "contracts"].some((type) => salesTypes.includes(type)), "financial report types are not offered to sales");
+  res = await call("/reports/preview", { token: sessions.sales, method: "POST", body: { report_type: "contracts" } });
+  check(res.status === 403, "sales cannot request a financial contract report directly");
+  res = await call("/reports/preview", { token: sessions.finance_manager, method: "POST", body: { report_type: "contracts" } });
+  check(res.status === 200 && res.payload.rows.some((row) => row.client_name === `Matrix Fin ${stamp}`) && !res.payload.rows.some((row) => row.client_name === `Matrix Client ${stamp}`), "finance reports include visible contracts but exclude another department's private contract");
 
   // --- Explicit sharing ----------------------------------------------------
   res = await call("/org/leads", { token: sessions.sales, method: "POST", body: { name: `Matrix Lead ${stamp}`, status: "new" } });
@@ -291,6 +310,11 @@ async function main() {
   check(res.status === 404, "unrelated sector cannot even discover a private record to share it");
   const shares = (await call(`/org/records/lead/${salesLead.id}/shares`, { token: sessions.sales })).payload;
   if (shares.length) {
+    const otherLead = await call("/org/leads", { token: sessions.sales, method: "POST", body: { name: `Matrix Other Lead ${stamp}`, status: "new" } });
+    check(otherLead.status === 201, "owner can create a second shareable record");
+    res = await call(`/org/records/lead/${otherLead.payload.id}/shares/${shares[0].id}`, { token: sessions.sales, method: "DELETE" });
+    check(res.status === 404, "a share ID from another record cannot be revoked through this record's URL");
+    check((await call(`/org/records/lead/${salesLead.id}/shares`, { token: sessions.sales })).payload.some((share) => share.id === shares[0].id), "failed cross-record revocation leaves the original share intact");
     res = await call(`/org/records/lead/${salesLead.id}/shares/${shares[0].id}`, { token: sessions.sales, method: "DELETE" });
     check(res.status === 200, "owner can revoke a share");
   }
@@ -369,6 +393,20 @@ async function main() {
   check(res.status === 403, "legal alone cannot sign off the financial terms");
   res = await step("legal_approve", sessions.legal);
   check(res.status === 200 && res.payload.status === "legal_approved", "legal approves the contract on the legal side");
+  await query(
+    `UPDATE contracts SET legal_signed_by=$1,legal_signed_at=NOW(),finance_validated_by=$2,finance_validated_at=NOW(),
+       finance_notes='old validation',management_approved_by=$3,management_approved_at=NOW(),management_notes='old approval',
+       customer_signed_by='Old Customer',customer_signed_at=NOW() WHERE id=$4`,
+    [userId("legal"), userId("finance"), userId("director"), flow.id],
+  );
+  res = await step("request_changes", sessions.legal, { notes: "Terms changed after prior approval." });
+  check(res.status === 200 && res.payload.status === "changes_requested", "a post-approval correction returns the contract to changes_requested");
+  const invalidated = await queryOne("SELECT legal_signed_by,legal_signed_at,finance_validated_by,finance_validated_at,finance_notes,management_approved_by,management_approved_at,management_notes,customer_signed_by,customer_signed_at FROM contracts WHERE id=$1", [flow.id]);
+  check(["legal_signed_by", "legal_signed_at", "finance_validated_by", "finance_validated_at", "finance_notes", "management_approved_by", "management_approved_at", "management_notes", "customer_signed_by", "customer_signed_at"].every((field) => invalidated[field] === null), "request_changes invalidates every prior signature and approval stamp");
+  check((await step("submit", sessions.sales)).status === 200, "Sales resubmits the corrected contract");
+  check((await step("start_review", sessions.legal)).status === 200, "Legal reviews the corrected contract again");
+  res = await step("legal_approve", sessions.legal);
+  check(res.status === 200 && res.payload.status === "legal_approved", "Legal must approve the corrected contract again");
   res = await step("finance_validate", sessions.finance);
   check(res.status === 200 && Boolean(res.payload.finance_validated_at), "finance validates the financial terms");
   res = await step("submit_management", sessions.finance);
@@ -389,6 +427,8 @@ async function main() {
   res = await step("record_signature", sessions.legal, { signed_by: "Matrix Customer" });
   check(res.status === 200 && res.payload.status === "active", "legal records the signature and activates the contract");
   check(Boolean(res.payload.customer_signed_at), "the signature is stamped on the record");
+  res = await call(`/contracts/${flow.id}`, { token: sessions.legal, method: "PUT", body: { notes: "unauthorized post-signature edit" } });
+  check(res.status === 409, "a signed active contract cannot be edited outside the changes-requested workflow");
   res = await step("complete", sessions.legal);
   check(res.status === 200 && res.payload.status === "completed", "legal closes the final record");
   res = await call(`/contracts/${flow.id}/history`, { token: sessions.legal });

@@ -55,10 +55,16 @@ export const Report = {
       add(`${name}_total`, { ...options, aggregate: `COALESCE(SUM(${options.sum}), 0)` });
     };
 
+    const newContracts = { table: "contracts", alias: "c", entity: "contract", conditions: [eq("c.contract_type", "new"), eq("c.status", "active")], sum: "c.value" };
+    const terminalContracts = { table: "contracts", alias: "c", entity: "contract", conditions: [eq("c.contract_type", "terminal")], sum: "c.value" };
     add("active_projects", { table: "projects", alias: "p", entity: "project", conditions: [eq("p.status", "active")] });
     add("contracts_total", { table: "contracts", alias: "c", entity: "contract" });
-    addMoney("contracts_new", { table: "contracts", alias: "c", entity: "contract", conditions: [eq("c.contract_type", "new"), eq("c.status", "active")], sum: "c.value" });
-    addMoney("contracts_terminal", { table: "contracts", alias: "c", entity: "contract", conditions: [eq("c.contract_type", "terminal")], sum: "c.value" });
+    add("contracts_new_count", newContracts);
+    add("contracts_terminal_count", terminalContracts);
+    if (financial) {
+      add("contracts_new_total", { ...newContracts, aggregate: `COALESCE(SUM(${newContracts.sum}), 0)` });
+      add("contracts_terminal_total", { ...terminalContracts, aggregate: `COALESCE(SUM(${terminalContracts.sum}), 0)` });
+    }
     add("properties_available", { table: "properties", alias: "p", entity: "property", conditions: [eq("p.status", "available")] });
     add("clients_active", { table: "clients", alias: "c", entity: "client", conditions: [eq("c.status", "active")] });
     add("appointments_scheduled", { table: "appointments", alias: "a", entity: "appointment", conditions: [eq("a.status", "scheduled")] });
@@ -68,8 +74,8 @@ export const Report = {
       financial,
       active_projects: 0,
       contracts_total: 0,
-      contracts_new: { count: 0, total: 0 },
-      contracts_terminal: { count: 0, total: 0 },
+      contracts_new: { count: 0, total: null },
+      contracts_terminal: { count: 0, total: null },
       properties_available: 0,
       clients_active: 0,
       appointments_scheduled: 0,
@@ -94,8 +100,8 @@ export const Report = {
     const total = (key) => Number(row[key] || 0);
     summary.active_projects = count("active_projects");
     summary.contracts_total = count("contracts_total");
-    summary.contracts_new = { count: count("contracts_new_count"), total: total("contracts_new_total") };
-    summary.contracts_terminal = { count: count("contracts_terminal_count"), total: total("contracts_terminal_total") };
+    summary.contracts_new = { count: count("contracts_new_count"), total: financial ? total("contracts_new_total") : null };
+    summary.contracts_terminal = { count: count("contracts_terminal_count"), total: financial ? total("contracts_terminal_total") : null };
     summary.properties_available = count("properties_available");
     summary.clients_active = count("clients_active");
     summary.appointments_scheduled = count("appointments_scheduled");
@@ -125,7 +131,8 @@ export const Report = {
       return `LEFT JOIN LATERAL (SELECT ${aggregate} FROM ${table} ${alias} ${extraFrom} WHERE ${alias}.organization_id = $1 AND ${projectAlias}.project_id = p.id AND ${scope}${filters.length ? ` AND ${filters.join(" AND ")}` : ""}) ${alias}_agg ON TRUE`;
     };
     let table = "contracts";
-    const contractJoin = lateral("c", "contract", "", "c", `COUNT(*) FILTER (WHERE c.contract_type='new')::int AS new_contracts, COUNT(*) FILTER (WHERE c.contract_type='terminal')::int AS terminal_contracts, COALESCE(SUM(c.value),0) AS contract_value`);
+    const contractValue = financial ? "COALESCE(SUM(c.value),0) AS contract_value" : "NULL::numeric AS contract_value";
+    const contractJoin = lateral("c", "contract", "", "c", `COUNT(*) FILTER (WHERE c.contract_type='new')::int AS new_contracts, COUNT(*) FILTER (WHERE c.contract_type='terminal')::int AS terminal_contracts, ${contractValue}`);
     table = "properties";
     const propertyJoin = lateral("p2", "property", "", "p2", "COUNT(*)::int AS properties");
     table = "clients";
@@ -138,7 +145,7 @@ export const Report = {
       ? (() => { table = "debts"; return lateral("d2", "debt", "JOIN contracts c2 ON c2.id = d2.contract_id", "c2", "COUNT(*)::int AS open_debts", [eq("d2.status", "pending")]); })()
       : "";
     const rows = await query(
-      `SELECT p.id, p.name, COALESCE(c_agg.new_contracts,0) AS new_contracts, COALESCE(c_agg.terminal_contracts,0) AS terminal_contracts, COALESCE(c_agg.contract_value,0) AS contract_value, ${financial ? "COALESCE(d2_agg.open_debts,0)" : "NULL::int"} AS open_debts, COALESCE(p2_agg.properties,0) AS properties, COALESCE(c2_agg.clients,0) AS clients, COALESCE(a_agg.appointments,0) AS appointments, COALESCE(d_agg.documents,0) AS documents
+      `SELECT p.id, p.name, COALESCE(c_agg.new_contracts,0) AS new_contracts, COALESCE(c_agg.terminal_contracts,0) AS terminal_contracts, ${financial ? "COALESCE(c_agg.contract_value,0)" : "NULL::numeric"} AS contract_value, ${financial ? "COALESCE(d2_agg.open_debts,0)" : "NULL::int"} AS open_debts, COALESCE(p2_agg.properties,0) AS properties, COALESCE(c2_agg.clients,0) AS clients, COALESCE(a_agg.appointments,0) AS appointments, COALESCE(d_agg.documents,0) AS documents
        FROM projects p
        ${contractJoin} ${propertyJoin} ${clientJoin} ${appointmentJoin} ${documentJoin} ${debtJoin}
        WHERE p.organization_id = $1 AND ${projects}

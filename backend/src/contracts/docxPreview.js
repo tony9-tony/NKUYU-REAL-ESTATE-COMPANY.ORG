@@ -23,6 +23,7 @@
 // validated, so a template cannot inject markup into the page.
 // ---------------------------------------------------------------------------
 import JSZip from "jszip";
+import { assertSafeDocxArchive } from "./docxSafety.js";
 
 const IMAGE_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", bmp: "image/bmp" };
 const twipsToPx = (value) => Math.round((Number(value) || 0) / 15 * 100) / 100;
@@ -399,7 +400,7 @@ function layerHtml({ layer }, page) {
 
 /** The contract's .docx -> a page description the browser lays out. */
 export async function docxToPreview(buffer) {
-  const zip = await JSZip.loadAsync(buffer);
+  const zip = assertSafeDocxArchive(await JSZip.loadAsync(buffer));
   const documentFile = zip.file("word/document.xml");
   if (!documentFile) throw new Error("not a Word document");
   const styles = readStyles(await zip.file("word/styles.xml")?.async("string"));

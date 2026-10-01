@@ -209,6 +209,6 @@ export async function addRecordShare({ entity, recordId, userId, departmentId, c
   );
 }
 
-export async function removeRecordShare(shareId) {
-  return queryOne("DELETE FROM record_shares WHERE id = $1 AND organization_id = $2 RETURNING *", [shareId, await organizationId()]);
+export async function removeRecordShare(shareId, entity, recordId) {
+  return queryOne("DELETE FROM record_shares WHERE id = $1 AND organization_id = $2 AND entity = $3 AND record_id = $4 RETURNING *", [shareId, await organizationId(), entity, recordId]);
 }

@@ -452,7 +452,7 @@ async function migrateContractPricing() {
   await query("ALTER TABLE contracts ALTER COLUMN original_price SET DEFAULT 0");
 }
 
-export async function runMigrations({ seedDemo = process.env.MKUYU_IS_TEST_DATABASE === "1" } = {}) {
+export async function runMigrations({ seedDemo = process.env.NODE_ENV !== "production" && process.env.MKUYU_IS_TEST_DATABASE === "1" } = {}) {
   await query(schema);
   await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_photo_stored_name TEXT");
   await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_photo_mime_type TEXT");
@@ -771,7 +771,9 @@ async function seedDemoAccounts() {
 }
 
 if (process.argv.includes("--seed-only")) {
-  if (process.env.NODE_ENV === "production") throw new Error("demo seeding is disabled in production");
+  if (String(process.env.NODE_ENV || "").toLowerCase() === "production") {
+    throw new Error("demo seeding is disabled in production");
+  }
   await runMigrations({ seedDemo: true });
   console.log("PostgreSQL schema ready");
 }

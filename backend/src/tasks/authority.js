@@ -74,6 +74,17 @@ export async function mayReview(req) {
   return hasPermission(ctx.userId, "review_tasks");
 }
 
+/** Whether `userId` may review work assigned by this caller. */
+export async function mayAssignReviewer(req, userId) {
+  const ctx = await callerContext(req);
+  const reviewer = await userRow(userId);
+  if (!reviewer || !reviewer.active || Number(reviewer.organization_id) !== Number(ctx.org)) return false;
+  if (!await hasPermission(userId, "review_tasks")) return false;
+  if (ctx.isAdmin || ctx.scope === "organization") return true;
+  const allowed = new Set((await assignableDepartmentIds(ctx.departments)).map(Number));
+  return (reviewer.departments || []).some((departmentId) => allowed.has(Number(departmentId)));
+}
+
 /**
  * Whether the caller may assign work to `assigneeId`.
  * Returns { ok, reason?, assignee?, departmentId? }.

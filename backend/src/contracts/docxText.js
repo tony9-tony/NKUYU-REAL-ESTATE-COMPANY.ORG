@@ -13,6 +13,10 @@
 // ---------------------------------------------------------------------------
 import zlib from "node:zlib";
 
+const MAX_ZIP_ENTRIES = 2048;
+const MAX_ZIP_ENTRY_BYTES = 32 * 1024 * 1024;
+const MAX_ZIP_TOTAL_BYTES = 64 * 1024 * 1024;
+
 class DocxError extends Error {
   constructor(message) {
     super(message);
@@ -29,24 +33,42 @@ function readZipEntry(buffer, wantedName) {
   }
   if (eocd < 0) throw new DocxError("the file is not a valid Word (.docx) document");
   const entries = buffer.readUInt16LE(eocd + 10);
+  if (entries > MAX_ZIP_ENTRIES) throw new DocxError("the Word document contains too many archive entries");
   let pointer = buffer.readUInt32LE(eocd + 16);
+  let totalUncompressed = 0;
   for (let index = 0; index < entries; index += 1) {
+    if (pointer < 0 || pointer + 46 > eocd) throw new DocxError("the Word document archive is damaged");
     if (buffer.readUInt32LE(pointer) !== 0x02014b50) break;
     const method = buffer.readUInt16LE(pointer + 10);
     const compressedSize = buffer.readUInt32LE(pointer + 20);
+    const uncompressedSize = buffer.readUInt32LE(pointer + 24);
     const nameLength = buffer.readUInt16LE(pointer + 28);
     const extraLength = buffer.readUInt16LE(pointer + 30);
     const commentLength = buffer.readUInt16LE(pointer + 32);
     const localOffset = buffer.readUInt32LE(pointer + 42);
     const name = buffer.toString("utf8", pointer + 46, pointer + 46 + nameLength);
+    if (uncompressedSize > MAX_ZIP_ENTRY_BYTES) throw new DocxError("the Word document contains an oversized archive entry");
+    totalUncompressed += uncompressedSize;
+    if (totalUncompressed > MAX_ZIP_TOTAL_BYTES) throw new DocxError("the Word document expands beyond the allowed size");
     if (name === wantedName) {
+      if (localOffset < 0 || localOffset + 30 > buffer.length || localOffset + 30 + compressedSize > buffer.length) {
+        throw new DocxError("the Word document archive is damaged");
+      }
       if (buffer.readUInt32LE(localOffset) !== 0x04034b50) throw new DocxError("the Word document is damaged");
       const localName = buffer.readUInt16LE(localOffset + 26);
       const localExtra = buffer.readUInt16LE(localOffset + 28);
       const start = localOffset + 30 + localName + localExtra;
+      if (start + compressedSize > buffer.length) throw new DocxError("the Word document archive is damaged");
       const data = buffer.subarray(start, start + compressedSize);
-      if (method === 0) return data;
-      if (method === 8) return zlib.inflateRawSync(data);
+      if (method === 0) {
+        if (compressedSize !== uncompressedSize) throw new DocxError("the Word document archive is damaged");
+        return data;
+      }
+      if (method === 8) {
+        const expanded = zlib.inflateRawSync(data, { maxOutputLength: MAX_ZIP_ENTRY_BYTES });
+        if (expanded.length !== uncompressedSize) throw new DocxError("the Word document archive is damaged");
+        return expanded;
+      }
       throw new DocxError("the Word document uses an unsupported compression method");
     }
     pointer += 46 + nameLength + extraLength + commentLength;

@@ -107,7 +107,7 @@ const CSP = [
 ].join("; ");
 
 export function isHttps(req) {
-  return req.secure || String(req.get("x-forwarded-proto") || "").split(",")[0].trim() === "https";
+  return Boolean(req.secure);
 }
 
 export function securityHeaders() {

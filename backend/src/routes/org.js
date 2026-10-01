@@ -160,6 +160,62 @@ function recordTable(entity) {
   return { table: entry.table, alias: entry.table.charAt(0) };
 }
 
+function approvalRecordType(moduleName) {
+  const normalized = String(moduleName || "").trim().toLowerCase();
+  return Object.entries(recordTables).find(([entity, entry]) => normalized === entity || normalized === entry.module || normalized === entry.table) || null;
+}
+
+function canReadApprovalModule(access, entry) {
+  if (!entry || entry.ownable === false || !canReadModule(access, entry.module)) return false;
+  return !["debts", "payments", "reminders"].includes(entry.module) || can(access, "view_financial");
+}
+
+async function approvalRecordVisible(access, moduleName, recordId, org = null) {
+  const match = approvalRecordType(moduleName);
+  if (!match) return false;
+  const [entity, entry] = match;
+  if (!canReadApprovalModule(access, entry)) return false;
+  const recordIdNumber = Number(recordId);
+  if (!Number.isInteger(recordIdNumber) || recordIdNumber < 1 || recordIdNumber > 2147483647) return false;
+  const alias = entry.table.charAt(0);
+  const values = [recordIdNumber, org ?? await organizationId()];
+  const visible = scopeCondition(alias, entity, access, values);
+  return Boolean(await queryOne(`SELECT ${alias}.id FROM ${entry.table} ${alias} WHERE ${alias}.id=$1 AND ${alias}.organization_id=$2 AND ${visible}`, values));
+}
+
+async function scopedApprovals(org, access, { status = null, limit = 250, names = false } = {}) {
+  const columns = names
+    ? "a.*,r.display_name AS requested_by_name,d.display_name AS decided_by_name"
+    : "a.*";
+  const joins = names ? "LEFT JOIN users r ON r.id=a.requested_by LEFT JOIN users d ON d.id=a.approved_by" : "";
+  const values = [org];
+  const statusSql = status ? (values.push(status), `AND a.status=$${values.length}`) : "";
+  values.push(limit);
+  const approvals = await rows(`SELECT ${columns} FROM approvals a ${joins} WHERE a.organization_id=$1 ${statusSql} ORDER BY a.created_at DESC,a.id DESC LIMIT $${values.length}`, values);
+  const groups = new Map();
+  for (const approval of approvals) {
+    const match = approvalRecordType(approval.module);
+    if (!match || !canReadApprovalModule(access, match[1])) continue;
+    const recordId = Number(approval.record_id);
+    if (!Number.isInteger(recordId) || recordId < 1 || recordId > 2147483647) continue;
+    const [entity, entry] = match;
+    if (!groups.has(entity)) groups.set(entity, { entry, ids: [] });
+    groups.get(entity).ids.push(recordId);
+  }
+  const visible = new Map();
+  await Promise.all([...groups].map(async ([entity, { entry, ids }]) => {
+    const alias = entry.table.charAt(0);
+    const values = [org, [...new Set(ids)]];
+    const scope = scopeCondition(alias, entity, access, values);
+    const found = await rows(`SELECT ${alias}.id FROM ${entry.table} ${alias} WHERE ${alias}.organization_id=$1 AND ${alias}.id=ANY($2::int[]) AND ${scope}`, values);
+    visible.set(entity, new Set(found.map((record) => Number(record.id))));
+  }));
+  return approvals.filter((approval) => {
+    const match = approvalRecordType(approval.module);
+    return match && visible.get(match[0])?.has(Number(approval.record_id));
+  });
+}
+
 /** Authorization bootstrap payload: permissions, effective scope, allowed modules. */
 async function buildMe(req) {
   const granted = req.access?.permissions || (await permissionKeys(req.user.id));
@@ -452,7 +508,7 @@ router.get("/workspace", async (req, res, next) => {
         : can(access, "view_audit")
           ? rows("SELECT a.id,a.action,a.module,a.record_id,a.created_at,u.display_name AS user_name FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id WHERE a.organization_id=$1 AND a.module=ANY($2::text[]) ORDER BY a.created_at DESC LIMIT 100", [org, [...AUDIT_SYSTEM_MODULES]])
           : [],
-      can(access, "approve") ? rows("SELECT * FROM approvals WHERE organization_id=$1 ORDER BY created_at DESC LIMIT 100", [org]) : [],
+      can(access, "approve") ? scopedApprovals(org, access, { limit: 100 }) : [],
     ]);
     // Payment-plan presence per contract, for callers who may see money only, so
     // the register can flag contracts Finance still has to plan. One grouped
@@ -762,18 +818,21 @@ router.get("/access-matrix", requireAdmin(), async (req, res, next) => {
 });
 router.put("/roles/:id/permissions", requirePermission("manage_permissions"), async (req,res,next)=>{try{const roleId=id(req.params.id,"role_id");await guardRoleChange(req,roleId,await organizationId());const keys=(Array.isArray(req.body?.permissions)?req.body.permissions:[]).map(String);if(!isAdminAccount(req)){const reserved=keys.filter((key)=>RESERVED_ROLE_PERMISSIONS.has(key));if(reserved.length)return res.status(403).json({error:`only the System Administrator can grant ${reserved.join(", ")}`});}await withTransaction(async(client)=>{await client.query("DELETE FROM role_permissions WHERE role_id=$1",[roleId]);for(const key of keys)await client.query("INSERT INTO role_permissions(role_id,permission_id) SELECT $1,id FROM permissions WHERE permission_key=$2 ON CONFLICT DO NOTHING",[roleId,String(key)]);});clearAccessCache();await audit(req,"updated","role_permissions",roleId);res.json({ok:true});}catch(e){next(e);}});
 router.get("/users", requirePermission("manage_users"), async (req,res,next)=>{try{const result=await rows(`SELECT u.id,u.email,u.display_name,u.role,u.active,u.created_at,${USER_ROLES_JSON} AS roles,${USER_DEPARTMENTS_JSON} AS departments FROM users u WHERE u.organization_id=$1 ORDER BY u.display_name`,[await organizationId()]);res.json(result);}catch(e){next(e);}});
-router.post("/users", requirePermission("manage_users"), async (req,res,next)=>{try{const password=String(req.body?.password||"");if(password.length<8)return res.status(400).json({error:"password must be at least 8 characters"});if(isProduction()&&password===demoPasswordFor(String(req.body?.email||"").toLowerCase()))return res.status(400).json({error:"that password follows the published demo scheme; choose another"});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map(Number))];let departmentIds=[...new Set((Array.isArray(req.body?.department_ids)?req.body.department_ids:[]).map(Number))].filter(Boolean);if(!roleIds.length)return res.status(400).json({error:"select at least one role for the staff member"});if(roleIds.some((roleId)=>!Number.isInteger(roleId)||roleId<1))return res.status(400).json({error:"one or more selected roles are invalid"});const org=await organizationId();await assignableRoles(req,roleIds,org);
+router.post("/users", requirePermission("manage_users"), async (req,res,next)=>{try{const password=String(req.body?.password||"");if(password.length<8||password.length>128)return res.status(400).json({error:"password must be between 8 and 128 characters"});if(isProduction()&&password===demoPasswordFor(String(req.body?.email||"").toLowerCase()))return res.status(400).json({error:"that password follows the published demo scheme; choose another"});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map(Number))];let departmentIds=[...new Set((Array.isArray(req.body?.department_ids)?req.body.department_ids:[]).map(Number))].filter(Boolean);if(!roleIds.length)return res.status(400).json({error:"select at least one role for the staff member"});if(roleIds.some((roleId)=>!Number.isInteger(roleId)||roleId<1))return res.status(400).json({error:"one or more selected roles are invalid"});const org=await organizationId();await assignableRoles(req,roleIds,org);
     // Every staff member belongs to a department, or no department list would
     // ever show them. Without a choice, the role's home department is used.
     if(!departmentIds.length){const roleNames=await rows("SELECT name FROM roles WHERE id=ANY($1::int[]) AND organization_id=$2",[roleIds,org]);const homes=roleNames.map((row)=>ROLE_HOME_DEPARTMENT[row.name]).filter(Boolean);if(homes.length)departmentIds=(await rows("SELECT id FROM departments WHERE organization_id=$1 AND active AND name=ANY($2::text[])",[org,homes])).map((row)=>Number(row.id));}
     if(!departmentIds.length)return res.status(400).json({error:"choose a department for the staff member"});
     const liveDepartments=await rows("SELECT id FROM departments WHERE organization_id=$1 AND active AND id=ANY($2::int[])",[org,departmentIds]);
     if(liveDepartments.length!==departmentIds.length)return res.status(400).json({error:"one or more selected departments do not exist or are inactive"});const newEmail=text(req.body?.email,"email").toLowerCase();if(await queryOne("SELECT 1 FROM users WHERE LOWER(email)=$1",[newEmail]))return res.status(409).json({error:"a staff account with this email already exists"});const r=await queryOne("INSERT INTO users(organization_id,email,password_hash,display_name,role) VALUES($1,$2,$3,$4,'staff') RETURNING id,email,display_name,role,active,created_at",[org,text(req.body?.email,"email").toLowerCase(),hashPassword(password),text(req.body?.display_name,"display_name",80)]);for(const roleId of roleIds)await query("INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE id=$2 AND organization_id=$3",[r.id,id(roleId,"role_id"),org]);for(const departmentId of departmentIds)await query("INSERT INTO user_departments(user_id,department_id) SELECT $1,id FROM departments WHERE id=$2 AND organization_id=$3",[r.id,id(departmentId,"department_id"),org]);clearAccessCache();await audit(req,"created","user",r.id,{role_ids:roleIds});res.status(201).json(r);}catch(e){next(e);}});
-router.put("/users/:id", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");const org=await organizationId();const target=await guardTargetUser(req,userId,org,{allowSelf:false});const r=await queryOne("UPDATE users SET display_name=COALESCE($1,display_name),active=COALESCE($2,active) WHERE id=$3 AND organization_id=$4 RETURNING id,email,display_name,role,active,created_at",[req.body?.display_name||null,req.body?.active===undefined?null:Boolean(req.body.active),userId,org]);
+router.put("/users/:id", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");const org=await organizationId();const target=await guardTargetUser(req,userId,org,{allowSelf:false});
+    // A bad new password is refused before anything is saved, so the request never half-applies.
+    if(req.body?.password&&(String(req.body.password).length<8||String(req.body.password).length>128))return res.status(400).json({error:"password must be between 8 and 128 characters"});
+    const r=await queryOne("UPDATE users SET display_name=COALESCE($1,display_name),active=COALESCE($2,active) WHERE id=$3 AND organization_id=$4 RETURNING id,email,display_name,role,active,created_at",[req.body?.display_name||null,req.body?.active===undefined?null:Boolean(req.body.active),userId,org]);
     // A password reset changes the credential and nothing else: the user id, role,
     // department, permissions and every owned record are untouched. Live sessions
     // are dropped so a token minted against the old password cannot outlive it.
-    if(req.body?.password){if(String(req.body.password).length<8)return res.status(400).json({error:"password must be at least 8 characters"});if(isProduction()&&String(req.body.password)===demoPasswordFor(target.email))return res.status(400).json({error:"that password follows the published demo scheme; choose another"});await query("UPDATE users SET password_hash=$1 WHERE id=$2",[hashPassword(req.body.password),userId]);await query("DELETE FROM sessions WHERE user_id=$1",[userId]);clearAccessCache();await audit(req,"password_reset","user",userId,{email:target.email,sessions_invalidated:true});}
+    if(req.body?.password){if(String(req.body.password).length<8||String(req.body.password).length>128)return res.status(400).json({error:"password must be between 8 and 128 characters"});if(isProduction()&&String(req.body.password)===demoPasswordFor(target.email))return res.status(400).json({error:"that password follows the published demo scheme; choose another"});await query("UPDATE users SET password_hash=$1 WHERE id=$2",[hashPassword(req.body.password),userId]);await query("DELETE FROM sessions WHERE user_id=$1",[userId]);clearAccessCache();await audit(req,"password_reset","user",userId,{email:target.email,sessions_invalidated:true});}
     if(!r)return res.status(404).json({error:"user not found"});clearAccessCache();if(req.body?.active===false||req.body?.active===0||req.body?.active==="false")await revokeUserSessions(userId);await audit(req,"updated","user",userId);res.json(r);}catch(e){next(e);}});
 router.put("/users/:id/roles", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");const org=await organizationId();await guardTargetUser(req,userId,org,{allowSelf:true});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map((roleId)=>id(roleId,"role_id")))];if(roleIds.length)await assignableRoles(req,roleIds,org);
     // An administrator may move THEMSELVES only between system-administration
@@ -829,9 +888,37 @@ router.get("/audit", requireAnyPermission("view_audit", "manage_settings"), asyn
     });
   } catch (error) { next(error); }
 });
-router.get("/approvals", requireAnyPermission("approve", "view_reports"), async (req, res, next) => { try { const o = await organizationId(); const status = req.query.status || null; if (status && !["pending", "approved", "rejected"].includes(status)) return res.status(400).json({ error: "status is invalid" }); res.json(await rows(`SELECT a.*,r.display_name AS requested_by_name,d.display_name AS decided_by_name FROM approvals a LEFT JOIN users r ON r.id=a.requested_by LEFT JOIN users d ON d.id=a.approved_by WHERE a.organization_id=$1 ${status ? "AND a.status=$2" : ""} ORDER BY a.created_at DESC,a.id DESC LIMIT 250`, status ? [o, status] : [o])); } catch (e) { next(e); } });
-router.post("/approvals", requirePermission("approve"), async (req, res, next) => { try { const o = await organizationId(); const r = await queryOne("INSERT INTO approvals(organization_id,module,record_id,requested_by,status,notes) VALUES($1,$2,$3,$4,'pending',$5) RETURNING *", [o, text(req.body?.module, "module", 80), id(req.body?.record_id, "record_id"), req.user.id, req.body?.notes || null]); await audit(req, "created", "approval", r.id); res.status(201).json(r); } catch (e) { next(e); } });
-router.put("/approvals/:id", requirePermission("approve"), async (req, res, next) => { try { const approvalId = id(req.params.id, "approval_id"); const status = String(req.body?.status || ""); if (!["approved", "rejected", "pending"].includes(status)) return res.status(400).json({ error: "status must be approved, rejected, or pending" }); const o = await organizationId(); const r = await queryOne("UPDATE approvals SET status=$1,approved_by=CASE WHEN $1='pending' THEN NULL ELSE $2 END,decided_at=CASE WHEN $1='pending' THEN NULL ELSE NOW() END,notes=COALESCE($3,notes) WHERE id=$4 AND organization_id=$5 RETURNING *", [status, req.user.id, req.body?.notes || null, approvalId, o]); if (!r) return res.status(404).json({ error: "approval not found" }); await audit(req, status === "pending" ? "reopened" : "decided", "approval", r.id, { status }); res.json(r); } catch (e) { next(e); } });
+router.get("/approvals", requireAnyPermission("approve", "view_reports"), async (req, res, next) => {
+  try {
+    const status = req.query.status || null;
+    if (status && !["pending", "approved", "rejected"].includes(status)) return res.status(400).json({ error: "status is invalid" });
+    res.json(await scopedApprovals(await organizationId(), req.access, { status, names: true }));
+  } catch (error) { next(error); }
+});
+router.post("/approvals", requirePermission("approve"), async (req, res, next) => {
+  try {
+    const org = await organizationId();
+    const moduleName = text(req.body?.module, "module", 80).toLowerCase();
+    const recordId = id(req.body?.record_id, "record_id");
+    if (!await approvalRecordVisible(req.access, moduleName, recordId, org)) return res.status(404).json({ error: "record not found" });
+    const approval = await queryOne("INSERT INTO approvals(organization_id,module,record_id,requested_by,status,notes) VALUES($1,$2,$3,$4,'pending',$5) RETURNING *", [org, moduleName, String(recordId), req.user.id, req.body?.notes || null]);
+    await audit(req, "created", "approval", approval.id);
+    res.status(201).json(approval);
+  } catch (error) { next(error); }
+});
+router.put("/approvals/:id", requirePermission("approve"), async (req, res, next) => {
+  try {
+    const approvalId = id(req.params.id, "approval_id");
+    const status = String(req.body?.status || "");
+    if (!["approved", "rejected", "pending"].includes(status)) return res.status(400).json({ error: "status must be approved, rejected, or pending" });
+    const org = await organizationId();
+    const current = await queryOne("SELECT * FROM approvals WHERE id=$1 AND organization_id=$2", [approvalId, org]);
+    if (!current || !await approvalRecordVisible(req.access, current.module, current.record_id, org)) return res.status(404).json({ error: "approval not found" });
+    const approval = await queryOne("UPDATE approvals SET status=$1,approved_by=CASE WHEN $1='pending' THEN NULL ELSE $2 END,decided_at=CASE WHEN $1='pending' THEN NULL ELSE NOW() END,notes=COALESCE($3,notes) WHERE id=$4 AND organization_id=$5 RETURNING *", [status, req.user.id, req.body?.notes || null, approvalId, org]);
+    await audit(req, status === "pending" ? "reopened" : "decided", "approval", approval.id, { status });
+    res.json(approval);
+  } catch (error) { next(error); }
+});
 
 // Leads. Paginated twin is opt-in: without `page`/`page_size` the response is
 // still the bare array this route has always returned, which the workspace
@@ -846,7 +933,7 @@ router.post("/leads", requireModuleAccess("leads"), requirePermission("create"),
 // each with the Customer Service task it was handed to, so Sales can follow it
 // from arrival to client. Same module and record scope as Leads.
 router.get("/requests", requireModuleAccess("leads"), async(req,res,next)=>{try{
-  const values=[await organizationId()];const visible=scopeCondition("l","lead",req.access,values);
+  const values=[await organizationId()];const visible=scopeCondition("l","lead",req.access,values);const existingClientVisible=scopeCondition("ec","client",req.access,values);
   res.json(await rows(`SELECT l.*, p.name AS property_name, t.status AS task_status, t.assigned_to AS task_assignee_id, u.display_name AS task_assignee, t.submitted_at AS task_submitted_at, t.approved_at AS task_approved_at,
       tb.display_name AS task_assigned_by, rv.display_name AS task_reviewer, ap.display_name AS task_approved_by, t.updated_at AS task_updated_at,
       ap_row.starts_at AS appointment_starts_at,
@@ -858,7 +945,7 @@ router.get("/requests", requireModuleAccess("leads"), async(req,res,next)=>{try{
     LEFT JOIN appointments ap_row ON ap_row.id=l.appointment_id
     LEFT JOIN clients cl ON cl.id=l.client_id LEFT JOIN users cv ON cv.id=l.converted_by
     LEFT JOIN LATERAL (SELECT c.body, c.created_at FROM task_comments c WHERE c.task_id=t.id AND c.author_id=t.assigned_to ORDER BY c.created_at DESC, c.id DESC LIMIT 1) rp ON TRUE
-    LEFT JOIN clients ec ON l.client_id IS NULL AND ec.id = ${EXISTING_CLIENT_SQL}
+    LEFT JOIN clients ec ON l.client_id IS NULL AND ec.id = ${EXISTING_CLIENT_SQL} AND ec.organization_id=$1 AND ${existingClientVisible}
     WHERE l.organization_id=$1 AND l.source IN ('website','website-contact') AND ${visible} ORDER BY l.created_at DESC LIMIT 500`,values));
 }catch(e){next(e);}});
 // Sales arranges the agreed appointment for a request once Customer Service
@@ -933,9 +1020,9 @@ router.post("/leads/:id/convert", requireModuleAccess("leads"), async(req,res,ne
     if(!(await inSalesDepartment(req.user.id)||can(req.access,"approve_management")))return res.status(403).json({error:"only Sales or the MD can approve a customer becoming a client"});
     const leadId=id(req.params.id,"lead_id");const values=[leadId,await organizationId()];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND ${scopeCondition("l","lead",req.access,values)}`,values);if(!lead)return res.status(404).json({error:"lead not found"});if(lead.client_id)return res.status(409).json({error:"already a client"});
     const mode=req.body?.mode==="new"?"new":req.body?.mode==="existing"?"existing":"auto";
-    const existing=mode==="new"?null:await findExistingClient(values[1],{email:lead.email,phone:lead.phone});
+    const match=mode==="new"?null:await findExistingClient(values[1],{email:lead.email,phone:lead.phone});const existing=match?await Client.get(match.id):null;
     if(mode==="existing"&&!existing)return res.status(409).json({error:"no existing client matches this customer; choose 'new client'"});
-    if(existing){await query("UPDATE leads SET client_id=$1,status='converted',converted_at=NOW(),converted_by=$3 WHERE id=$2",[existing.id,lead.id,req.user.id]);await audit(req,"converted","lead",lead.id,{client_id:existing.id,existing:true});return res.json(await queryOne("SELECT * FROM clients WHERE id=$1",[existing.id]));}
+    if(existing){await query("UPDATE leads SET client_id=$1,status='converted',converted_at=NOW(),converted_by=$3 WHERE id=$2",[existing.id,lead.id,req.user.id]);await audit(req,"converted","lead",lead.id,{client_id:existing.id,existing:true});return res.json(existing);}
     const clientType=lead.service==="sell"?"seller":lead.service==="rent"?"tenant":"buyer";const client=await queryOne("INSERT INTO clients(organization_id,name,email,phone,client_type,status,notes,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,$10,'lead',$5,$6,$7,$8,$9) RETURNING *",[values[1],lead.name,lead.email,lead.phone,lead.notes,lead.owner_id,lead.created_by,lead.department_id,lead.visibility,clientType]);await query("UPDATE leads SET client_id=$1,status='converted',converted_at=NOW(),converted_by=$3 WHERE id=$2",[client.id,lead.id,req.user.id]);await audit(req,"converted","lead",lead.id,{client_id:client.id});res.status(201).json(client);}catch(e){next(e);}});
 // Follow-ups. Opt-in pagination; the default response is the bare array the
 // workspace aggregate and the existing tests depend on.
@@ -1025,6 +1112,10 @@ router.put("/records/:entity/:id/access", requireAdmin(), async (req, res, next)
 async function requireShareable(req, entity, recordId) {
   const { table, alias } = recordTable(entity);
   const access = req.access;
+  // Sharing hands a record to someone else, so it needs full use of its module:
+  // a read-only grant, or an administrator (who does no business), is not enough.
+  // Answered as "not found", so the record's existence is not disclosed either.
+  if (!canAccessModule(access, recordTables[entity].module)) { const e = new Error("record not found"); e.status = 404; throw e; }
   const values = [recordId, await organizationId()];
   const visible = scopeCondition(alias, entity, access, values);
   const record = await queryOne(`SELECT ${alias}.* FROM ${table} ${alias} WHERE ${alias}.id=$1 AND ${alias}.organization_id=$2 AND ${visible}`, values);
@@ -1062,8 +1153,8 @@ router.delete("/records/:entity/:id/shares/:shareId", requirePermission("edit"),
     const entity = String(req.params.entity || "");
     const record = await requireShareable(req, entity, id(req.params.id, "record_id"));
     const shareId = id(req.params.shareId, "share_id");
-    const removed = await removeRecordShare(shareId);
-    if (!removed || Number(removed.record_id) !== Number(record.id) || removed.entity !== entity) return res.status(404).json({ error: "share not found" });
+    const removed = await removeRecordShare(shareId, entity, record.id);
+    if (!removed) return res.status(404).json({ error: "share not found" });
     await audit(req, "unshared", entity, record.id, { share_id: shareId });
     res.json({ ok: true });
   } catch (e) { next(e); }

@@ -3,6 +3,9 @@
 // `Matrix ...` / `matrix-...` fixture names, verified beforehand to contain no
 // real business records.
 import { query, closeDatabase } from "./backend/src/db.js";
+import { assertTestDatabase } from "./test_support/harness.mjs";
+
+await assertTestDatabase("cleanup_test_artifacts");
 
 const users = (await query("SELECT id,email FROM users WHERE email LIKE 'matrix.%@mkuyu.local' ORDER BY id")).rows;
 const ids = users.map((u) => u.id);

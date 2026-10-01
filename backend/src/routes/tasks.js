@@ -12,7 +12,7 @@ import { arrangeRequestAppointment } from "../org/requestAppointment.js";
 import { audit } from "../org/audit.js";
 import { TASK_PRIORITIES, TASK_STATUSES, TASK_LINK_ENTITIES, canTransitionTask, normalizeTaskPriority, normalizeTaskStatus, taskActionsFor } from "../tasks/workflow.js";
 import { attentionCount, linkedRecordExists, listComments, listHistory, listTasks, taskVisible } from "../tasks/tasks.js";
-import { assignableDepartmentIds, canAssignTo, canReviewTask, mayAssign, mayReview } from "../tasks/authority.js";
+import { assignableDepartmentIds, canAssignTo, canReviewTask, mayAssign, mayAssignReviewer, mayReview } from "../tasks/authority.js";
 
 const router = Router();
 const MAX_INT4 = 2147483647;
@@ -86,9 +86,16 @@ router.get("/departments", route(async (req, res) => {
 router.get("/reviewers", route(async (req, res) => {
   if (!await mayAssign(req)) return res.status(403).json({ error: "assignment requires the assign_tasks permission" });
   const org = await organizationId();
+  const access = req.access || (await currentAccess());
+  const organizationWide = req.user?.role === "admin" || access?.isAdmin || access?.scope === "organization";
+  const departments = organizationWide ? null : await assignableDepartmentIds(access?.departmentIds || []);
+  if (departments && !departments.length) return res.json([]);
   res.json((await query(`SELECT DISTINCT u.id, u.display_name, u.email,
       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', d.id, 'name', d.name) ORDER BY d.name) FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=u.id AND d.active=TRUE), '[]'::jsonb) AS departments
-    FROM users u JOIN user_roles ur ON ur.user_id=u.id JOIN roles r ON r.id=ur.role_id AND r.active=TRUE JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.organization_id=$1 AND u.active=TRUE AND p.permission_key='review_tasks' ORDER BY u.display_name LIMIT 200`, [org])).rows);
+    FROM users u JOIN user_roles ur ON ur.user_id=u.id JOIN roles r ON r.id=ur.role_id AND r.active=TRUE JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id
+    WHERE u.organization_id=$1 AND u.active=TRUE AND p.permission_key='review_tasks'
+      AND ($2::int[] IS NULL OR EXISTS (SELECT 1 FROM user_departments ud2 JOIN departments d2 ON d2.id=ud2.department_id WHERE ud2.user_id=u.id AND d2.active=TRUE AND ud2.department_id=ANY($2::int[])))
+    ORDER BY u.display_name LIMIT 200`, [org, departments])).rows);
 }));
 
 router.get("/", route(async (req, res) => {
@@ -121,8 +128,7 @@ router.post("/", route(async (req, res) => {
   let reviewerId = null;
   if (body.reviewer_id !== undefined && body.reviewer_id !== null && body.reviewer_id !== "") {
     reviewerId = id(body.reviewer_id, "reviewer_id");
-    const found = (await query("SELECT id FROM users WHERE id=$1 AND organization_id=$2 AND active=TRUE", [reviewerId, await organizationId()])).rows[0];
-    if (!found) return res.status(400).json({ error: "reviewer not found" });
+    if (!await mayAssignReviewer(req, reviewerId)) return res.status(400).json({ error: "reviewer is not eligible within your assignment scope" });
     if (Number(reviewerId) === Number(assigneeId)) return res.status(400).json({ error: "reviewer cannot be the assignee" });
   }
   let linkEntity = null;
@@ -135,7 +141,18 @@ router.post("/", route(async (req, res) => {
     if (!await linkedRecordExists(linkEntity, linkId)) return res.status(400).json({ error: "linked record not found" });
   }
   const access = req.access || (await currentAccess());
-  const departmentId = body.department_id !== undefined && body.department_id !== null && body.department_id !== "" ? id(body.department_id, "department_id") : (grant.departmentId || (access?.departmentIds || [])[0] || null);
+  let departmentId = grant.departmentId || (access?.departmentIds || [])[0] || null;
+  if (body.department_id !== undefined && body.department_id !== null && body.department_id !== "") {
+    const requestedDepartmentId = id(body.department_id, "department_id");
+    const assigneeDepartments = (grant.assignee.departments || []).map(Number);
+    const allowedDepartments = access?.isAdmin || access?.scope === "organization"
+      ? assigneeDepartments
+      : (await assignableDepartmentIds(access?.departmentIds || [])).map(Number);
+    if (!assigneeDepartments.includes(requestedDepartmentId) || !allowedDepartments.includes(requestedDepartmentId)) {
+      return res.status(403).json({ error: "department_id is outside your authorized assignment scope" });
+    }
+    departmentId = requestedDepartmentId;
+  }
   const visibility = access?.isAdmin || access?.scope === "organization" ? "organization" : departmentId ? "department" : "own";
   const created = await queryOne("INSERT INTO tasks (organization_id,title,description,assigned_by,assigned_to,reviewer_id,department_id,visibility,priority,due_date,status,linked_entity,linked_record_id,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'assigned',$11,$12,$13) RETURNING id", [await organizationId(), title, description, req.user.id, assigneeId, reviewerId, departmentId, visibility, priority, due(body.due_date), linkEntity, linkId, req.user.id]);
   const task = await taskVisible(created.id, req.access || (await currentAccess()));
@@ -329,6 +346,7 @@ router.put("/:id/assign", route(async (req, res) => {
     else reviewerId = id(req.body.reviewer_id, "reviewer_id");
     if (reviewerId && Number(reviewerId) === Number(assigneeId)) return res.status(400).json({ error: "reviewer cannot be the assignee" });
   }
+  if (reviewerId && !await mayAssignReviewer(req, reviewerId)) return res.status(400).json({ error: "reviewer is not eligible within your assignment scope" });
   const from = normalizeTaskStatus(task.status);
   const resetTo = ["submitted", "under_review", "approved"].includes(from) ? "assigned" : from;
   const updated = await queryOne("UPDATE tasks SET assigned_to=$1, reviewer_id=$2, department_id=COALESCE($3,department_id), status=$4, updated_at=NOW() WHERE id=$5 RETURNING id", [assigneeId, reviewerId, grant.departmentId || null, resetTo, taskId]);

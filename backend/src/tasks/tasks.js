@@ -4,7 +4,7 @@
 // assigned/created/review rows plus explicitly shared rows.
 import { query, queryOne } from "../db.js";
 import { organizationId } from "../org/rbac.js";
-import { currentAccess } from "../org/access.js";
+import { currentAccess, scopeCondition } from "../org/access.js";
 import { TASK_LINK_ENTITIES } from "./workflow.js";
 
 const ENTITY = "task";
@@ -125,6 +125,9 @@ export async function linkedRecordExists(entity, recordId) {
   // not a recognised business record has no table to query and is refused.
   if (!table || !TASK_LINK_ENTITIES.has(key)) return false;
   const org = await organizationId();
-  const row = await queryOne(`SELECT id FROM ${table} WHERE id=$1 AND organization_id=$2`, [recordId, org]);
+  const alias = table.charAt(0);
+  const values = [recordId, org];
+  const visible = scopeCondition(alias, key, currentAccess(), values);
+  const row = await queryOne(`SELECT ${alias}.id FROM ${table} ${alias} WHERE ${alias}.id=$1 AND ${alias}.organization_id=$2 AND ${visible}`, values);
   return Boolean(row);
 }

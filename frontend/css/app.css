@@ -1800,6 +1800,15 @@ td .row-actions { flex-wrap: nowrap; }
   font-size: 12px;
 }
 .org-intro-stats strong { color: #fff; font-size: 20px; }
+/* Administration pages: one full-width column, so tables show their actions
+   without a sideways scroll. */
+.org-grid.admin-pages > * { grid-column: 1 / -1; }
+.org-grid.admin-pages td .table-sub { white-space: normal; }
+/* The administrator's "look at this first" list on the Staff page. */
+.admin-todo { margin: 10px 0 0; padding-left: 18px; color: #fff; font-size: 13px; }
+.admin-todo li { margin: 4px 0; }
+.admin-todo .btn { margin-left: 6px; }
+.add-panel > .form-grid { margin-top: 0; padding: 18px 20px 20px; border-top: 0; }
 .org-grid .metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .org-grid .form-grid { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
 .org-grid .btn { white-space: nowrap; }

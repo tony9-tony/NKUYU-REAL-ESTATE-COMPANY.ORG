@@ -21,6 +21,7 @@ import fs from "node:fs";
 import path from "node:path";
 import JSZip from "jszip";
 import { documentUploadsDir, extensionMime, resolveStoredFile } from "../uploads.js";
+import { assertSafeDocxArchive } from "./docxSafety.js";
 import { contractFileName, contractStoredName, imageSize, unknownPlaceholders } from "./workflow.js";
 
 const SIGNATURE_SENTINEL = "MKUYU-SIGNATURE";
@@ -203,7 +204,7 @@ async function addSignatureMedia(zip, image, type) {
 
 async function openTemplate(buffer) {
   try {
-    const zip = await JSZip.loadAsync(buffer);
+    const zip = assertSafeDocxArchive(await JSZip.loadAsync(buffer));
     if (!zip.file("word/document.xml")) throw new Error("missing body");
     return zip;
   } catch {
