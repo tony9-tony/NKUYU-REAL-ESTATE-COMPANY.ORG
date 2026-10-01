@@ -4,7 +4,7 @@
    One visual language for the whole workspace: white surfaces on a light
    neutral canvas, a deep-green brand rail, green for brand / primary actions /
    positive states, gold used sparingly for emphasis, and neutral greys for
-   structure. DM Sans throughout.
+   structure. Manrope throughout, Cormorant Garamond for display titles.
 
    Structure of this file
      1. Tokens              6. Buttons & controls     11. Registers (cards, rows)
@@ -21,41 +21,48 @@
 /* 1. Tokens ================================================================ */
 
 :root {
-  /* Brand */
-  --brand-950: #0a2419;
-  --brand-900: #0d2f23;
-  --brand-800: #123a2b;
-  --brand-700: #17513a;
-  --green: #17734a;
-  --green-hover: #115c3a;
-  --green-600: #1f8a5a;
-  --green-soft: #eaf4ee;
-  --green-softer: #f3f9f5;
-  --green-ring: rgba(23, 115, 74, 0.22);
+  /* Brand. The same identity as the public website (mkuyu_ui): a warm
+     near-black, bone canvas and a bronze accent, so staff and visitors see one
+     MKUYU. The `--green*` names are kept (they are used everywhere) but now
+     carry the brand's primary colour. */
+  --brand-950: #0e0c0a;
+  --brand-900: #16130f;
+  --brand-800: #221d18;
+  --brand-700: #2e2721;
+  --green: #2e2721;
+  --green-hover: #16130f;
+  --green-600: #4a4038;
+  --green-soft: #f1e6d6;
+  --green-softer: #f9f4ec;
+  --green-ring: rgba(138, 99, 64, 0.28);
 
-  /* Gold: emphasis only (attention, "yours", featured). */
-  --gold: #c9a63f;
-  --gold-strong: #dcb850;
-  --gold-ink: #6b5213;
-  --gold-soft: #fbf4e0;
+  /* Bronze: emphasis only (attention, "yours", featured). */
+  --gold: #a67c52;
+  --gold-strong: #c29a6b;
+  --gold-ink: #6f4f2e;
+  --gold-soft: #f9f4ec;
 
   /* Canvas + surfaces */
-  --canvas: #f4f5f3;
+  --canvas: #f7f4ef;
   --surface: #ffffff;
-  --surface-alt: #f8f9f7;
-  --surface-sunken: #f1f3f0;
-  --border: #e3e7e2;
-  --border-strong: #cdd5cd;
+  --surface-alt: #fbf9f5;
+  --surface-sunken: #f3efe8;
+  --border: #e4ddd2;
+  --border-strong: #d9d1c5;
 
   /* Text */
-  --ink: #15201a;
-  --ink-2: #3a4740;
-  --muted: #66736b;
-  --muted-2: #8a968e;
+  --ink: #16130f;
+  --ink-2: #4a4540;
+  --muted: #6f675e;
+  --muted-2: #948b80;
 
-  /* Status */
-  --success: #17734a;
-  --success-soft: #e8f4ed;
+  /* Status (positive stays green, as on the website) */
+  --success: #2f6f4f;
+  --success-soft: #e9f2ec;
+
+  /* Type */
+  --font: "Manrope", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --display: "Cormorant Garamond", Georgia, "Times New Roman", serif;
   --danger: #b42f2f;
   --danger-hover: #992626;
   --danger-soft: #fcecec;
@@ -126,7 +133,7 @@ body {
   margin: 0;
   min-height: 100vh;
   color: var(--ink);
-  font-family: "DM Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font);
   font-size: var(--fs-base);
   line-height: 1.5;
   background: var(--canvas);
@@ -200,11 +207,16 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: non
   gap: 40px;
   padding: clamp(32px, 4vw, 64px);
   overflow: hidden;
+  /* A MKUYU development, darkened so the copy stays readable (same photo
+     family as the public website's hero). */
   background:
-    radial-gradient(120% 80% at 100% 100%, rgba(201, 166, 63, 0.10), transparent 55%),
-    linear-gradient(160deg, var(--brand-900), var(--brand-950));
+    linear-gradient(160deg, rgba(22, 19, 15, 0.86), rgba(14, 12, 10, 0.72) 55%, rgba(14, 12, 10, 0.9)),
+    radial-gradient(120% 80% at 100% 100%, rgba(166, 124, 82, 0.18), transparent 55%),
+    url("/assets/hero/mkuyu-project-01-1280.jpg") center / cover no-repeat,
+    var(--brand-950);
   color: #fff;
 }
+.auth-art h1 { font-family: var(--display); font-weight: 600; letter-spacing: 0; }
 .auth-art::after {
   content: "";
   position: absolute;
@@ -232,10 +244,19 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: non
   flex: 0 0 auto;
   border-radius: 11px;
   background: linear-gradient(145deg, var(--gold-strong), var(--gold));
-  color: #1a2a20;
+  color: #16130f;
   font-size: 18px;
   font-weight: 800;
   box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.08);
+}
+/* The real MKUYU logo (round badge), used in place of the letter mark. */
+.brand-mark-img, .brand-logo-img {
+  display: block;
+  padding: 0;
+  object-fit: cover;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.14), 0 4px 12px rgba(0, 0, 0, 0.25);
 }
 
 .auth-art-copy { max-width: 560px; margin: auto 0; }
@@ -243,10 +264,10 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: non
   display: inline-block;
   margin-bottom: 24px;
   padding: 7px 14px;
-  border: 1px solid rgba(201, 166, 63, 0.4);
+  border: 1px solid rgba(166, 124, 82, 0.4);
   border-radius: var(--radius-pill);
   color: var(--gold-strong);
-  background: rgba(201, 166, 63, 0.08);
+  background: rgba(166, 124, 82, 0.08);
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -338,14 +359,18 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: non
   flex-direction: column;
   width: var(--sidebar-w);
   padding: 18px 12px 12px;
-  background: linear-gradient(180deg, var(--brand-900), var(--brand-950));
+  /* Brand rail with a faint MKUYU development behind the lower half. */
+  background:
+    linear-gradient(180deg, var(--brand-900) 0%, rgba(22, 19, 15, 0.97) 45%, rgba(14, 12, 10, 0.9) 100%),
+    url("/assets/hero/mkuyu-project-02-1280.jpg") 35% bottom / cover no-repeat,
+    var(--brand-950);
   color: rgba(255, 255, 255, 0.78);
   border-right: 1px solid rgba(0, 0, 0, 0.2);
 }
 
 .brand { display: flex; align-items: center; gap: 12px; padding: 0 8px 18px; }
 .brand-text { display: grid; gap: 1px; min-width: 0; }
-.brand-name { color: #fff; font-size: 16px; font-weight: 800; letter-spacing: 0.08em; }
+.brand-name { color: #fff; font-family: var(--display); font-size: 21px; font-weight: 700; letter-spacing: 0.08em; }
 .brand-sub { color: rgba(255, 255, 255, 0.55); font-size: 12px; }
 
 /* The navigation scrolls on its own, so the last items can never be clipped
@@ -409,7 +434,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: non
   min-width: 20px;
   padding: 1px 7px;
   border-radius: var(--radius-pill);
-  color: #1d2b23;
+  color: #16130f;
   background: var(--gold-strong);
   font-size: 11px;
   font-weight: 700;
@@ -444,7 +469,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: non
   min-width: 20px;
   padding: 1px 7px;
   border-radius: var(--radius-pill);
-  color: #1d2b23;
+  color: #16130f;
   background: var(--gold-strong);
   font-size: 11px;
   font-weight: 700;
@@ -467,7 +492,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: non
   height: 34px;
   flex: 0 0 auto;
   border-radius: 50%;
-  color: #1d2b23;
+  color: #16130f;
   background: var(--gold-soft);
   font-size: 13px;
   font-weight: 800;
@@ -521,7 +546,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: non
   backdrop-filter: saturate(160%) blur(10px);
   -webkit-backdrop-filter: saturate(160%) blur(10px);
 }
-.page-title { margin: 0; font-size: var(--fs-xl); font-weight: 700; line-height: 1.2; }
+.page-title { margin: 0; font-family: var(--display); font-size: 27px; font-weight: 700; line-height: 1.15; letter-spacing: 0; }
 .page-sub { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
 .topbar-actions { display: flex; align-items: center; gap: var(--sp-2); }
 .topbar-commands { display: flex; align-items: center; gap: var(--sp-2); }
@@ -605,13 +630,13 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: non
 .btn:active { transform: translateY(1px); }
 .btn:focus-visible { outline: none; box-shadow: var(--focus); }
 .btn:disabled, .btn[aria-disabled="true"] { opacity: 0.55; pointer-events: none; }
-.btn-primary { border-color: var(--green); color: #fff; background: var(--green); box-shadow: 0 1px 2px rgba(23, 115, 74, 0.25); }
+.btn-primary { border-color: var(--green); color: #fff; background: var(--green); box-shadow: 0 1px 2px rgba(46, 39, 33, 0.25); }
 .btn-primary:hover { border-color: var(--green-hover); background: var(--green-hover); }
 .btn-soft { border-color: transparent; color: var(--green); background: var(--green-soft); box-shadow: none; }
-.btn-soft:hover { border-color: transparent; background: #dcede3; }
+.btn-soft:hover { border-color: transparent; background: #ece6dc; }
 .btn-ghost { border-color: transparent; color: var(--ink-2); background: transparent; box-shadow: none; }
 .btn-ghost:hover { border-color: transparent; color: var(--ink); background: var(--surface-sunken); }
-.btn-gold { border-color: var(--gold); color: #1d2b23; background: var(--gold-strong); }
+.btn-gold { border-color: var(--gold); color: #16130f; background: var(--gold-strong); }
 .btn-gold:hover { background: var(--gold); }
 .btn-danger { border-color: var(--danger); color: #fff; background: var(--danger); }
 .btn-danger:hover { border-color: var(--danger-hover); background: var(--danger-hover); }
@@ -699,6 +724,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: non
 /* Segmented control (e.g. Assignments sections). */
 .segmented {
   display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   gap: 2px;
   padding: 3px;
   border: 1px solid var(--border);
@@ -944,7 +971,7 @@ input.filter-input { padding-right: 12px; background-image: none; }
 .task-priority-urgent::before { background: var(--danger); }
 .task-priority-high { border-color: #efd9a4; color: var(--warning); background: var(--warning-soft); }
 .task-priority-high::before { background: var(--gold); }
-.task-priority-medium { border-color: #cfe3d7; color: var(--green); background: var(--green-softer); }
+.task-priority-medium { border-color: #e4ddd2; color: var(--green); background: var(--green-softer); }
 .task-priority-medium::before { background: var(--green-600); }
 .task-priority-low::before { background: var(--muted-2); }
 
@@ -1027,7 +1054,7 @@ input.filter-input { padding-right: 12px; background-image: none; }
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background:
-    radial-gradient(90% 140% at 100% 0%, rgba(201, 166, 63, 0.10), transparent 60%),
+    radial-gradient(90% 140% at 100% 0%, rgba(166, 124, 82, 0.10), transparent 60%),
     var(--surface);
   box-shadow: var(--shadow-sm);
 }
@@ -1177,17 +1204,31 @@ td .row-actions { flex-wrap: nowrap; }
 
 /* 10. Dashboard ============================================================ */
 
+/* The dashboard opens on a MKUYU development, like the public website. */
 .dash-head {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
   gap: var(--sp-5);
   flex-wrap: wrap;
+  padding: 28px 28px 24px;
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(100deg, rgba(14, 12, 10, 0.9) 0%, rgba(22, 19, 15, 0.72) 55%, rgba(22, 19, 15, 0.35) 100%),
+    url("/assets/hero/mkuyu-project-02-1280.jpg") center 40% / cover no-repeat,
+    var(--brand-900);
+  color: #fff;
+  box-shadow: var(--shadow);
 }
 .dash-intro { min-width: 0; }
 .dash-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
-.dash-intro h2 { margin: 0; font-size: 24px; font-weight: 700; line-height: 1.2; }
-.dash-intro p { max-width: 64ch; margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+.dash-intro h2 { margin: 0; color: #fff; font-family: var(--display); font-size: 32px; font-weight: 700; line-height: 1.1; letter-spacing: 0; }
+.dash-intro p { max-width: 64ch; margin: 6px 0 0; color: rgba(255, 255, 255, 0.78); font-size: 14px; }
+.dash-head .chip { border-color: rgba(255, 255, 255, 0.22); color: #fff; background: rgba(255, 255, 255, 0.1); }
+.dash-head .btn:not(.btn-primary) { border-color: rgba(255, 255, 255, 0.28); color: #fff; background: rgba(255, 255, 255, 0.1); }
+.dash-head .btn:not(.btn-primary):hover { background: rgba(255, 255, 255, 0.18); }
+.dash-head .btn-primary { border-color: var(--gold); color: #fff; background: var(--gold); }
+.dash-head .btn-primary:hover { border-color: var(--gold-ink); background: var(--gold-ink); }
 .dash-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
 .dash-top { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-4); align-items: start; }
@@ -1348,7 +1389,9 @@ td .row-actions { flex-wrap: nowrap; }
   box-shadow: var(--shadow-sm);
   transition: box-shadow .2s ease, transform .2s var(--ease), border-color .2s ease;
 }
-.property-card:hover { border-color: var(--border-strong); box-shadow: var(--shadow); transform: translateY(-2px); }
+/* No lift on hover: a transformed card would carry its open "⋯" menu (a fixed
+   element) with it, so the menu jumped as the mouse moved over the card. */
+.property-card:hover { border-color: var(--border-strong); box-shadow: var(--shadow); }
 .property-media { position: relative; }
 .property-cover {
   position: relative;
@@ -1365,7 +1408,7 @@ td .row-actions { flex-wrap: nowrap; }
   gap: 6px;
   color: var(--muted-2);
   background:
-    linear-gradient(135deg, rgba(23, 115, 74, 0.05), rgba(201, 166, 63, 0.06)),
+    linear-gradient(135deg, rgba(46, 39, 33, 0.05), rgba(166, 124, 82, 0.06)),
     var(--surface-sunken);
 }
 .property-cover-empty .ic, .property-cover-fallback .ic { width: 28px; height: 28px; }
@@ -1615,6 +1658,72 @@ td .row-actions { flex-wrap: nowrap; }
 .gen-review { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
 .gen-review > .field-help { grid-column: 1 / -1; margin-bottom: 4px; padding: 10px 12px; border-radius: var(--radius); background: var(--info-soft); color: var(--info); }
 .review-heading { grid-column: 1 / -1; margin: 10px 0 0; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+/* The assignee's report on a task (e.g. Customer Service back to Sales). */
+.task-report { margin: 14px 24px 0; padding: 14px 16px; border: 1px solid var(--gold); border-left-width: 4px; border-radius: var(--radius); background: var(--gold-soft); }
+.task-report-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 6px; color: var(--gold-ink); }
+.task-report-head .ic { width: 16px; height: 16px; }
+.task-report-head .muted { margin-left: auto; font-size: 12px; }
+.task-report-outcome { margin-bottom: 6px; }
+.task-report-text { margin: 0; color: var(--ink); font-size: 14.5px; line-height: 1.6; white-space: pre-wrap; }
+.task-report-hint { margin: 8px 0 0; }
+.task-report-empty { border-style: dashed; color: var(--muted); }
+.task-brief { margin: 12px 24px 0; }
+.task-brief summary { cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 600; }
+.request-report { display: block; max-width: 46ch; margin-top: 4px; color: var(--ink-2); white-space: normal; }
+/* Where a request stands: what happened last, and who acts next. */
+.request-progress { display: block; max-width: 40ch; margin-top: 4px; color: var(--ink-2); font-weight: 600; white-space: normal; }
+.request-next { display: block; max-width: 40ch; margin-top: 2px; color: var(--gold-ink); white-space: normal; }
+
+/* Contract viewer: the generated contract, page by page, on its template. */
+.modal.modal-document { width: min(1060px, calc(100vw - 32px)); }
+.docx-viewer { max-height: 72vh; margin: 0 -4px 14px; padding: 16px; overflow: auto; border-radius: var(--radius); background: #e9e4dc; }
+.docx-pages { display: grid; justify-content: center; gap: 18px; }
+.docx-page { position: relative; overflow: hidden; background: #fff; box-shadow: 0 2px 10px rgba(22, 19, 15, 0.18); color: #222; font-family: Cambria, Georgia, "Times New Roman", serif; font-size: 11pt; line-height: 1.15; }
+.docx-header, .docx-footer, .docx-body { position: absolute; z-index: 2; }
+.docx-body { overflow: hidden; }
+.docx-layer { position: absolute; z-index: 1; max-width: none; }
+.docx-layer.docx-behind { z-index: 0; }
+.docx-p { overflow-wrap: break-word; }
+.docx-tabrow { display: flex; align-items: center; justify-content: space-between; gap: 12px; text-indent: 0; }
+.docx-tab { display: inline-block; width: 48px; }
+.docx-bullet { display: inline-block; width: 18px; text-indent: 0; }
+.docx-img img { display: inline-block; vertical-align: middle; max-width: none; }
+.docx-table { margin: 4px 0; table-layout: fixed; }
+.docx-table td { padding: 3px 6px; vertical-align: top; }
+.docx-table td .docx-p { margin: 0; }
+.docx-actions { justify-content: flex-end; }
+
+/* Contract wizard, step 1: Buying / Renting / Company and seller. */
+.gen-type { display: grid; gap: 14px; }
+.gen-type-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.gen-type-card {
+  display: grid;
+  justify-items: start;
+  align-content: start;
+  gap: 6px;
+  min-height: 160px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  color: var(--ink);
+  background: var(--surface);
+  text-align: left;
+  box-shadow: var(--shadow-sm);
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.gen-type-card:hover { border-color: var(--gold); box-shadow: var(--shadow); transform: translateY(-1px); }
+.gen-type-card.selected { border-color: var(--gold); background: var(--gold-soft); box-shadow: 0 0 0 3px var(--green-ring); }
+.gen-type-card strong { font-family: var(--display); font-size: 21px; line-height: 1.1; }
+.gen-type-icon { display: inline-grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; color: var(--gold-ink); background: var(--gold-soft); }
+.gen-type-agreement { color: var(--gold-ink); font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+.gen-type-note { color: var(--muted); font-size: 13px; }
+.gen-kind-chosen { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: var(--control-h); }
+.alert-fresh td { font-weight: 600; }
+@media (max-width: 720px) {
+  .gen-type-grid { grid-template-columns: 1fr; }
+  .gen-type-card { min-height: 0; }
+}
+
 .gen-success { display: grid; justify-items: center; gap: 10px; padding: 12px 0 4px; text-align: center; }
 .gen-success > h2 { margin: 4px 0 0; font-size: 20px; font-weight: 700; }
 .gen-success-mark { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 50%; color: #fff; background: var(--green); box-shadow: 0 0 0 8px var(--green-soft); }
@@ -1672,7 +1781,7 @@ td .row-actions { flex-wrap: nowrap; }
   border: 0;
   color: #fff;
   background:
-    radial-gradient(90% 140% at 100% 0%, rgba(201, 166, 63, 0.16), transparent 60%),
+    radial-gradient(90% 140% at 100% 0%, rgba(166, 124, 82, 0.16), transparent 60%),
     linear-gradient(160deg, var(--brand-800), var(--brand-900));
 }
 .org-intro h2 { margin: 6px 0 4px; color: #fff; font-size: 21px; font-weight: 700; }
@@ -1727,7 +1836,7 @@ td .row-actions { flex-wrap: nowrap; }
   border-radius: var(--radius-md);
   background: var(--surface);
 }
-.flow-step.is-yours { border-color: var(--gold); background: var(--gold-soft); box-shadow: 0 2px 10px rgba(201, 166, 63, 0.18); }
+.flow-step.is-yours { border-color: var(--gold); background: var(--gold-soft); box-shadow: 0 2px 10px rgba(166, 124, 82, 0.18); }
 .flow-step-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .flow-step-index {
   display: grid;
@@ -1741,9 +1850,9 @@ td .row-actions { flex-wrap: nowrap; }
   font-size: 11.5px;
   font-weight: 700;
 }
-.flow-step.is-yours .flow-step-index { color: #1d2b23; background: var(--gold); }
+.flow-step.is-yours .flow-step-index { color: #16130f; background: var(--gold); }
 .flow-step-title { font-size: 14px; font-weight: 700; }
-.flow-yours { padding: 2px 8px; border-radius: var(--radius-pill); color: #1d2b23; background: var(--gold-strong); font-size: 11px; font-weight: 700; }
+.flow-yours { padding: 2px 8px; border-radius: var(--radius-pill); color: #16130f; background: var(--gold-strong); font-size: 11px; font-weight: 700; }
 .flow-step-note { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
 .flow-step-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: auto; }
 .flow-owner { color: var(--ink-2); font-size: 12px; font-weight: 600; }

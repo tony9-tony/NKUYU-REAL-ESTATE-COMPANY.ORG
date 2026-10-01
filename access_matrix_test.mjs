@@ -188,7 +188,7 @@ async function main() {
   check(res.status === 201, "sales officer can create a client");
   const salesClient = res.payload;
 
-  res = await call("/contracts", { token: sessions.sales, method: "POST", body: { project_id: salesProject.id, client_id: salesClient.id, client_name: `Matrix Client ${stamp}`, contract_type: "new", value: 500000, notes: `matrix-${stamp}` } });
+  res = await call("/contracts", { token: sessions.sales, method: "POST", body: { project_id: salesProject.id, client_id: salesClient.id, client_name: `Matrix Client ${stamp}`, contract_type: "new", deal_type: "buy", value: 500000, notes: `matrix-${stamp}` } });
   check(res.status === 201, "sales officer can create a contract");
   const salesContract = res.payload;
   res = await call(`/contracts/${salesContract.id}/schedule`, { token: sessions.sales, method: "POST", body: { deposit: 0, installments: 2, first_due_date: "2027-01-05" } });
@@ -198,7 +198,7 @@ async function main() {
   res = await call(`/contracts/${salesContract.id}/schedule`, { token: sessions.finance_manager, method: "POST", body: { deposit: 0, installments: 2, first_due_date: "2027-01-05" } });
   check(res.status === 404, "finance cannot schedule a contract that is outside its scope");
   // An organization-visible contract is in Finance's scope, so it can be worked.
-  res = await call("/contracts", { token: sessions.director, method: "POST", body: { project_id: salesProject.id, client_name: `Matrix Fin ${stamp}`, contract_type: "new", value: 750000, notes: `matrix-fin-${stamp}` } });
+  res = await call("/contracts", { token: sessions.director, method: "POST", body: { project_id: salesProject.id, client_name: `Matrix Fin ${stamp}`, contract_type: "new", deal_type: "buy", value: 750000, notes: `matrix-fin-${stamp}` } });
   const financeContract = res.payload;
   res = await call(`/contracts/${financeContract.id}/schedule`, { token: sessions.finance_manager, method: "POST", body: { deposit: 0, installments: 2, first_due_date: "2027-01-05" } });
   check(res.status === 201, "the finance manager generates a payment schedule on an organization-visible contract");
@@ -230,7 +230,7 @@ async function main() {
   check(res.status === 403, "sales colleague is denied installments");
 
   // --- A record owned by the legal department, for cross-department checks ---
-  res = await call("/contracts", { token: sessions.legal, method: "POST", body: { project_id: salesProject.id, client_name: `Matrix Legal ${stamp}`, contract_type: "terminal", value: 900, notes: `matrix-legal-${stamp}` } });
+  res = await call("/contracts", { token: sessions.legal, method: "POST", body: { project_id: salesProject.id, client_name: `Matrix Legal ${stamp}`, contract_type: "terminal", deal_type: "buy", value: 900, notes: `matrix-legal-${stamp}` } });
   check(res.status === 201, "legal officer can create a contract in their own sector");
   const legalContract = res.payload;
   res = await call(`/contracts/${legalContract.id}`, { token: sessions.legal });
@@ -245,13 +245,21 @@ async function main() {
   check(!res.payload.some((c) => c.id === legalContract.id), "deleted record disappears from every list");
 
   // Legal holds the delete permission, because Legal controls the final record.
-  res = await call("/contracts", { token: sessions.legal, method: "POST", body: { project_id: salesProject.id, client_name: `Matrix Legal Own ${stamp}`, contract_type: "new", value: 700, notes: `matrix-legalown-${stamp}` } });
+  res = await call("/contracts", { token: sessions.legal, method: "POST", body: { project_id: salesProject.id, client_name: `Matrix Legal Own ${stamp}`, contract_type: "new", deal_type: "buy", value: 700, notes: `matrix-legalown-${stamp}` } });
   check(res.status === 201, "legal opens a record it owns");
   const legalOwnContract = res.payload;
   res = await call(`/contracts/${legalOwnContract.id}`, { token: sessions.sales, method: "DELETE" });
-  check(res.status === 403, "sales may not delete a contract record, only cancel it");
+  check([403, 404].includes(res.status), `sales may not delete Legal's contract record (${res.status})`);
   res = await call(`/contracts/${legalOwnContract.id}`, { token: sessions.legal, method: "DELETE" });
   check(res.status === 200, "legal may delete the contract record it controls");
+
+  // Deleting a contract is for the MD, Legal and Sales. Sales may delete its
+  // own contract only while it is still before approval.
+  res = await call("/contracts", { token: sessions.sales, method: "POST", body: { project_id: salesProject.id, client_name: `Matrix Sales Draft ${stamp}`, contract_type: "new", deal_type: "buy", value: 500, notes: `matrix-salesdraft-${stamp}` } });
+  check(res.status === 201, "sales opens a draft contract");
+  const salesDraft = res.payload;
+  res = await call(`/contracts/${salesDraft.id}`, { token: sessions.sales, method: "DELETE" });
+  check(res.status === 200, `sales deletes its own draft before approval (${res.status})`);
 
 
   // --- Financial data never leaks into non-financial dashboards ------------
@@ -308,7 +316,7 @@ async function main() {
   check(res.payload.modules.includes("leads") && !res.payload.modules.includes("payments"), "sales workspace advertises leads but not payments");
 
   // --- Contract lifecycle: Sales initiates, Legal owns, Finance validates, MD approves
-  res = await call("/contracts", { token: sessions.sales, method: "POST", body: { project_id: salesProject.id, client_name: `Matrix Draft ${stamp}`, contract_type: "new", value: 250000, notes: `matrix-draft-${stamp}` } });
+  res = await call("/contracts", { token: sessions.sales, method: "POST", body: { project_id: salesProject.id, client_name: `Matrix Draft ${stamp}`, contract_type: "new", deal_type: "buy", value: 250000, notes: `matrix-draft-${stamp}` } });
   check(res.status === 201 && res.payload.status === "draft", "a new contract starts as a draft");
   const draft = res.payload;
   check(Boolean(draft.contract_number), `contract gets a reference number (${draft.contract_number})`);
@@ -344,7 +352,7 @@ async function main() {
   // The full lifecycle, each step taken by the department that owns it. The
   // record is opened by the administrator so it is organization-visible, which is
   // what lets Finance and the MD act on a contract Legal owns.
-  res = await call("/contracts", { token: sessions.director, method: "POST", body: { project_id: salesProject.id, client_name: `Matrix Flow ${stamp}`, contract_type: "new", value: 400000, requires_management_approval: true, notes: `matrix-flow-${stamp}` } });
+  res = await call("/contracts", { token: sessions.director, method: "POST", body: { project_id: salesProject.id, client_name: `Matrix Flow ${stamp}`, contract_type: "new", deal_type: "buy", value: 400000, requires_management_approval: true, notes: `matrix-flow-${stamp}` } });
   check(res.status === 201, "an organization-visible contract can be opened");
   const flow = res.payload;
   const step = async (action, token, extra = {}) => call(`/contracts/${flow.id}/transition`, { token, method: "POST", body: { action, ...extra } });

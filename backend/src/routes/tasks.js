@@ -8,6 +8,7 @@ import { query, queryOne } from "../db.js";
 import { organizationId } from "../org/rbac.js";
 import { currentAccess, ownershipFields } from "../org/access.js";
 import { findExistingClient } from "../org/clientMatch.js";
+import { arrangeRequestAppointment } from "../org/requestAppointment.js";
 import { audit } from "../org/audit.js";
 import { TASK_PRIORITIES, TASK_STATUSES, TASK_LINK_ENTITIES, canTransitionTask, normalizeTaskPriority, normalizeTaskStatus, taskActionsFor } from "../tasks/workflow.js";
 import { attentionCount, linkedRecordExists, listComments, listHistory, listTasks, taskVisible } from "../tasks/tasks.js";
@@ -35,7 +36,10 @@ const route = (fn) => (req, res, next) => Promise.resolve(fn(req, res)).catch(ne
 async function decorate(task, req) {
   if (!task) return task;
   const access = req.access || (await currentAccess());
-  return { ...task, available_actions: taskActionsFor(task, req.user.id, { canAssign: await mayAssign(req), canReview: await mayReview(req) }), scope: access?.scope || "own" };
+  let actions = taskActionsFor(task, req.user.id, { canAssign: await mayAssign(req), canReview: await mayReview(req) });
+  // A request handed to Customer Service is cancelled only by whoever handed it over.
+  if (task.request_id && Number(task.assigned_by) !== Number(req.user.id)) actions = actions.filter((action) => action !== "cancel");
+  return { ...task, available_actions: actions, scope: access?.scope || "own" };
 }
 
 async function writeAudit(req, action, task, from, comment = null) {
@@ -187,6 +191,8 @@ router.post("/:id/outcome", route(async (req, res) => {
   if (!OUTCOMES[outcome]) return res.status(400).json({ error: "choose an outcome: appointment, interested, declined or unreachable" });
   const note = maybeText(req.body?.note, "note", 2000);
   if (outcome === "declined" && !note) return res.status(400).json({ error: "say why the customer declined" });
+  // Sales decides on this report, so it always carries what the customer said.
+  if (!note) return res.status(400).json({ error: "write a note for Sales: what did the customer say?" });
   let when = null;
   let type = null;
   if (outcome === "appointment") {
@@ -224,6 +230,13 @@ router.post("/:id/outcome", route(async (req, res) => {
  */
 async function applyApprovedOutcome(req, taskId) {
   const request = await queryOne("SELECT * FROM leads WHERE task_id=$1 ORDER BY id LIMIT 1", [taskId]);
+  // A Contact-page message is answered once Sales accepts Customer Service's
+  // report; the report is kept on the message as the answer.
+  if (request?.source === "website-contact") {
+    const report = await queryOne("SELECT c.body, c.author_id FROM task_comments c JOIN tasks t ON t.id=c.task_id WHERE c.task_id=$1 AND c.author_id=t.assigned_to ORDER BY c.created_at DESC, c.id DESC LIMIT 1", [taskId]);
+    await query("UPDATE leads SET outcome='answered', outcome_note=$1, outcome_at=NOW(), outcome_by=$2, status='contacted' WHERE id=$3", [report?.body || null, report?.author_id || null, request.id]);
+    return;
+  }
   if (!request || !request.outcome) return;
   const status = { declined: "closed", unreachable: "unreachable", interested: "contacted", appointment: "appointment" }[request.outcome];
   if (request.outcome !== "appointment" || request.appointment_id) {
@@ -231,23 +244,11 @@ async function applyApprovedOutcome(req, taskId) {
     return;
   }
   const own = ownershipFields(req.access || (await currentAccess()));
-  const org = request.organization_id;
-  let clientId = request.client_id || (await findExistingClient(org, { email: request.email, phone: request.phone }))?.id || null;
-  if (!clientId) {
-    const client = await queryOne("INSERT INTO clients(organization_id,name,email,phone,client_type,status,notes,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,'buyer','lead',$5,$6,$7,$8,$9) RETURNING id",
-      [org, request.name, request.email, request.phone, request.notes, own.owner_id, own.created_by, own.department_id, own.visibility]);
-    clientId = client.id;
-    await audit(req, "converted", "lead", request.id, { client_id: clientId, via: "appointment" });
-  }
-  const property = request.property_id ? await queryOne("SELECT id, name, project_id FROM properties WHERE id=$1", [request.property_id]) : null;
-  const title = `${request.appointment_type === "call" ? "Call" : request.appointment_type === "meeting" ? "Meeting" : "Viewing"}: ${request.name}${property ? ` · ${property.name}` : ""}`;
-  const appointment = await queryOne(`INSERT INTO appointments(organization_id,client_id,property_id,project_id,title,appointment_type,starts_at,status,notes,owner_id,created_by,department_id,visibility)
-    VALUES($1,$2,$3,$4,$5,$6,$7,'scheduled',$8,$9,$10,$11,$12) RETURNING id`,
-    [org, clientId, property?.id || null, property?.project_id || null, title, request.appointment_type || "viewing", request.appointment_at,
-     [request.outcome_note, request.phone ? `Phone: ${request.phone}` : null, `Website request W-${request.id}`].filter(Boolean).join("\n"),
-     own.owner_id, own.created_by, own.department_id, own.visibility]);
-  await query("UPDATE leads SET client_id=$1, appointment_id=$2, status='appointment', converted_at=COALESCE(converted_at, NOW()) WHERE id=$3", [clientId, appointment.id, request.id]);
-  await audit(req, "created", "appointment", appointment.id, { from_request: request.id });
+  // The time Customer Service agreed with the customer; Sales can move it later
+  // with "Change appointment" under Requests.
+  const result = await arrangeRequestAppointment(request, { when: new Date(request.appointment_at), type: request.appointment_type || "viewing", note: request.outcome_note || "" }, own);
+  if (!request.client_id) await audit(req, "converted", "lead", request.id, { client_id: result.clientId, via: "appointment" });
+  await audit(req, "created", "appointment", result.appointmentId, { from_request: request.id });
 }
 
 router.post("/:id/actions", route(async (req, res) => {
@@ -265,9 +266,11 @@ router.post("/:id/actions", route(async (req, res) => {
   }
   if (action === "submit") {
     if (Number(task.assigned_to) !== Number(req.user.id)) return res.status(403).json({ error: "only the assignee may submit this task" });
-    const request = await queryOne("SELECT outcome FROM leads WHERE task_id=$1 ORDER BY id LIMIT 1", [taskId]);
-    if (request && !request.outcome) return res.status(400).json({ error: "report the customer outcome first (Report outcome to Sales)" });
-    if (!request && !comment) return res.status(400).json({ error: "write your report before submitting" });
+    const request = await queryOne("SELECT outcome, source FROM leads WHERE task_id=$1 ORDER BY id LIMIT 1", [taskId]);
+    // A Contact-page message is answered with a written report, not a deal outcome.
+    const message = request?.source === "website-contact";
+    if (request && !message && !request.outcome) return res.status(400).json({ error: "report the customer outcome first (Report outcome to Sales)" });
+    if ((!request || message) && !comment) return res.status(400).json({ error: "write your report before submitting" });
     return applyTransition(req, res, task, from, access, "submitted", { submitted_by: req.user.id, submitted_at: stamp }, "task_submitted", comment);
   }
   if (action === "begin_review") {
@@ -297,6 +300,10 @@ router.post("/:id/actions", route(async (req, res) => {
   }
   if (action === "cancel") {
     if (!await mayAssign(req)) return res.status(403).json({ error: "cancelling requires the assign_tasks permission" });
+    // A website request handed to Customer Service is Sales's: only whoever
+    // handed it over cancels it (the MD can follow it, not withdraw it).
+    const linked = await queryOne("SELECT 1 FROM leads WHERE task_id=$1 LIMIT 1", [taskId]);
+    if (linked && Number(task.assigned_by) !== Number(req.user.id)) return res.status(403).json({ error: "only the Sales person who handed this request over may cancel it" });
     if (!(Number(task.assigned_by) === Number(req.user.id) || req.user?.role === "admin" || access?.scope === "organization")) return res.status(403).json({ error: "only the assigner may cancel this task" });
     return applyTransition(req, res, task, from, access, "cancelled", {}, "task_cancelled", comment);
   }

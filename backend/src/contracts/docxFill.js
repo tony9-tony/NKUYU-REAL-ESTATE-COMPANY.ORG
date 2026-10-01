@@ -213,6 +213,146 @@ async function openTemplate(buffer) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// {{CONTRACT_BODY}}: the agreement wording, placed ON the template.
+//
+// A letterhead template (logo, company details, borders, footer) marks where
+// the contract text goes with {{CONTRACT_BODY}}. The paragraph holding it is
+// replaced by the agreement's own paragraphs - title, numbered clauses,
+// bullets - written in the template's font, so the content sits inside the
+// template's design. Word flows the text onto as many pages as it needs, and
+// the template's header and footer repeat on every one of them.
+// ---------------------------------------------------------------------------
+const BODY_TOKEN = /\{\{\s*CONTRACT_BODY\s*\}\}/;
+const PARAGRAPH = /<w:p(?=[\s>])[^>]*>[\s\S]*?<\/w:p>/g;
+
+/** Font and colour of the run the placeholder was typed in, without size or emphasis. */
+function baseRunProperties(paragraphXml) {
+  const rPr = (paragraphXml.match(/<w:r(?=[\s>])[^>]*>\s*(<w:rPr>[\s\S]*?<\/w:rPr>)/) || [])[1] || "";
+  return rPr
+    .replace(/^<w:rPr>|<\/w:rPr>$/g, "")
+    .replace(/<w:(b|bCs|i|iCs|u|sz|szCs|caps|smallCaps|highlight|vertAlign)\b[^>]*\/>/g, "");
+}
+
+function run(text, rPr, extra = "") {
+  return `<w:r><w:rPr>${rPr}${extra}</w:rPr><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>`;
+}
+
+/** Agreement text (agreements.js line syntax) -> WordprocessingML paragraphs. */
+export function agreementXml(text, rPr = "") {
+  const out = [];
+  // The signature section is kept together on one page (Word "keep with next").
+  let signatures = false;
+  for (const raw of String(text || "").split(/\r?\n/)) {
+    const line = raw.replace(/\s+$/, "");
+    if (!line.trim()) continue;
+    if (/^##\s+Signatures\b/i.test(line)) signatures = true;
+    if (signatures && !/^#{1,3}\s/.test(line)) {
+      out.push(`<w:p><w:pPr><w:keepNext/><w:keepLines/><w:spacing w:after="160" w:line="300" w:lineRule="auto"/></w:pPr>${run(line, rPr)}</w:p>`);
+      continue;
+    }
+    const heading = line.match(/^(#{1,3})\s+(.*)$/);
+    if (heading && heading[1].length === 1) {
+      out.push(`<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="120" w:after="80"/></w:pPr>${run(heading[2].toUpperCase(), rPr, '<w:b/><w:sz w:val="32"/><w:szCs w:val="32"/>')}</w:p>`);
+    } else if (heading) {
+      out.push(`<w:p><w:pPr><w:keepNext/><w:spacing w:before="240" w:after="100"/></w:pPr>${run(heading[2].toUpperCase(), rPr, '<w:b/>')}</w:p>`);
+    } else if (/^[-*]\s+/.test(line)) {
+      out.push(`<w:p><w:pPr><w:spacing w:after="60"/><w:ind w:left="567" w:hanging="283"/></w:pPr>${run(`• ${line.replace(/^[-*]\s+/, "")}`, rPr)}</w:p>`);
+    } else if (/^>\s?/.test(line)) {
+      out.push(`<w:p><w:pPr><w:spacing w:after="100"/></w:pPr>${run(line.replace(/^>\s?/, ""), rPr, '<w:i/><w:sz w:val="18"/>')}</w:p>`);
+    } else if (/^Contract number:/i.test(line)) {
+      out.push(`<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:after="200"/></w:pPr>${run(line, rPr, '<w:sz w:val="18"/>')}</w:p>`);
+    } else {
+      out.push(`<w:p><w:pPr><w:jc w:val="both"/><w:spacing w:after="120" w:line="300" w:lineRule="auto"/></w:pPr>${run(line, rPr)}</w:p>`);
+    }
+  }
+  return out.join("");
+}
+
+/** Replaces the paragraph holding {{CONTRACT_BODY}} with the agreement's paragraphs. */
+function expandContractBody(xml, bodyText) {
+  if (bodyText === undefined || bodyText === null) return xml;
+  return xml.replace(PARAGRAPH, (paragraph) => {
+    const text = [...paragraph.matchAll(/<w:t(?=[\s>])[^>]*>([\s\S]*?)<\/w:t>/g)].map((match) => decodeXml(match[1])).join("");
+    if (!BODY_TOKEN.test(text)) return paragraph;
+    return agreementXml(bodyText, baseRunProperties(paragraph));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The template's page design on every page.
+//
+// A design drawn in the BODY - a full-page background picture, a border frame
+// or a watermark placed "Behind text" - would only appear on the first page
+// once the agreement runs longer. Such pictures are moved into the page header,
+// which Word repeats on every page, so a two- or five-page contract carries the
+// template on each page. Letterheads already in the header need nothing.
+// ---------------------------------------------------------------------------
+const BEHIND_TEXT_RUN = /<w:r(?=[\s>])[^>]*>(?:(?!<\/w:r>)[\s\S])*?<wp:anchor\b[^>]*\bbehindDoc="(?:1|true)"[\s\S]*?<\/wp:anchor>(?:(?!<\/w:r>)[\s\S])*?<\/w:r>/g;
+const RELATIONSHIP = /<Relationship\b[^>]*\/>/g;
+const attr = (tag, name) => (tag.match(new RegExp(`\\b${name}="([^"]*)"`)) || [])[1];
+
+async function repeatPageDesign(zip) {
+  const documentPath = "word/document.xml";
+  let body = await zip.file(documentPath).async("string");
+  const runs = body.match(BEHIND_TEXT_RUN);
+  if (!runs?.length) return;
+  const relsPath = "word/_rels/document.xml.rels";
+  const docRels = zip.file(relsPath) ? await zip.file(relsPath).async("string") : "";
+  const relById = new Map((docRels.match(RELATIONSHIP) || []).map((tag) => [attr(tag, "Id"), tag]));
+
+  // The default header of the last section; one is created when there is none.
+  const sectPr = body.lastIndexOf("<w:sectPr");
+  const sectEnd = body.indexOf("</w:sectPr>", sectPr);
+  if (sectPr < 0 || sectEnd < 0) return;
+  const section = body.slice(sectPr, sectEnd);
+  const headerRef = (section.match(/<w:headerReference\b[^>]*\/>/g) || []).find((tag) => attr(tag, "w:type") === "default");
+  let headerPath;
+  let rels = docRels;
+  if (headerRef) {
+    const target = attr(relById.get(attr(headerRef, "r:id")) || "", "Target");
+    if (!target) return;
+    headerPath = `word/${target.replace(/^\/?word\//, "")}`;
+  } else {
+    let index = 1;
+    while (zip.file(`word/header${index}.xml`)) index += 1;
+    headerPath = `word/header${index}.xml`;
+    const id = "rIdMkuyuHeader";
+    zip.file(headerPath, `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:p/></w:hdr>`);
+    rels = rels.replace("</Relationships>", `<Relationship Id="${id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="${headerPath.replace("word/", "")}"/></Relationships>`);
+    zip.file(relsPath, rels);
+    let types = await zip.file("[Content_Types].xml").async("string");
+    types = types.replace("</Types>", `<Override PartName="/${headerPath}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>`);
+    zip.file("[Content_Types].xml", types);
+    const reference = `<w:headerReference w:type="default" r:id="${id}"/>`;
+    body = body.slice(0, sectPr) + body.slice(sectPr, sectEnd).replace(/(<w:sectPr\b[^>]*>)/, `$1${reference}`) + body.slice(sectEnd);
+  }
+  const headerFile = zip.file(headerPath);
+  if (!headerFile) return;
+  let header = await headerFile.async("string");
+
+  // Pictures keep their relationship ids: each one the runs use is copied into
+  // the header's own relationships.
+  const headerRelsPath = headerPath.replace(/^word\//, "word/_rels/") + ".rels";
+  let headerRels = zip.file(headerRelsPath) ? await zip.file(headerRelsPath).async("string")
+    : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+  for (const id of new Set(runs.join("").match(/r:(?:embed|link|id)="([^"]+)"/g)?.map((m) => m.split('"')[1]) || [])) {
+    const tag = relById.get(id);
+    if (tag && !new RegExp(`\\bId="${id}"`).test(headerRels)) headerRels = headerRels.replace("</Relationships>", `${tag}</Relationships>`);
+  }
+  zip.file(headerRelsPath, headerRels);
+
+  // Anchored to the page (not to a paragraph), so they sit where they were.
+  const moved = runs.map((run) => run.replace(/<wp:positionV\b[^>]*relativeFrom="paragraph"/g, (tag) => tag.replace('relativeFrom="paragraph"', 'relativeFrom="page"')));
+  header = header.replace(/<w:p(?=[\s>/])[^>]*?(\/?)>/, (tag, selfClosing) => (selfClosing ? `<w:p>${moved.join("")}</w:p>` : `${tag}${moved.join("")}`));
+  for (const [name, uri] of Object.entries({ "xmlns:wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing", "xmlns:r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships", "xmlns:a": "http://schemas.openxmlformats.org/drawingml/2006/main", "xmlns:pic": "http://schemas.openxmlformats.org/drawingml/2006/picture" })) {
+    if (!new RegExp(`\\s${name}=`).test(header.match(/<w:hdr\b[^>]*>/)?.[0] || "")) header = header.replace(/<w:hdr\b([^>]*)>/, `<w:hdr$1 ${name}="${uri}">`);
+  }
+  zip.file(headerPath, header);
+  for (const run of runs) body = body.replace(run, "");
+  zip.file(documentPath, body);
+}
+
 /** Unknown placeholders anywhere in the template, headers and footers included. */
 export async function templateFileUnknownPlaceholders(buffer) {
   const zip = await openTemplate(buffer);
@@ -232,12 +372,23 @@ export async function templateFileUnknownPlaceholders(buffer) {
  */
 export async function fillWordTemplate(buffer, values, signature = null) {
   const zip = await openTemplate(buffer);
+  // The template's page design first, so it repeats however long the text runs.
+  await repeatPageDesign(zip);
+  // The agreement wording goes where the template says {{CONTRACT_BODY}}; its
+  // own placeholders (the lawyer's signature spot) are filled with the rest.
+  const { CONTRACT_BODY: bodyText, ...rest } = values || {};
+  if (bodyText !== undefined) {
+    zip.file("word/document.xml", expandContractBody(await zip.file("word/document.xml").async("string"), bodyText));
+  }
   const hasSignature = Boolean(signature?.image);
-  const fillValues = { ...values, LAWYER_SIGNATURE: hasSignature ? SIGNATURE_SENTINEL : BLANK_SIGNING_LINE };
+  const fillValues = { ...rest, LAWYER_SIGNATURE: hasSignature ? SIGNATURE_SENTINEL : BLANK_SIGNING_LINE };
   const extent = hasSignature ? signatureExtent(signature.image) : null;
   let signaturePlaced = false;
   for (const name of Object.keys(zip.files).filter((entry) => FILLABLE_PART.test(entry))) {
-    let xml = fillPart(await zip.file(name).async("string"), name === "word/document.xml" ? fillValues : { ...fillValues, LAWYER_SIGNATURE: BLANK_SIGNING_LINE });
+    const partValues = name === "word/document.xml" ? fillValues : { ...fillValues, LAWYER_SIGNATURE: BLANK_SIGNING_LINE };
+    // CONTRACT_BODY outside the body (a header, say) is only ever plain text.
+    if (bodyText !== undefined && name !== "word/document.xml") partValues.CONTRACT_BODY = "";
+    let xml = fillPart(await zip.file(name).async("string"), partValues);
     if (name === "word/document.xml" && hasSignature) {
       const result = placeSignatureAtSentinel(xml, signature, extent);
       xml = result.xml.split(SIGNATURE_SENTINEL).join(BLANK_SIGNING_LINE);

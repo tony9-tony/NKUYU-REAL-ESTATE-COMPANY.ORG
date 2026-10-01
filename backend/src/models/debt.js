@@ -4,7 +4,7 @@ import { organizationId } from "../org/rbac.js";
 import { clearRecordShares, currentAccess, OWNERSHIP_COLUMNS, ownershipValues, scopeCondition } from "../org/access.js";
 
 const ENTITY = "debt";
-const select = `SELECT d.*, c.client_name AS contract_client, c.project_id, c.contract_type, p.name AS project_name FROM debts d JOIN contracts c ON c.id = d.contract_id JOIN projects p ON p.id = c.project_id`;
+const select = `SELECT d.*, c.client_name AS contract_client, c.project_id, c.contract_type, p.name AS project_name FROM debts d JOIN contracts c ON c.id = d.contract_id LEFT JOIN projects p ON p.id = c.project_id`;
 const normalize = (row) => row && ({ ...row, amount: Number(row.amount || 0) });
 
 /**

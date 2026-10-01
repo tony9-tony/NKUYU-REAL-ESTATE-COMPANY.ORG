@@ -52,7 +52,7 @@ async function buildRows(type, filters) {
     columns = [dateCol("paid_at", "Payment date"), text("client_name", "Client"), text("project_name", "Project"), num("amount", "Amount"), text("method", "Method"), text("reference", "Reference")];
     fields = { project: "c.project_id", client: "p.client_name", method: "p.method", date: "p.paid_at" }; order = "p.paid_at DESC";
   } else if (["debt", "overdue", "installments"].includes(type)) {
-    sql = "SELECT d.due_date,d.client_name,d.amount,d.status,pr.name AS project_name,COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.debt_id=d.id),0) AS paid_amount FROM debts d JOIN contracts c ON c.id=d.contract_id JOIN projects pr ON pr.id=c.project_id WHERE d.organization_id=$1 AND c.organization_id=$1";
+    sql = "SELECT d.due_date,d.client_name,d.amount,d.status,pr.name AS project_name,COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.debt_id=d.id),0) AS paid_amount FROM debts d JOIN contracts c ON c.id=d.contract_id LEFT JOIN projects pr ON pr.id = c.project_id WHERE d.organization_id=$1 AND c.organization_id=$1";
     if (type === "overdue") sql += " AND d.status <> 'paid' AND d.due_date < CURRENT_DATE";
     columns = [dateCol("due_date", "Due date"), text("client_name", "Client"), text("project_name", "Project"), num("amount", "Amount"), num("paid_amount", "Paid"), text("status", "Status")];
     fields = { project: "c.project_id", status: "d.status", client: "d.client_name", date: "d.due_date" }; order = "d.due_date ASC";
@@ -70,7 +70,7 @@ async function buildRows(type, filters) {
     columns = [text("name", "Project"), text("status", "Status"), intCol("contracts", "Contracts"), num("contract_value", "Contract value")];
     fields = { status: "p.status", date: "p.created_at" }; order = "p.name ASC";
   } else if (type === "contracts") {
-    sql = "SELECT c.client_name,c.contract_type,c.status,c.value,c.start_date,c.end_date,pr.name AS project_name FROM contracts c JOIN projects pr ON pr.id=c.project_id WHERE c.organization_id=$1";
+    sql = "SELECT c.client_name,c.contract_type,c.status,c.value,c.start_date,c.end_date,pr.name AS project_name FROM contracts c LEFT JOIN projects pr ON pr.id = c.project_id WHERE c.organization_id=$1";
     columns = [text("client_name", "Client"), text("contract_type", "Type"), text("status", "Status"), num("value", "Value"), dateCol("start_date", "Start"), dateCol("end_date", "End"), text("project_name", "Project")];
     fields = { project: "c.project_id", status: "c.status", client: "c.client_name", date: "c.start_date" }; order = "c.created_at DESC";
   } else if (type === "followups") {

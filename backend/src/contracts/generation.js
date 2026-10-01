@@ -10,6 +10,9 @@
 // derived from a request body.
 // ---------------------------------------------------------------------------
 import { CONTRACT_PLACEHOLDERS, formatDocumentDate, formatMoney, generateContractDocument, renderTemplate, unknownPlaceholders } from "./workflow.js";
+import { AGREEMENTS, agreementFor } from "./agreements.js";
+
+const PROPERTY_TYPE_LABELS = { land: "Land / plot", house: "House", apartment: "Apartment", villa: "Villa", commercial: "Commercial property", penthouse: "Penthouse" };
 
 /** Frequency -> how many months one step covers. */
 const FREQUENCY_MONTHS = {
@@ -39,7 +42,14 @@ export function buildContractValues({ contract, project, property, client, compa
   // exactly as the office entered it, so "1 months" is never invented.
   const unit = String(contract.agreement_duration_unit || "months").replace(/s$/, "");
   const duration = contract.agreement_duration ? `${contract.agreement_duration} ${unit}${Number(contract.agreement_duration) === 1 ? "" : "s"}` : "";
+  const agreement = agreementFor(contract.deal_type);
+  const area = Number(property?.area);
   return {
+    CONTRACT_TITLE: agreement.title,
+    CLIENT_ROLE: agreement.clientRole,
+    TITLE_DEED_NUMBER: contract.title_deed_number || property?.title_deed_number || "To be confirmed",
+    PROPERTY_TYPE: PROPERTY_TYPE_LABELS[property?.property_type] || (property?.property_type ? String(property.property_type) : "Not specified"),
+    PROPERTY_AREA: Number.isFinite(area) && area > 0 ? `${area.toLocaleString("en-US")} square metres` : "Not specified",
     CLIENT_NAME: contract.client_name || client?.name || "",
     CLIENT_PHONE: contract.client_phone || client?.phone || "Not provided",
     CLIENT_EMAIL: contract.client_email || client?.email || "Not provided",
@@ -71,43 +81,25 @@ export function buildContractValues({ contract, project, property, client, compa
   };
 }
 
-/** The built-in template, used when the caller does not select one. */
-export const DEFAULT_CONTRACT_TEMPLATE = `# {{COMPANY_NAME}} - Sale Agreement
+/** The built-in agreement for a deal type (Buy, Rent or Sell). */
+export function builtInAgreement(dealType) {
+  return agreementFor(dealType);
+}
 
-This Sale Agreement is made on {{CONTRACT_DATE}} between {{COMPANY_NAME}} (the "Seller") and {{CLIENT_NAME}} (the "Buyer") of {{CLIENT_PHONE}} / {{CLIENT_EMAIL}}.
+/** The built-in template, used when the caller does not select one: a Sale. */
+export const DEFAULT_CONTRACT_TEMPLATE = AGREEMENTS.buy.body;
 
-# The Property
-
-The Seller agrees to sell and the Buyer agrees to purchase the property described below.
-
-Property: {{PROPERTY_NAME}}
-Property number: {{PROPERTY_NUMBER}}
-Location: {{PROPERTY_LOCATION}}
-Project: {{PROJECT_NAME}}
-
-# Agreement Term
-
-This agreement commences on {{AGREEMENT_START_DATE}} and runs for {{AGREEMENT_DURATION}}, ending on {{AGREEMENT_END_DATE}}.
-
-# Purchase Price
-
-The original price of the property is {{ORIGINAL_PRICE}}.
-
-A discount of {{DISCOUNT_PERCENT}} is allowed, giving a discount amount of {{DISCOUNT_AMOUNT}}.
-
-The total purchase price payable by the Buyer is therefore {{FINAL_PRICE}}.
-
-# Payment Plan
-
-The Buyer shall pay a deposit of {{DEPOSIT}}, followed by {{INSTALLMENT_COUNT}} installment(s) on a {{PAYMENT_FREQUENCY}} basis, the first falling due on {{FIRST_DUE_DATE}}.
-
-# Contract Reference
-
-This agreement is issued under contract number {{CONTRACT_NUMBER}} and is governed by the laws of the United Republic of Tanzania.
-
-Signed for and on behalf of the Seller: ______________________
-
-Signed by the Buyer: ______________________`;
+/**
+ * Values for one contract, plus CONTRACT_BODY: the agreement wording for the
+ * contract's type, already filled, for a letterhead template to carry.
+ */
+export function buildDocumentValues(args, agreementBody) {
+  const values = buildContractValues(args);
+  // The lawyer's signature spot stays a placeholder inside the body, so the
+  // Word filler can put the real signature there once Legal approves.
+  const { LAWYER_SIGNATURE, ...bodyValues } = values;
+  return { ...values, CONTRACT_BODY: renderTemplate(agreementBody || agreementFor(args.contract?.deal_type).body, bodyValues) };
+}
 
 /** Renders a template body with the contract's own values. */
 export function renderContractDocument(templateBody, values) {

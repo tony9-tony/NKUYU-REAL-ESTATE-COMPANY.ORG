@@ -30,6 +30,9 @@
     "test:staffadmin": "node --import ./test_support/guard.mjs staff_admin_test.mjs",
     "test:public": "node --import ./test_support/guard.mjs public_api_test.mjs",
     "test:secfix": "node --import ./test_support/guard.mjs security_fixes_test.mjs",
+    "test:final": "node --import ./test_support/guard.mjs final_checks_test.mjs",
+    "test:handwritten": "node --import ./test_support/guard.mjs handwritten_fixes_test.mjs",
+    "test:docx": "node tools/contract_docx_check.mjs",
     "test:isolated": "node --import ./test_support/guard.mjs test_support/verify_isolation.mjs",
     "test:audit": "node --import ./test_support/guard.mjs ui_audit_regression.mjs",
     "test": "npm run test:unit && npm run test:access && npm run test:frontend && npm run test:e2e"

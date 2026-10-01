@@ -110,7 +110,7 @@ async function main() {
   res = await call("/projects", { method: "POST", body: JSON.stringify({ name: "E2E Project" }) });
   assert(res.status === 201, "create project");
   const projectId = res.payload.id;
-  res = await call("/contracts", { method: "POST", body: JSON.stringify({ project_id: projectId, client_id: clientId, client_name: "E2E Client", contract_type: "new", value: 120000, start_date: "2026-10-01" }) });
+  res = await call("/contracts", { method: "POST", body: JSON.stringify({ project_id: projectId, client_id: clientId, client_name: "E2E Client", contract_type: "new", deal_type: "buy", value: 120000, start_date: "2026-10-01" }) });
   assert(res.status === 201 && res.payload.client_id === clientId, "create contract with linked client");
   const contractId = res.payload.id;
   res = await call(`/contracts/${contractId}`);
@@ -308,7 +308,7 @@ Signed by the Buyer: ____________________`;
     client_name: "E2E Client",
     client_phone: "+255 700 123 456",
     client_email: "e2e.client@example.com",
-    contract_type: "new",
+    contract_type: "new", deal_type: "buy",
     contract_date: "2027-01-01",
     start_date: "2027-01-31",
     agreement_duration: 1,

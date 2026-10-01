@@ -54,6 +54,12 @@ async function photosFor(req, ids) {
 const serviceList = (row) => [row.offer_rent ? "rent" : null, row.offer_buy ? "buy" : null].filter(Boolean);
 
 function toPublicProperty(row, photos) {
+  // Per category, so the Buy page can say "Sold" while the Rent page still
+  // takes requests (or the other way round).
+  const availability = {
+    buy: row.offer_buy ? (row.sale_status || "available") : null,
+    rent: row.offer_rent ? (row.rent_status === "rented" ? "rented" : row.rent_status || "available") : null,
+  };
   return {
     id: row.id,
     slug: String(row.id),
@@ -61,6 +67,7 @@ function toPublicProperty(row, photos) {
     type: titleCase(row.property_type),
     services: serviceList(row),
     status: PUBLIC_STATUS[row.status] || "available",
+    availability,
     currency: "TZS",
     price: {
       sale: row.offer_buy ? Number(row.price) || 0 : 0,
@@ -80,16 +87,21 @@ function toPublicProperty(row, photos) {
   };
 }
 
-const propertySelect = `SELECT p.id, p.name, p.property_type, p.status, p.price, p.rent_price, p.rent_period,
+const propertySelect = `SELECT p.id, p.name, p.property_type, p.status, p.sale_status, p.rent_status, p.price, p.rent_price, p.rent_period,
     p.offer_rent, p.offer_buy, p.location, p.area, p.bedrooms, p.bathrooms, p.description, p.summary,
     p.features, p.featured, p.project_id, pr.name AS project_name
   FROM properties p LEFT JOIN projects pr ON pr.id = p.project_id`;
 
-// Listed = published, offered for at least one service, not yet sold or rented.
+// Listed = published and offered for at least one service. Sold and rented
+// properties stay listed, marked as such for their category, so visitors see
+// what MKUYU has sold and rented; open ones come first.
 // Public = the Sales Officer ticked "show on the website" AND the listing is
 // approved (both are set together by Property.setListing); either alone is not enough.
 const PUBLISHED = "p.public_listing AND p.public_listing_status = 'approved'";
-const LISTED = ["p.organization_id = $1", PUBLISHED, "(p.offer_rent OR p.offer_buy)", "p.status IN ('available','reserved')"];
+const LISTED = ["p.organization_id = $1", PUBLISHED, "(p.offer_rent OR p.offer_buy)"];
+// Projects show while they have homes still open to a visitor.
+const OPEN = "p.status IN ('available','reserved')";
+const OPEN_FIRST = "CASE WHEN p.status IN ('available','reserved') THEN 0 ELSE 1 END";
 
 function serviceFilter(req, res) {
   const service = req.query.service;
@@ -101,7 +113,7 @@ router.get("/properties", route(async (req, res) => {
   const filter = serviceFilter(req, res);
   if (filter === false) return;
   const conditions = [...LISTED, ...(filter ? [filter] : [])];
-  const rows = (await query(`${propertySelect} WHERE ${conditions.join(" AND ")} ORDER BY p.featured DESC, p.created_at DESC, p.id DESC`, [await organizationId()])).rows;
+  const rows = (await query(`${propertySelect} WHERE ${conditions.join(" AND ")} ORDER BY ${OPEN_FIRST}, p.featured DESC, p.created_at DESC, p.id DESC`, [await organizationId()])).rows;
   const photos = await photosFor(req, rows.map((r) => r.id));
   res.set("Cache-Control", "public, max-age=60");
   res.json(rows.map((row) => toPublicProperty(row, photos)));
@@ -118,24 +130,23 @@ router.get("/properties/:id", route(async (req, res) => {
   res.json(toPublicProperty(row, photos));
 }));
 
-// Projects are categories of properties, so they are derived from the listed
-// properties in them: a project appears while it has homes on the website,
-// offered for the services its homes are offered for, with a cover photo
-// taken from one of those homes.
+// Projects are categories of properties FOR SALE: renting is about a single
+// property, so a project never appears on the Rent side. A project shows while
+// it has homes for sale on the website, with a cover photo from one of them.
 router.get("/projects", route(async (req, res) => {
   const filter = serviceFilter(req, res);
   if (filter === false) return;
-  const conditions = [...LISTED, "p.project_id IS NOT NULL", "pr.status = 'active'", ...(filter ? [filter] : [])];
+  res.set("Cache-Control", "public, max-age=60");
+  if (req.query.service === "rent") return res.json([]);
+  const conditions = [...LISTED, OPEN, "p.offer_buy", "p.project_id IS NOT NULL", "pr.status = 'active'"];
   const rows = (await query(
-    `SELECT pr.id, pr.name, bool_or(p.offer_rent) AS offer_rent, bool_or(p.offer_buy) AS offer_buy,
-            string_agg(DISTINCT p.location, ' · ') AS locations, array_agg(p.id ORDER BY p.featured DESC, p.id) AS property_ids
+    `SELECT pr.id, pr.name, string_agg(DISTINCT p.location, ' · ') AS locations, array_agg(p.id ORDER BY p.featured DESC, p.id) AS property_ids
        FROM properties p JOIN projects pr ON pr.id = p.project_id
       WHERE ${conditions.join(" AND ")}
       GROUP BY pr.id, pr.name ORDER BY pr.name`,
     [await organizationId()],
   )).rows;
   const photos = await photosFor(req, rows.flatMap((r) => r.property_ids));
-  res.set("Cache-Control", "public, max-age=60");
   res.json(rows.map((row) => {
     const cover = row.property_ids.map((id) => (photos.get(id) || [])[0]).find(Boolean);
     return {
@@ -144,7 +155,7 @@ router.get("/projects", route(async (req, res) => {
       location: row.locations || "",
       summary: "",
       status: "",
-      services: serviceList(row),
+      services: ["buy"],
       photos: cover ? [{ ...cover, alt: row.name }] : [],
     };
   }));
@@ -230,12 +241,14 @@ router.post("/requests", route(async (req, res) => {
   const propertyId = parseId(body.property);
   const org = await organizationId();
   const property = propertyId && await queryOne(
-    "SELECT id, name, status, offer_rent, offer_buy FROM properties WHERE id = $1 AND organization_id = $2 AND public_listing AND public_listing_status = 'approved'",
+    "SELECT id, name, status, sale_status, rent_status, offer_rent, offer_buy FROM properties WHERE id = $1 AND organization_id = $2 AND public_listing AND public_listing_status = 'approved'",
     [propertyId, org],
   );
   if (!property) return notFound(res, "Property");
   const offered = service === "rent" ? property.offer_rent : property.offer_buy;
-  if (!offered || property.status !== "available") return res.status(409).json({ error: `This property is no longer open to ${service === "rent" ? "rent" : "buy"}.` });
+  // Each category is open or closed on its own: a rented house can still be for sale.
+  const categoryState = service === "rent" ? property.rent_status : property.sale_status;
+  if (!offered || (categoryState || "available") !== "available") return res.status(409).json({ error: `This property is no longer open to ${service === "rent" ? "rent" : "buy"}.` });
   const digits = details.value.phone.replace(/\D/g, "");
   if (tooMany([`phone:${digits}`], 5) || tooMany([`ip:${req.ip}`], 20)) return res.status(429).json({ error: "Too many requests. Please try again later or call MKUYU." });
 
@@ -251,7 +264,52 @@ router.post("/requests", route(async (req, res) => {
   res.status(201).json({ reference: `W-${lead.id}` });
 }));
 
-// General question from the Contact page.
+// Sell: a property owner offers their property to MKUYU. No account and no
+// login: it becomes a Sell request for Sales (Requests), who hands it to
+// Customer Service to contact the owner. Nothing is published and no client
+// is created until MKUYU accepts the seller.
+const SELL_TYPES = { house: "House", apartment: "Apartment", villa: "Villa", land: "Land / plot", commercial: "Commercial", other: "Other" };
+router.post("/sell", route(async (req, res) => {
+  const body = req.body || {};
+  if (isBot(body)) return res.status(201).json({ reference: "W-0" });
+  const details = contactDetails(body);
+  if (details.error) return bad(res, details.error);
+  const type = SELL_TYPES[body.property_type] ? body.property_type : null;
+  if (!type) return bad(res, "Choose the type of property.");
+  const location = typeof body.location === "string" ? body.location.trim() : "";
+  if (location.length < 2 || location.length > 120) return bad(res, "Say where the property is (area and town).");
+  const numberOrNull = (value, max) => {
+    if (value === undefined || value === null || value === "") return null;
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 && n <= max ? n : NaN;
+  };
+  const asking = numberOrNull(body.asking_price, 1e13);
+  if (Number.isNaN(asking)) return bad(res, "Enter the asking price in TZS, or leave it empty.");
+  const area = numberOrNull(body.area, 1e7);
+  if (Number.isNaN(area)) return bad(res, "Enter the size in square metres, or leave it empty.");
+  const bedrooms = numberOrNull(body.bedrooms, 50);
+  if (Number.isNaN(bedrooms)) return bad(res, "Enter the number of bedrooms, or leave it empty.");
+  const titleDeed = ["yes", "no", "in_progress"].includes(body.title_deed) ? body.title_deed : null;
+  const preferred = CONTACT_METHODS.has(body.preferred_contact) ? body.preferred_contact : "phone";
+  if (preferred === "email" && !details.value.email) return bad(res, "Add your email address, or choose phone or WhatsApp.");
+  const digits = details.value.phone.replace(/\D/g, "");
+  if (tooMany([`phone:${digits}`], 5) || tooMany([`ip:${req.ip}`], 20)) return res.status(429).json({ error: "Too many submissions. Please try again later or call MKUYU." });
+
+  const sell = { property_type: type, location, asking_price: asking, area, bedrooms: bedrooms === null ? null : Math.round(bedrooms), title_deed: titleDeed };
+  const org = await organizationId();
+  const lead = await queryOne(
+    `INSERT INTO leads (organization_id, name, email, phone, source, status, notes, budget, service, property_id, preferred_contact, sell_details)
+     VALUES ($1,$2,$3,$4,'website','new',$5,$6,'sell',NULL,$7,$8::jsonb) RETURNING id`,
+    [org, details.value.name, details.value.email, details.value.phone,
+     [`Website sell submission: ${SELL_TYPES[type]} in ${location}.`, details.value.message].filter(Boolean).join("\n\n"),
+     asking, preferred, JSON.stringify(sell)],
+  );
+  res.status(201).json({ reference: `W-${lead.id}` });
+}));
+
+// General question from the Contact page. It goes straight to Customer
+// Service (their department owns it), who answers the visitor and marks it
+// answered under Requests. Sales and the MD can still see it.
 router.post("/enquiries", route(async (req, res) => {
   const body = req.body || {};
   if (isBot(body)) return res.status(201).json({ reference: "W-0" });
@@ -263,7 +321,8 @@ router.post("/enquiries", route(async (req, res) => {
   const topics = { general: "General question", rent: "Renting", buy: "Buying", sell: "Selling a property", diaspora: "Miliki Ardhi Diaspora" };
   const topic = topics[body.topic] || topics.general;
   const budget = Number(body.budget);
-  const lead = await createLead(await organizationId(), {
+  const org = await organizationId();
+  const lead = await createLead(org, {
     ...details.value,
     source: "website-contact",
     notes: `Website enquiry · ${topic}\n\n${details.value.message}`,
@@ -272,6 +331,11 @@ router.post("/enquiries", route(async (req, res) => {
     property_id: null,
     preferred_contact: CONTACT_METHODS.has(body.preferred_contact) ? body.preferred_contact : "phone",
   });
+  await query(
+    `UPDATE leads SET department_id = (SELECT id FROM departments WHERE organization_id = $2 AND name = 'CUSTOMER SERVICE' LIMIT 1), visibility = 'department'
+      WHERE id = $1`,
+    [lead.id, org],
+  );
   res.status(201).json({ reference: `W-${lead.id}` });
 }));
 

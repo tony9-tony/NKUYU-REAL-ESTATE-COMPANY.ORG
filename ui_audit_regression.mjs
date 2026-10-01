@@ -70,7 +70,9 @@ for (const action of ["delete-project", "delete-client", "delete-appointment", "
   const index = appSource.indexOf(`data-action="${action}"`);
   if (index < 0) { check(false, `the ${action} control is missing from the source`); continue; }
   const window = appSource.slice(Math.max(0, index - 260), index + 120);
-  const wrapped = /(mayDelete|mayEdit|can\("(delete|edit)"\))\s*\?/.test(window);
+  // Stricter gates count too: canChange(module, "edit") (not read-only),
+  // canDeleteContract(contract) and `can("edit") && canAuthorContracts()`.
+  const wrapped = /(mayDelete\w*|mayEdit|can\("(delete|edit)"\)(\s*&&\s*canAuthorContracts\(\))?|canChange\("\w+",\s*"(delete|edit)"\)|canDeleteContract\(\w+\))\s*\?/.test(window);
   const hiddenWhenUnauthorised = /can\("(delete|edit)"\)\s*\?\s*""\s*:\s*" hidden"/.test(window);
   check(wrapped || hiddenWhenUnauthorised, `the ${action} control is permission-gated`);
 }

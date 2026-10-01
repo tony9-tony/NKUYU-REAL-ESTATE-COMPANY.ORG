@@ -68,6 +68,8 @@ import {
   DEFAULT_CONTRACT_TEMPLATE,
   PAYMENT_FREQUENCIES,
   buildContractValues,
+  buildDocumentValues,
+  builtInAgreement,
   monthsPerFrequency,
   produceContractDocument,
   renderContractDocument,
@@ -77,6 +79,9 @@ import { shareContractWithHandoverDesks } from "../contracts/handover.js";
 import { templateTextFromUpload } from "../contracts/docxText.js";
 import { generateFromWordTemplate, templateFileUnknownPlaceholders, templateWordFile } from "../contracts/docxFill.js";
 import { contractSignature, signContractDocument } from "../contracts/signature.js";
+import { docxToPreview } from "../contracts/docxPreview.js";
+import { announceWrites, liveStream } from "../live.js";
+import { RENT_STATUSES, SALE_STATUSES, categoryStatusesFrom, overallStatus } from "../models/propertyStatus.js";
 
 const router = Router();
 const execFileAsync = promisify(execFile);
@@ -192,6 +197,19 @@ function validateProject(body, current = {}) {
   };
 }
 
+const CONTRACT_DEAL_TYPES = new Set(["buy", "rent", "sell"]);
+// Where a letterhead template wants the agreement wording to go.
+const CONTRACT_BODY_TOKEN = /\{\{\s*CONTRACT_BODY\s*\}\}/;
+function contractDealType(value, required) {
+  if (value === undefined || value === null || value === "") {
+    if (required) throw new HttpError(400, "choose the contract type: Buy, Rent or Sell");
+    return null;
+  }
+  const type = String(value).trim().toLowerCase();
+  if (!CONTRACT_DEAL_TYPES.has(type)) throw new HttpError(400, "contract type must be Buy, Rent or Sell");
+  return type;
+}
+
 async function validateContract(body, current = {}) {
   // A contract is always born as a draft and moves through the workflow from
   // there, so `status` is never taken from the request body.
@@ -215,12 +233,17 @@ async function validateContract(body, current = {}) {
   } catch (error) {
     throw new HttpError(error.status || 400, error.message);
   }
+  const dealType = contractDealType(body.deal_type ?? current.deal_type, !current.id);
+  // A Rent contract is about a property only: it carries no project.
+  const rent = dealType === "rent";
   const data = {
-    project_id: parseId(body.project_id ?? current.project_id, "project_id"),
+    project_id: rent ? null : parseId(body.project_id ?? current.project_id, "project_id"),
     property_id: parseId(body.property_id ?? current.property_id, "property_id", true),
     client_id: parseId(body.client_id ?? current.client_id, "client_id", true),
     client_name: requiredText(body.client_name ?? current.client_name, "client_name"),
     contract_type: enumValue(body.contract_type ?? current.contract_type, contractTypes, "new", "contract_type"),
+    // Buy / Rent / Sell: required on every new contract, kept on edits.
+    deal_type: dealType,
     status,
     pricing,
     // `value` mirrors the calculated final price. It is kept because the payment
@@ -231,6 +254,8 @@ async function validateContract(body, current = {}) {
     end_date: optionalDate(body.end_date ?? current.end_date, "end_date"),
     terms: optionalText(body.terms ?? current.terms, "terms", 4000),
     notes: optionalText(body.notes ?? current.notes, "notes"),
+    // The title deed / certificate of occupancy number printed on the agreement.
+    title_deed_number: optionalText(body.title_deed_number ?? current.title_deed_number, "title_deed_number", 80),
     requires_management_approval: Boolean(body.requires_management_approval ?? current.requires_management_approval),
   };
   const client = data.client_id ? requireRecord(await Client.get(data.client_id), "Client") : null;
@@ -240,7 +265,7 @@ async function validateContract(body, current = {}) {
     const property = requireRecord(await Property.get(data.property_id), "Property");
     // The chain the spec describes is Customer <- Property <- Project <- Contract,
     // so a contract may not name a property that belongs to another project.
-    if (property.project_id && Number(property.project_id) !== Number(data.project_id)) {
+    if (data.project_id && property.project_id && Number(property.project_id) !== Number(data.project_id)) {
       throw new HttpError(400, "property_id does not belong to the selected project");
     }
   }
@@ -340,17 +365,23 @@ function validateDebt(body, current = {}) {
   };
 }
 
+// Land and commercial property are sold by price and size; only homes have
+// bedrooms and bathrooms. A room count sent for land is dropped, never stored.
+const PROPERTY_TYPE_ROOMS = { land: false, commercial: false, house: true, apartment: true, villa: true, penthouse: true };
+
 function validateProperty(body, current = {}) {
+  const propertyType = enumValue(body.property_type ?? current.property_type, propertyTypes, "house", "property_type");
+  const rooms = PROPERTY_TYPE_ROOMS[propertyType] !== false;
   return {
     project_id: parseId(body.project_id ?? current.project_id, "project_id", true),
     name: requiredText(body.name ?? current.name, "name"),
-    property_type: enumValue(body.property_type ?? current.property_type, propertyTypes, "house", "property_type"),
+    property_type: propertyType,
     status: enumValue(body.status ?? current.status, propertyStatuses, "available", "status"),
     price: nonNegativeNumber(body.price ?? current.price, "price"),
     location: requiredText(body.location ?? current.location, "location"),
     area: nonNegativeNumber(body.area ?? current.area, "area"),
-    bedrooms: nonNegativeInteger(body.bedrooms ?? current.bedrooms, "bedrooms"),
-    bathrooms: nonNegativeInteger(body.bathrooms ?? current.bathrooms, "bathrooms"),
+    bedrooms: rooms ? nonNegativeInteger(body.bedrooms ?? current.bedrooms, "bedrooms") : 0,
+    bathrooms: rooms ? nonNegativeInteger(body.bathrooms ?? current.bathrooms, "bathrooms") : 0,
     description: optionalText(body.description ?? current.description, "description"),
     featured: Boolean(body.featured ?? current.featured),
   };
@@ -572,6 +603,46 @@ function contractResponse(contract, req) {
   };
 }
 
+// Contracts are written by the desks responsible for them: Sales raises the
+// deal, Legal prepares the agreement and the MD directs the business. Finance
+// holds `create` for payments, not for contracts: it receives a contract once
+// the people responsible have created it, and validates its money.
+export function mayAuthorContracts(access) {
+  if (!access) return true;
+  return ["submit_contract", "approve_legal", "approve_management"].some((permission) => can(access, permission));
+}
+function requireContractAuthor(access) {
+  if (!mayAuthorContracts(access)) throw new HttpError(403, "contracts are created by Sales, Legal or the MD; Finance receives them once they are created");
+}
+
+// Statuses in which a contract is still "before approval".
+const PRE_APPROVAL_STATUSES = new Set(["draft", "submitted", "under_review", "changes_requested"]);
+/** Why this caller may not delete this contract, or null when they may. */
+export function contractDeleteRefusal(access, contract) {
+  if (!access) return null;
+  if (can(access, "approve_legal") || can(access, "approve_management")) return null;
+  if (can(access, "submit_contract")) {
+    return PRE_APPROVAL_STATUSES.has(contract.status)
+      ? null
+      : "Sales may delete a contract only before it is approved; ask Legal or the MD, or cancel it instead";
+  }
+  return "only the MD, Legal or Sales may delete a contract; cancel it instead";
+}
+
+/**
+ * Who may delete a property. Holders of `delete` (the MD, managers) and Sales,
+ * who keep the listings. Nobody deletes a property a contract names: it is
+ * marked sold or rented instead, so the contract keeps its property.
+ */
+export function mayDeletePropertyAsSales(access) {
+  return Boolean(access) && can(access, "access_properties") && can(access, "submit_contract");
+}
+async function propertyDeleteRefusal(access, propertyId) {
+  if (access && !can(access, "delete") && !mayDeletePropertyAsSales(access)) return { status: 403, error: "you may not delete properties" };
+  const used = Number((await queryOne("SELECT COUNT(*) AS n FROM contracts WHERE property_id=$1", [propertyId])).n);
+  return used ? { status: 409, error: "this property is on a contract; mark it sold or rented instead of deleting it" } : null;
+}
+
 function paymentResponse(payment) {
   if (!payment) return payment;
   return {
@@ -634,6 +705,10 @@ function requireRecord(record, label = "Record") {
   return record;
 }
 
+// Every successful write is announced to the open staff screens (live.js),
+// so lists and badges update without a refresh. Mounted first, so a visitor's
+// website request is announced too.
+router.use(announceWrites());
 router.get("/health", route((req, res) => res.json({ status: "ok" })));
 router.get("/auth/state", route(async (req, res) => res.json({ configured: Number((await queryOne("SELECT COUNT(*) AS count FROM users")).count) > 0 })));
 // The browser app identifies itself with the CSRF header; it receives the
@@ -763,11 +838,27 @@ router.post("/profile/photo", uploadProfileImageFile, route(async (req, res) => 
 // Models read it through the async-local store so list/get/update/delete all
 // enforce the same visibility rules.
 router.use(accessMiddleware());
+// The live-update stream for a signed-in screen (see live.js).
+router.get("/live", liveStream);
 router.use((req, res, next) => {
   if (req.path.startsWith("/org/")) return next();
   // Contract templates carry their own authority (`upload_contract_templates`),
   // checked on every route below, rather than the generic create/edit/delete.
   if (req.path.startsWith("/contract-templates")) return next();
+  // Deleting a contract has its own rule (MD, Legal, or Sales before approval),
+  // enforced by the route itself, rather than the generic `delete` permission.
+  if (req.method === "DELETE" && /^\/contracts\/[^/]+\/?$/.test(req.path)) {
+    return can(req.access, "access_contracts") ? next() : res.status(403).json({ error: "permission denied", permission: "access_contracts" });
+  }
+  // Deleting a property: `delete` holders, or Sales for a listing no contract
+  // names (decided by the route). Pictures keep the generic rule.
+  if (req.method === "DELETE" && /^\/properties\/[^/]+\/?$/.test(req.path) && !can(req.access, "delete") && mayDeletePropertyAsSales(req.access)) {
+    return next();
+  }
+  // Removing a property's photo is part of editing the listing.
+  if (req.method === "DELETE" && /^\/properties\/[^/]+\/images\/[^/]+\/?$/.test(req.path)) {
+    return can(req.access, "access_properties") && can(req.access, "edit") ? next() : res.status(403).json({ error: "permission denied", permission: "edit" });
+  }
   return requirePermissionForMethod()(req, res, next);
 });
 router.use((req, res, next) => {
@@ -891,6 +982,7 @@ router.post("/contracts/:id/transition", route(async (req, res) => {
 // defers to the same `view_financial` gate the standalone schedule route uses.
 // ---------------------------------------------------------------------------
 router.post("/contracts/generate", route(async (req, res) => {
+  requireContractAuthor(req.access);
   const body = req.body || {};
   const hasSelectedTemplate = body.template_document_id !== undefined && body.template_document_id !== null && body.template_document_id !== "";
   if (hasSelectedTemplate && !can(req.access, "access_documents")) {
@@ -937,30 +1029,48 @@ router.post("/contracts/generate", route(async (req, res) => {
   if (plan && !(data.value > 0)) throw new HttpError(400, "the final price must be greater than 0 to build a payment plan");
   if (plan && plan.deposit >= data.value) throw new HttpError(400, "deposit must be less than the final price");
 
-  // --- Template -----------------------------------------------------------
-  // A template is a document of category 'template'. With none chosen the
-  // built-in agreement is used, so generating a contract is always possible.
+  // --- Wording and template -----------------------------------------------
+  // The contract TYPE (Buy, Rent or Sell) decides the wording: a Sale
+  // Agreement, a Lease Agreement or a Property Sale Mandate (agreements.js).
+  // The TEMPLATE is the design that wording is placed on:
+  //   * a letterhead template (it contains {{CONTRACT_BODY}}): the type's
+  //     wording goes in that spot, inside the template's design;
+  //   * a full-wording template written for this type: filled as it is;
+  //   * no template: the built-in MKUYU letterhead.
+  // Letterheads live in the page header/footer, so every page carries them.
+  const agreement = builtInAgreement(data.deal_type);
   let templateId = null;
-  let templateBody = DEFAULT_CONTRACT_TEMPLATE;
-  let templateTitle = "Sale Agreement";
-  // An uploaded Word template is filled in place, keeping its own design.
+  let templateBody = agreement.body;
+  let templateTitle = agreement.title;
   let templateWordPath = null;
+  let letterhead = false;
   // No template field at all (as opposed to an explicit "built-in" choice)
-  // means "use the organization's default template", when one is set and the
-  // caller may use templates.
+  // means the automatic choice: a template written for this type of deal,
+  // otherwise the organization's default template.
   let useTemplateId = hasSelectedTemplate ? parseId(body.template_document_id, "template_document_id") : null;
-  // The default template applies to every contract, whoever generates it.
   if (body.template_document_id === undefined) {
-    const fallback = await queryOne("SELECT id FROM documents WHERE organization_id=$1 AND category='template' AND is_default_template=TRUE LIMIT 1", [await organizationId()]);
+    const fallback = await queryOne(
+      `SELECT id FROM documents WHERE organization_id=$1 AND category='template'
+          AND (template_deal_type=$2 OR (is_default_template=TRUE AND (template_deal_type IS NULL OR template_deal_type=$2)))
+        ORDER BY (template_deal_type IS NOT NULL) DESC, is_default_template DESC, id DESC LIMIT 1`,
+      [await organizationId(), data.deal_type],
+    );
     if (fallback) useTemplateId = fallback.id;
   }
   if (useTemplateId) {
     templateId = useTemplateId;
     const template = await templateRecord(templateId);
     if (!String(template.body_text || "").trim()) throw new HttpError(400, "the selected template has no body text");
-    templateBody = String(template.body_text);
-    templateTitle = template.title || "Sale Agreement";
+    if (template.template_deal_type && template.template_deal_type !== data.deal_type) {
+      throw new HttpError(400, `the selected template is for ${template.template_deal_type} contracts; choose a ${data.deal_type} template or the letterhead`);
+    }
+    letterhead = CONTRACT_BODY_TOKEN.test(template.body_text);
+    // A letterhead carries the type's wording; a full template its own.
+    templateBody = letterhead ? String(template.body_text).replace(CONTRACT_BODY_TOKEN, agreement.body) : String(template.body_text);
+    if (!letterhead) templateTitle = template.title || agreement.title;
     templateWordPath = templateWordFile(template);
+    // In a Word letterhead the design is the file; the stored text is the wording.
+    if (templateWordPath && letterhead) templateBody = agreement.body;
   }
   const unknownTemplateTokens = templateWordPath
     ? await templateFileUnknownPlaceholders(fs.readFileSync(templateWordPath))
@@ -984,10 +1094,10 @@ router.post("/contracts/generate", route(async (req, res) => {
 
   // --- Generate the FULL document -----------------------------------------
   const org = await queryOne("SELECT name FROM organizations WHERE id=$1", [await organizationId()]);
-  const project = requireRecord(await Project.get(data.project_id), "Project");
+  const project = data.project_id ? requireRecord(await Project.get(data.project_id), "Project") : null;
   const property = data.property_id ? requireRecord(await Property.get(data.property_id), "Property") : null;
   const client = data.client_id ? await Client.get(data.client_id) : null;
-  const values = buildContractValues({
+  const values = buildDocumentValues({
     contract,
     project,
     property,
@@ -995,7 +1105,7 @@ router.post("/contracts/generate", route(async (req, res) => {
     // The company identity is read from the organization row, never hardcoded.
     companyName: org?.name || "",
     plan: plan || {},
-  });
+  }, agreement.body);
   const renderedContractText = renderContractDocument(templateBody, values);
   const file = templateWordPath
     ? await generateFromWordTemplate({ templatePath: templateWordPath, values, title: templateTitle, contractNumber: contract.contract_number })
@@ -1060,7 +1170,7 @@ router.post("/contracts/generate", route(async (req, res) => {
       final_price: String(contract.value),
     },
     document: documentResponse(await Document.get(documentRow.id)),
-    template: templateId ? { id: templateId, title: templateTitle } : { id: null, title: "Built-in Sale Agreement" },
+    template: templateId ? { id: templateId, title: templateTitle, letterhead } : { id: null, title: `Built-in ${agreement.title}`, letterhead: true },
     placeholders: { used: placeholdersUsed(templateBody), unknown: unknownPlaceholders(templateBody) },
     schedule,
   });
@@ -1086,7 +1196,7 @@ async function templateRecord(id) {
 router.get("/contract-templates", route(async (req, res) => {
   if (!mayUseTemplates(req.access)) throw new HttpError(403, "permission denied");
   const templates = (await query(
-    `SELECT d.id, d.title, d.body_text, d.category, d.original_filename, d.stored_name, d.created_at, d.uploaded_at, d.is_default_template AS is_default,
+    `SELECT d.id, d.title, d.body_text, d.category, d.original_filename, d.stored_name, d.created_at, d.uploaded_at, d.is_default_template AS is_default, d.template_deal_type AS deal_type,
         u.display_name AS uploaded_by_name,
         (SELECT COUNT(*)::int FROM contracts c WHERE c.template_document_id = d.id) AS used_by
        FROM documents d
@@ -1098,6 +1208,8 @@ router.get("/contract-templates", route(async (req, res) => {
   res.json(templates.map((template) => ({
     ...template,
     has_file: Boolean(template.stored_name),
+    // A letterhead carries the chosen type's wording at {{CONTRACT_BODY}}.
+    letterhead: CONTRACT_BODY_TOKEN.test(String(template.body_text || "")),
     placeholders: placeholdersUsed(template.body_text),
     unknown: unknownPlaceholders(template.body_text),
   })));
@@ -1112,8 +1224,8 @@ router.post("/contract-templates", route(async (req, res) => {
   const unknown = unknownPlaceholders(bodyText);
   if (unknown.length) throw new HttpError(400, `unknown placeholder(s): ${unknown.join(", ")}`);
   const created = await queryOne(
-    "INSERT INTO documents (organization_id,title,category,status,notes,body_text,created_by,visibility) VALUES ($1,$2,'template','approved',$3,$4,$5,'organization') RETURNING id",
-    [await organizationId(), title, `Template using: ${placeholdersUsed(bodyText).join(", ") || "no placeholders"}`, bodyText, req.user.id],
+    "INSERT INTO documents (organization_id,title,category,status,notes,body_text,created_by,visibility,template_deal_type) VALUES ($1,$2,'template','approved',$3,$4,$5,'organization',$6) RETURNING id",
+    [await organizationId(), title, `Template using: ${placeholdersUsed(bodyText).join(", ") || "no placeholders"}`, bodyText, req.user.id, templateDealType(req.body?.deal_type)],
   );
   if (truthy(req.body?.is_default)) await setDefaultTemplate(created.id);
   await audit(req, "created", "contract_template", created.id, { title });
@@ -1128,7 +1240,8 @@ router.put("/contract-templates/:id", route(async (req, res) => {
   const title = req.body?.title === undefined ? template.title : requiredText(req.body.title, "title", 160);
   const unknown = unknownPlaceholders(bodyText);
   if (unknown.length) throw new HttpError(400, `unknown placeholder(s): ${unknown.join(", ")}`);
-  const updated = await queryOne("UPDATE documents SET title=$1, body_text=$2 WHERE id=$3 RETURNING id", [title, bodyText, id]);
+  const dealType = req.body?.deal_type === undefined ? template.template_deal_type : templateDealType(req.body.deal_type);
+  const updated = await queryOne("UPDATE documents SET title=$1, body_text=$2, template_deal_type=$4 WHERE id=$3 RETURNING id", [title, bodyText, id, dealType]);
   if (req.body?.is_default !== undefined) {
     if (truthy(req.body.is_default)) await setDefaultTemplate(id);
     else await query("UPDATE documents SET is_default_template=FALSE WHERE id=$1", [id]);
@@ -1136,6 +1249,14 @@ router.put("/contract-templates/:id", route(async (req, res) => {
   await audit(req, "updated", "contract_template", updated.id, { title, is_default: req.body?.is_default });
   res.json({ id: updated.id, title, placeholders: placeholdersUsed(bodyText), unknown });
 }));
+
+/** A template's contract type: buy, rent, sell, or null for "any type" (a letterhead). */
+function templateDealType(value) {
+  if (value === undefined || value === null || value === "" || value === "any") return null;
+  const type = String(value).trim().toLowerCase();
+  if (!CONTRACT_DEAL_TYPES.has(type)) throw new HttpError(400, "template type must be buy, rent, sell or any");
+  return type;
+}
 
 function truthy(value) {
   return value === true || value === 1 || ["true", "1", "yes", "on"].includes(String(value).toLowerCase());
@@ -1155,9 +1276,15 @@ async function setDefaultTemplate(id) {
 router.get("/contract-templates/starter", route(async (req, res) => {
   requireTemplateAuthority(req.access);
   const tmp = path.join(os.tmpdir(), `mkuyu-starter-${crypto.randomUUID()}.docx`);
-  // The starter shows where the lawyer's signature will be placed.
-  const starterText = DEFAULT_CONTRACT_TEMPLATE.replace("Signed for and on behalf of the Seller: ______________________", "Signed for and on behalf of the Seller (Legal): {{LAWYER_SIGNATURE}}");
-  await writeContractDocx({ text: starterText, targetPath: tmp, title: "MKUYU contract template", contractNumber: "" });
+  // Default: a LETTERHEAD starter. The MKUYU header and footer repeat on every
+  // page, and {{CONTRACT_BODY}} marks where the chosen type's agreement goes, so
+  // one template serves Buy, Rent and Sell. `?kind=sale|lease|mandate` gives a
+  // full-wording starter for one type instead.
+  const full = { sale: "buy", lease: "rent", mandate: "sell" }[String(req.query.kind || "")];
+  const starterText = full
+    ? builtInAgreement(full).body
+    : "{{CONTRACT_BODY}}";
+  await writeContractDocx({ text: starterText, targetPath: tmp, title: full ? builtInAgreement(full).title : "Agreement", contractNumber: "" });
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
   res.setHeader("Content-Disposition", 'attachment; filename="MKUYU-contract-template.docx"');
   res.send(fs.readFileSync(tmp));
@@ -1180,9 +1307,9 @@ router.post("/contract-templates/upload", uploadDocumentFile, route(async (req, 
     if (unknown.length) throw new HttpError(400, `unknown placeholder(s): ${unknown.join(", ")}. Use only the placeholders listed on the Templates screen.`);
     const title = optionalText(req.body?.title, "title", 160) || fileInfo.displayName.replace(/\.docx$/i, "");
     const created = await queryOne(
-      `INSERT INTO documents (organization_id,title,category,status,notes,body_text,original_filename,stored_name,file_size,mime_type,uploaded_at,created_by,visibility)
-       VALUES ($1,$2,'template','approved',$3,$4,$5,$6,$7,$8,NOW(),$9,'organization') RETURNING id`,
-      [await organizationId(), title, `Template using: ${placeholdersUsed(bodyText).join(", ") || "no placeholders"}`, bodyText, fileInfo.displayName, fileInfo.storedName, fileInfo.size, fileInfo.mimeType, req.user.id],
+      `INSERT INTO documents (organization_id,title,category,status,notes,body_text,original_filename,stored_name,file_size,mime_type,uploaded_at,created_by,visibility,template_deal_type)
+       VALUES ($1,$2,'template','approved',$3,$4,$5,$6,$7,$8,NOW(),$9,'organization',$10) RETURNING id`,
+      [await organizationId(), title, `Template using: ${placeholdersUsed(bodyText).join(", ") || "no placeholders"}`, bodyText, fileInfo.displayName, fileInfo.storedName, fileInfo.size, fileInfo.mimeType, req.user.id, templateDealType(req.body?.deal_type)],
     );
     if (truthy(req.body?.is_default)) await setDefaultTemplate(created.id);
     await audit(req, "uploaded", "contract_template", created.id, { title, filename: fileInfo.displayName });
@@ -1226,13 +1353,14 @@ router.get("/contracts/:id/document-content", route(async (req, res) => {
 
   let bodyText = document.body_text;
   if (!bodyText) {
-    let templateBody = DEFAULT_CONTRACT_TEMPLATE;
+    const agreement = builtInAgreement(contract.deal_type);
+    let templateBody = agreement.body;
     if (contract.template_document_id) {
       const template = await Document.get(contract.template_document_id);
-      if (template?.category === "template" && template.body_text) templateBody = template.body_text;
+      if (template?.category === "template" && template.body_text) templateBody = String(template.body_text).replace(CONTRACT_BODY_TOKEN, agreement.body);
     }
     const organization = await queryOne("SELECT name FROM organizations WHERE id=$1", [await organizationId()]);
-    const project = requireRecord(await Project.get(contract.project_id), "Project");
+    const project = contract.project_id ? requireRecord(await Project.get(contract.project_id), "Project") : null;
     const property = contract.property_id ? requireRecord(await Property.get(contract.property_id), "Property") : null;
     const client = contract.client_id ? await Client.get(contract.client_id) : null;
     bodyText = renderContractDocument(templateBody, buildContractValues({ contract, project, property, client, companyName: organization?.name || "MKUYU" }));
@@ -1271,15 +1399,39 @@ router.put("/contracts/:id/document-content", route(async (req, res) => {
   res.json(documentResponse(await Document.get(document.id)));
 }));
 
+// The contract as it looks: the generated Word file (template, letterhead,
+// header and footer) described page by page for the browser to show. Same
+// gate as reading the document itself.
+router.get("/contracts/:id/preview", route(async (req, res) => {
+  if (!can(req.access, "access_documents")) throw new HttpError(403, "Documents access is required to view the generated contract");
+  const contract = requireRecord(await Contract.get(parseId(req.params.id)), "Contract");
+  if (!contract.generated_document_id) throw new HttpError(404, "This contract has no generated document");
+  const document = requireRecord(await Document.get(contract.generated_document_id), "Generated document");
+  if (Number(document.contract_id) !== Number(contract.id) || document.category !== "agreement") throw new HttpError(404, "The generated document is not linked to this contract");
+  const file = resolveStoredFile(documentUploadsDir, document.stored_name);
+  if (!file) throw new HttpError(404, "The contract file is missing");
+  if (!/\.docx$/i.test(document.original_filename || document.stored_name)) throw new HttpError(415, "This contract is not a Word document; download it to view it");
+  let preview;
+  try {
+    preview = await docxToPreview(fs.readFileSync(file));
+  } catch {
+    throw new HttpError(422, "This contract file cannot be shown here; download it to view it");
+  }
+  res.set("Cache-Control", "private, no-store");
+  res.json({ contract_id: contract.id, document_id: document.id, title: document.title, original_filename: document.original_filename, contract_number: contract.contract_number, ...preview });
+}));
+
 router.get("/contract-placeholders", route(async (req, res) => { res.json(CONTRACT_PLACEHOLDERS); }));
 
 router.post("/contracts", route(async (req, res) => {
+  requireContractAuthor(req.access);
   const data = await validateContract(req.body || {});
   const result = await Contract.create(data);
   res.status(201).json(contractResponse(await Contract.get(result.id), req));
 }));
 router.put("/contracts/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
+  requireContractAuthor(req.access);
   const current = requireRecord(await Contract.get(id), "Contract");
   // The lifecycle is owned by Legal, so an edit that tries to change the status
   // is refused outright rather than silently ignored.
@@ -1290,15 +1442,15 @@ router.put("/contracts/:id", route(async (req, res) => {
   await Contract.update(id, data);
   res.json(contractResponse(await Contract.get(id), req));
 }));
-// Only Legal (or the administrator) may destroy a contract record. Everyone else
-// cancels it through the workflow so the revision trail survives.
+// Deleting a contract is for the MD, Legal and Sales - nobody else. Sales may
+// only delete while the deal is still before approval; once Legal has approved
+// it, the record belongs to the approval trail and only the MD or Legal may
+// remove it. Everyone else cancels it through the workflow.
 router.delete("/contracts/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   const contract = requireRecord(await Contract.get(id), "Contract");
-  const legalOwner = can(req.access, "approve_legal");
-  if (!legalOwner) {
-    throw new HttpError(403, "only Legal or an administrator may delete a contract record; cancel it instead");
-  }
+  const refusal = contractDeleteRefusal(req.access, contract);
+  if (refusal) throw new HttpError(403, refusal);
   await Contract.remove(id);
   await audit(req, "deleted", "contract", id, { contract_number: contract.contract_number });
   res.json({ ok: true });
@@ -1418,8 +1570,10 @@ router.post("/payments/upload", uploadDocumentFile, route(async (req, res) => {
     const orgId = await organizationId();
     await withTransaction(async (client) => {
       const payment = await client.query(
-        "INSERT INTO payments (organization_id,contract_id,debt_id,client_name,amount,paid_at,method,reference,notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id",
-        [orgId, data.contract_id, data.debt_id || null, data.client_name, data.amount, data.paid_at, data.method || "cash", data.reference || null, data.notes || null],
+        // Ownership is recorded like any other payment (who recorded it matters
+        // for approval: nobody approves their own payment).
+        "INSERT INTO payments (organization_id,contract_id,debt_id,client_name,amount,paid_at,method,reference,notes,owner_id,created_by,department_id,visibility) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id",
+        [orgId, data.contract_id, data.debt_id || null, data.client_name, data.amount, data.paid_at, data.method || "cash", data.reference || null, data.notes || null, ...Object.values((({ owner_id, created_by, department_id, visibility }) => ({ owner_id, created_by, department_id, visibility }))(ownershipFields(req.access)))],
       );
       paymentId = payment.rows[0].id;
       if (fileInfo) {
@@ -1447,6 +1601,24 @@ router.put("/payments/:id", route(async (req, res) => {
   await resyncInstallmentState([current.debt_id, data.debt_id]);
   res.json(paymentResponse(await Payment.get(id)));
 }));
+// Finance approval of a recorded payment. The server decides: the caller must
+// hold the Finance validation authority and financial access, the payment must
+// be inside their scope and still pending, and nobody approves a payment they
+// recorded themselves (a second Finance person confirms it).
+router.post("/payments/:id/approve", route(async (req, res) => {
+  if (!canPermission(req.access, "validate_finance") || !canPermission(req.access, "view_financial")) {
+    throw new HttpError(403, "only Finance can approve payments");
+  }
+  const id = parseId(req.params.id);
+  const payment = requireRecord(await Payment.get(id), "Payment");
+  if (payment.status === "approved") throw new HttpError(409, "this payment is already approved");
+  if (Number(payment.created_by) === Number(req.user.id)) throw new HttpError(403, "a payment must be approved by someone other than the person who recorded it");
+  const result = await Payment.approve(id, req.user.id);
+  if (!result.rowCount) throw new HttpError(409, "this payment could not be approved");
+  await audit(req, "payment_approved", "payment", id, { amount: payment.amount, contract_id: payment.contract_id });
+  res.json(paymentResponse(await Payment.get(id)));
+}));
+
 // Attach or replace a receipt on an existing payment.
 router.post("/payments/:id/receipt", uploadDocumentFile, route(async (req, res) => {
   const id = parseId(req.params.id);
@@ -1619,6 +1791,7 @@ router.post("/properties", route(async (req, res) => {
   const result = await Property.create(data);
   const propertyId = result.id;
   await Property.setListing(propertyId, listing);
+  await applyCategoryStatus(propertyId, req.body || {}, {}, listing, data);
   await recordPropertyHistory(propertyId, req.user.id, "created", { status: data.status, price: data.price });
   res.status(201).json(await Property.get(propertyId));
 }));
@@ -1629,16 +1802,47 @@ router.put("/properties/:id", route(async (req, res) => {
   const listing = validatePropertyListing(req.body || {}, current, data.price);
   await Property.update(id, data);
   await Property.setListing(id, listing);
+  const states = await applyCategoryStatus(id, req.body || {}, current, listing, data);
   if (Boolean(current.public_listing) !== listing.public_listing) {
     await recordPropertyHistory(id, req.user.id, listing.public_listing ? "published" : "unpublished", { offer_rent: listing.offer_rent, offer_buy: listing.offer_buy });
   }
-  if (current.status !== data.status) await recordPropertyHistory(id, req.user.id, "status_changed", { from: current.status, to: data.status });
+  if (current.status !== states.status || current.sale_status !== states.sale_status || current.rent_status !== states.rent_status) {
+    await recordPropertyHistory(id, req.user.id, "status_changed", { from: current.status, to: states.status, sale: states.sale_status, rent: states.rent_status });
+  }
   if (Number(current.price) !== Number(data.price)) await recordPropertyHistory(id, req.user.id, "price_changed", { from: current.price, to: data.price });
   res.json(await Property.get(id));
 }));
+
+/**
+ * Writes a property's sale and rent states and the overall status they imply
+ * (models/propertyStatus.js). `sale_status` / `rent_status` in the body set
+ * one category; a bare `status` (the edit form, older clients) is mapped onto
+ * both. Returns the stored states.
+ */
+async function applyCategoryStatus(id, body, current, listing, data) {
+  const pick = (value, allowed, field) => {
+    if (value === undefined || value === null || value === "") return undefined;
+    if (!allowed.has(value)) throw new HttpError(400, `${field} is invalid`);
+    return value;
+  };
+  let sale = pick(body.sale_status, SALE_STATUSES, "sale_status");
+  let rent = pick(body.rent_status, RENT_STATUSES, "rent_status");
+  if (sale === undefined && rent === undefined && body.status !== undefined && body.status !== current.status) {
+    ({ sale_status: sale, rent_status: rent } = categoryStatusesFrom(data.status, current));
+  }
+  const states = {
+    sale_status: sale ?? current.sale_status ?? categoryStatusesFrom(data.status).sale_status,
+    rent_status: rent ?? current.rent_status ?? categoryStatusesFrom(data.status).rent_status,
+  };
+  states.status = overallStatus({ offer_buy: listing.offer_buy, offer_rent: listing.offer_rent, ...states }, data.status);
+  await query("UPDATE properties SET sale_status=$1, rent_status=$2, status=$3 WHERE id=$4 AND organization_id=$5", [states.sale_status, states.rent_status, states.status, id, await organizationId()]);
+  return states;
+}
 router.delete("/properties/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   requireRecord(await Property.get(id), "Property");
+  const refusal = await propertyDeleteRefusal(req.access, id);
+  if (refusal) throw new HttpError(refusal.status, refusal.error);
   await recordPropertyHistory(id, req.user.id, "deleted");
   // Gallery rows cascade with the property; remove their files too.
   const images = await PropertyImage.listFor(id);

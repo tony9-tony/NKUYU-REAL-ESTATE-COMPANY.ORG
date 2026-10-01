@@ -23,7 +23,7 @@ try {
   const projectId = project.id;
   const client = await Client.create({ project_id: projectId, name: `Unit Client ${suffix}`, client_type: "buyer", status: "active" });
   const clientId = client.id;
-  const contract = await Contract.create({ project_id: projectId, client_id: clientId, client_name: `Unit Client ${suffix}`, contract_type: "new", value: 1000 });
+  const contract = await Contract.create({ project_id: projectId, client_id: clientId, client_name: `Unit Client ${suffix}`, contract_type: "new", deal_type: "buy", value: 1000 });
   const firstDebt = await Debt.create({ contract_id: contract.id, client_name: `Unit Client ${suffix}`, amount: 600, due_date: "2099-01-01" });
   const secondDebt = await Debt.create({ contract_id: contract.id, client_name: `Unit Client ${suffix}`, amount: 400, due_date: "2099-02-01" });
   await Reminder.sync(firstDebt.id, new Date(Date.now() + 86400000).toISOString());

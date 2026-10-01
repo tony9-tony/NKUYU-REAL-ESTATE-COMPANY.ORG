@@ -204,6 +204,14 @@ export const CONTRACT_PLACEHOLDERS = [
   { token: "CONTRACT_DATE", label: "Contract date" },
   { token: "CONTRACT_NUMBER", label: "Contract number" },
   { token: "LAWYER_SIGNATURE", label: "Lawyer signature line" },
+  { token: "CONTRACT_TITLE", label: "Agreement title (Sale Agreement, Lease Agreement, Property Sale Mandate)" },
+  { token: "CLIENT_ROLE", label: "Client's role (Buyer, Tenant or Seller)" },
+  { token: "TITLE_DEED_NUMBER", label: "Title deed / certificate number" },
+  { token: "PROPERTY_TYPE", label: "Property type" },
+  { token: "PROPERTY_AREA", label: "Property size" },
+  // The whole agreement wording for the chosen contract type. Put it in a
+  // letterhead template where the contract text should go.
+  { token: "CONTRACT_BODY", label: "Full agreement text for the chosen type (for letterhead templates)" },
 ];
 
 const KNOWN = new Set(CONTRACT_PLACEHOLDERS.map((entry) => entry.token));
@@ -279,8 +287,9 @@ export { TOKEN_PATTERN };
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import PDFDocument from "pdfkit";
-import { Document as WordDocument, HeadingLevel, ImageRun, Packer, Paragraph, TextRun } from "docx";
+import { AlignmentType, BorderStyle, Document as WordDocument, Footer, Header, HeadingLevel, ImageRun, Packer, PageNumber, Paragraph, TabStopType, TextRun } from "docx";
 import { BRAND, BRAND_GREEN, BRAND_GOLD, BRAND_SUB } from "../reports/exporters.js";
 import { documentUploadsDir, extensionMime } from "../uploads.js";
 
@@ -424,31 +433,124 @@ function signatureParagraphs(signature) {
   ];
 }
 
-export async function writeContractDocx({ text, targetPath, title, contractNumber, signature = null }) {
+// ---------------------------------------------------------------------------
+// The built-in MKUYU letterhead.
+//
+// Used whenever no Word template has been uploaded. The letterhead (logo,
+// company name, the agreement title) lives in the page HEADER and the contract
+// number with "Page X of Y" in the FOOTER, so Word repeats the template on
+// every page however long the agreement runs: the content always stays on the
+// template. Colours are the MKUYU identity of the public website.
+// ---------------------------------------------------------------------------
+const LETTERHEAD_INK = "16130F";
+const LETTERHEAD_ACCENT = "A67C52";
+const LETTERHEAD_MUTED = "6F675E";
+const PAGE_CONTENT_WIDTH = 9900; // A4 (11906 twips) less two 1000-twip margins
+const LOGO_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "frontend", "assets", "brand", "mkuyu-logo-192.png");
+let logoBytes;
+function brandLogo() {
+  if (logoBytes === undefined) {
+    try { logoBytes = fs.readFileSync(LOGO_PATH); } catch { logoBytes = null; }
+  }
+  return logoBytes;
+}
+
+function letterheadHeader(title) {
+  const logo = brandLogo();
+  return new Header({
+    children: [
+      new Paragraph({
+        tabStops: [{ type: TabStopType.RIGHT, position: PAGE_CONTENT_WIDTH }],
+        children: [
+          ...(logo ? [new ImageRun({ type: "png", data: logo, transformation: { width: 46, height: 46 } }), new TextRun({ text: "  " })] : []),
+          new TextRun({ text: BRAND, bold: true, size: 34, color: LETTERHEAD_INK, font: "Georgia" }),
+          new TextRun({ text: `\t${title || "Agreement"}`, size: 18, color: LETTERHEAD_MUTED }),
+        ],
+      }),
+      new Paragraph({
+        spacing: { after: 120 },
+        border: { bottom: { style: BorderStyle.SINGLE, size: 12, color: LETTERHEAD_ACCENT, space: 4 } },
+        children: [new TextRun({ text: "REAL ESTATE · PROPERTY · PEOPLE · AGREEMENTS", size: 14, color: LETTERHEAD_ACCENT, characterSpacing: 40 })],
+      }),
+    ],
+  });
+}
+
+function letterheadFooter(contractNumber) {
+  return new Footer({
+    children: [
+      new Paragraph({
+        tabStops: [{ type: TabStopType.RIGHT, position: PAGE_CONTENT_WIDTH }],
+        border: { top: { style: BorderStyle.SINGLE, size: 4, color: "E4DDD2", space: 4 } },
+        children: [
+          new TextRun({ text: `${BRAND} Real Estate${contractNumber ? ` · Contract ${contractNumber}` : ""}`, size: 16, color: LETTERHEAD_MUTED }),
+          new TextRun({ children: ["\tPage ", PageNumber.CURRENT, " of ", PageNumber.TOTAL_PAGES], size: 16, color: LETTERHEAD_MUTED }),
+        ],
+      }),
+    ],
+  });
+}
+
+/** Agreement text (see agreements.js for the line syntax) -> Word paragraphs. */
+export function agreementParagraphs(text) {
   const children = [];
+  let previousBlank = false;
+  // The signature section is kept together on one page (Word "keep with next").
+  let signatures = false;
   for (const raw of String(text || "").split(/\r?\n/)) {
     const line = raw.replace(/\s+$/, "");
+    if (/^##\s+Signatures\b/i.test(line)) signatures = true;
     if (!line.trim()) {
-      children.push(new Paragraph({ text: "", spacing: { after: 120 } }));
+      // One blank line is one paragraph break; runs of blanks do not stack up.
+      if (!previousBlank && children.length) children.push(new Paragraph({ text: "", keepNext: signatures, spacing: { after: 40 } }));
+      previousBlank = true;
+      continue;
+    }
+    previousBlank = false;
+    if (signatures && !/^#{1,3}\s/.test(line)) {
+      children.push(new Paragraph({ keepNext: true, keepLines: true, spacing: { after: 120, line: 300 }, children: [new TextRun(line)] }));
       continue;
     }
     const heading = line.match(/^(#{1,3})\s+(.*)$/);
-    if (heading) {
-      const level = heading[1].length;
+    if (heading && heading[1].length === 1) {
       children.push(new Paragraph({
-        heading: level === 1 ? HeadingLevel.HEADING_1 : level === 2 ? HeadingLevel.HEADING_2 : HeadingLevel.HEADING_3,
-        children: [new TextRun({ text: heading[2], color: level === 1 ? BRAND_GREEN : BRAND_GOLD })],
-        spacing: { before: 240, after: 120 },
+        heading: HeadingLevel.TITLE,
+        alignment: AlignmentType.CENTER,
+        spacing: { before: 120, after: 80 },
+        children: [new TextRun({ text: heading[2].toUpperCase(), bold: true, size: 34, color: LETTERHEAD_INK, font: "Georgia", characterSpacing: 30 })],
       }));
+    } else if (heading) {
+      children.push(new Paragraph({
+        heading: heading[1].length === 2 ? HeadingLevel.HEADING_2 : HeadingLevel.HEADING_3,
+        keepNext: true,
+        spacing: { before: 260, after: 100 },
+        children: [new TextRun({ text: heading[2].toUpperCase(), bold: true, size: heading[1].length === 2 ? 22 : 20, color: LETTERHEAD_INK, font: "Georgia" })],
+      }));
+    } else if (/^[-*]\s+/.test(line)) {
+      children.push(new Paragraph({ bullet: { level: 0 }, spacing: { after: 60 }, children: [new TextRun({ text: line.replace(/^[-*]\s+/, "") })] }));
+    } else if (/^>\s?/.test(line)) {
+      children.push(new Paragraph({ spacing: { after: 100 }, children: [new TextRun({ text: line.replace(/^>\s?/, ""), italics: true, size: 18, color: LETTERHEAD_MUTED })] }));
+    } else if (/^Contract number:/i.test(line)) {
+      children.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 200 }, children: [new TextRun({ text: line, size: 18, color: LETTERHEAD_MUTED })] }));
     } else {
-      children.push(new Paragraph({ children: [new TextRun(line)], spacing: { after: 120 } }));
+      children.push(new Paragraph({ alignment: AlignmentType.JUSTIFIED, spacing: { after: 120, line: 300 }, children: [new TextRun(line)] }));
     }
   }
+  return children;
+}
+
+export async function writeContractDocx({ text, targetPath, title, contractNumber, signature = null }) {
   const document = new WordDocument({
     creator: `${BRAND} · ${BRAND_SUB}`,
     title: title || "Sale Agreement",
     subject: `Contract ${contractNumber || ""}`.trim(),
-    sections: [{ properties: { page: { margin: { top: 1000, right: 1000, bottom: 1000, left: 1000 } } }, children: [...children, ...signatureParagraphs(signature)] }],
+    styles: { default: { document: { run: { font: "Cambria", size: 22, color: "222222" } } } },
+    sections: [{
+      properties: { page: { margin: { top: 1500, right: 1000, bottom: 1200, left: 1000, header: 500, footer: 500 } } },
+      headers: { default: letterheadHeader(title) },
+      footers: { default: letterheadFooter(contractNumber) },
+      children: [...agreementParagraphs(text), ...signatureParagraphs(signature)],
+    }],
   });
   const buffer = await Packer.toBuffer(document);
   fs.mkdirSync(path.dirname(targetPath), { recursive: true });

@@ -167,7 +167,7 @@ try {
   const project = await call("/projects", { token: salesToken, method: "POST", body: { name: `Pricing Project ${suffix}` } });
   projectId = project.body.id;
   const client = await call("/clients", { token: salesToken, method: "POST", body: { name: `Pricing Client ${suffix}`, client_type: "buyer", status: "active" } });
-  const baseBody = { project_id: projectId, client_id: client.body.id, client_name: `Pricing Client ${suffix}`, contract_type: "new" };
+  const baseBody = { project_id: projectId, client_id: client.body.id, client_name: `Pricing Client ${suffix}`, contract_type: "new", deal_type: "buy" };
 
   const created = await call("/contracts", { token: salesToken, method: "POST", body: { ...baseBody, original_price: 100000, discount_pct: 10 } });
   contractId = created.body.id;

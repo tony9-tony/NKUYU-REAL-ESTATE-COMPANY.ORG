@@ -22,8 +22,14 @@ export function clearOrganizationCache() {
 // decision, whatever the role table says. Business work belongs to the
 // departments that do it.
 export const BUSINESS_MODULES = ["projects", "properties", "clients", "leads", "contracts", "documents", "appointments", "debts", "payments", "reminders", "reports", "follow_ups"];
+// Modules a role may be allowed to SEE without working in them: `view_<module>`
+// grants reading only. Finance, for example, sees projects and properties to
+// understand a deal but never changes them. Writing still needs `access_<module>`.
+export const READ_ONLY_MODULES = new Set(["projects", "properties", "appointments"]);
+
 export const BUSINESS_PERMISSIONS = new Set([
   ...BUSINESS_MODULES.map((module) => `access_${module}`),
+  ...[...READ_ONLY_MODULES].map((module) => `view_${module}`),
   "submit_contract", "review_legal", "request_changes", "approve_legal", "validate_finance", "approve_management",
   "view_financial", "approve",
 ]);
@@ -38,6 +44,17 @@ export function canAccessModule(access, module) {
   if (!access) return true;
   if (access.isAdmin) return !BUSINESS_MODULES.includes(module);
   return access.permissions.includes(`access_${module}`);
+}
+
+/** True when the caller holds only the read-only grant for `module`. */
+export function isReadOnlyModule(access, module) {
+  if (!access || access.isAdmin || !READ_ONLY_MODULES.has(module)) return false;
+  return !access.permissions.includes(`access_${module}`) && access.permissions.includes(`view_${module}`);
+}
+
+/** May the caller read `module` at all: full access or the read-only grant. */
+export function canReadModule(access, module) {
+  return canAccessModule(access, module) || isReadOnlyModule(access, module);
 }
 
 export async function provisionSystemAdministrator(userId) {
@@ -147,7 +164,8 @@ export function requirePermissionForMethod() {
       const methodPermission = read ? "view" : req.method === "POST" ? "create" : req.method === "PUT" || req.method === "PATCH" ? "edit" : req.method === "DELETE" ? "delete" : "view";
       const module = moduleForPath(req.path);
       const required = new Set();
-      if (module) required.add(`access_${module}`);
+      // A read-only holder may GET the module, never write to it.
+      if (module) required.add(read && isReadOnlyModule(req.access, module) ? `view_${module}` : `access_${module}`);
       // Report reads are gated by `view_reports` rather than the generic `view`.
       if (module === "reports") required.add(read ? "view_reports" : methodPermission);
       else required.add(methodPermission);

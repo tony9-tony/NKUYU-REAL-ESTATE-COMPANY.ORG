@@ -90,7 +90,9 @@ try {
   console.log("\n=== projects are categories derived from their homes ===");
   const projects = (await call("/public/projects", { auth: false })).body;
   const publicProject = projects.find((p) => p.slug === String(project.body.id));
-  check(Boolean(publicProject) && JSON.stringify(publicProject.services) === JSON.stringify(["rent", "buy"]), "the project appears once it has a published home, with its homes' services");
+  // Projects are for sale only: renting is about a single property.
+  check(Boolean(publicProject) && JSON.stringify(publicProject.services) === JSON.stringify(["buy"]), "the project appears once it has a home for sale, as a sale project");
+  check((await call("/public/projects?service=rent", { auth: false })).body.length === 0, "no project is listed for rent");
   check(publicProject?.location === "Dar es Salaam" && publicProject?.photos?.length === 1, "location and cover photo come from its homes");
   check((await call("/projects/1/images", { auth: true })).status === 404, "projects have no photo endpoints of their own");
 
@@ -119,11 +121,13 @@ try {
   check((await request({ ...good, phone: "+255 700 111 222" })).status === 409, "a request for a sold property is refused");
 
   console.log("\n=== the website follows the property's real status ===");
-  check(!(await publicList()).some((p) => p.id === id), "a SOLD property leaves the listings");
+  // Sold and rented properties stay on the website, marked for their category.
+  const soldRow = (await publicList()).find((p) => p.id === id);
+  check(soldRow?.availability?.buy === "sold", "a SOLD property stays listed, marked sold on the Buy side");
   const soldDetail = await call(`/public/properties/${id}`, { auth: false });
-  check(soldDetail.status === 200 && soldDetail.body.status === "sold", "an old link still explains that it is sold");
+  check(soldDetail.status === 200 && soldDetail.body.availability?.buy === "sold", "an old link still explains that it is sold");
   await call(`/properties/${id}`, { method: "PUT", body: { status: "leased" } });
-  check((await call(`/public/properties/${id}`, { auth: false })).body.status === "rented", "leased is shown to the public as 'rented'");
+  check((await call(`/public/properties/${id}`, { auth: false })).body.availability?.rent === "rented", "leased is shown to the public as 'rented' on the Rent side");
   await call(`/properties/${id}`, { method: "PUT", body: { status: "available", offer_rent: 0 } });
   check(!(await publicList("?service=rent")).some((p) => p.id === id) && (await publicList("?service=buy")).some((p) => p.id === id), "unticking Rent removes it from Rent only");
   await call(`/properties/${id}`, { method: "PUT", body: { public_listing: 0 } });
@@ -165,13 +169,17 @@ try {
   const stageOf = async () => (await call("/org/requests", { as: officer })).body.find((r) => r.id === leadId);
   const requests = (await call("/org/requests", { as: officer })).body;
   check(Array.isArray(requests) && requests.some((r) => r.id === leadId), "the website request is listed under Requests");
-  check(requests.every((r) => r.source === "website"), "Requests holds only Buy/Rent website requests (no contact enquiries)");
+  // Requests holds website requests and Contact-page messages (the latter for
+  // Customer Service to answer), never leads typed in by staff.
+  check(requests.every((r) => ["website", "website-contact"].includes(r.source)), "Requests holds only website requests and Contact-page messages");
   check((await stageOf())?.property_name === `Villa ${tag}` && !(await stageOf())?.task_id, "it names the property and has no hand-off yet");
   const officerId = created.body.id;
   const task = await call("/org/tasks", { method: "POST", as: officer, body: { title: "Contact Asha Test (buy request)", assigned_to: csId, reviewer_id: officerId, priority: "high" } });
   check(task.status === 201, `assigned Customer Service with Sales as reviewer (${task.status})`);
   check((await call(`/org/requests/${leadId}/handed-off`, { method: "POST", as: officer, body: { task_id: 999999 } })).status === 400, "a hand-off cannot point at an unknown task");
-  check((await call(`/org/requests/${enquiryLead.id}/handed-off`, { method: "POST", as: officer, body: { task_id: task.body.id } })).status === 404, "a contact enquiry is not a request");
+  // A Contact-page message is followed under Requests too, so it may be handed
+  // to Customer Service - still only to a real task the caller assigned.
+  check((await call(`/org/requests/${enquiryLead.id}/handed-off`, { method: "POST", as: officer, body: { task_id: 999999 } })).status === 400, "a Contact-page message can be handed off, but only to a real task");
   const csOnly = (await call("/org/tasks/assignees?department=CUSTOMER%20SERVICE", { as: officer })).body;
   const csMembers = (await query("SELECT ud.user_id FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE d.name='CUSTOMER SERVICE'")).rows.map((r) => Number(r.user_id));
   check(csOnly.length > 0 && csOnly.some((u) => u.id === csId), "the hand-off list offers Customer Service staff");

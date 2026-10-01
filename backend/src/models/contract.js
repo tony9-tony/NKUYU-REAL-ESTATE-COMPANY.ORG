@@ -10,7 +10,7 @@ const ENTITY = "contract";
 const select = `SELECT c.*, c.value AS final_price, p.name AS project_name,cl.name AS linked_client_name,pr.name AS property_name,
   lr.display_name AS legal_reviewer_name,fv.display_name AS finance_validator_name,ma.display_name AS management_approver_name
   FROM contracts c
-  JOIN projects p ON p.id=c.project_id
+  LEFT JOIN projects p ON p.id = c.project_id
   LEFT JOIN clients cl ON cl.id=c.client_id
   LEFT JOIN properties pr ON pr.id=c.property_id
   LEFT JOIN users lr ON lr.id=c.legal_reviewed_by
@@ -86,10 +86,12 @@ export const Contract = {
       data.first_due_date || null,
       data.template_document_id || null,
       data.generated_document_id || null,
+      data.deal_type || null,
+      data.title_deed_number || null,
     );
     const row = await queryOne(
-      `INSERT INTO contracts(organization_id,project_id,property_id,client_id,client_name,contract_type,status,value,original_price,discount_pct,discount_amount,start_date,end_date,terms,notes,requires_management_approval,contract_number,${OWNERSHIP_COLUMNS},contract_date,agreement_duration,agreement_duration_unit,client_phone,client_email,payment_frequency,deposit_amount,installment_count,first_due_date,template_document_id,generated_document_id)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32) RETURNING id`,
+      `INSERT INTO contracts(organization_id,project_id,property_id,client_id,client_name,contract_type,status,value,original_price,discount_pct,discount_amount,start_date,end_date,terms,notes,requires_management_approval,contract_number,${OWNERSHIP_COLUMNS},contract_date,agreement_duration,agreement_duration_unit,client_phone,client_email,payment_frequency,deposit_amount,installment_count,first_due_date,template_document_id,generated_document_id,deal_type,title_deed_number)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34) RETURNING id`,
       values,
     );
     await Contract.recordRevision(row.id, { status: data.status || "draft", action: "created", actorId: access?.userId });
@@ -104,10 +106,10 @@ export const Contract = {
     const values = [data.project_id, data.property_id || null, data.client_id || null, data.client_name, data.contract_type,
       pricing.final_price ?? 0, pricing.original_price ?? pricing.final_price ?? 0, pricing.discount_pct ?? 0, pricing.discount_amount ?? 0,
       data.start_date || null, data.end_date || null, data.terms || null, data.notes || null, data.requires_management_approval ? true : false,
-      access?.userId ?? null, await organizationId(), id];
+      access?.userId ?? null, await organizationId(), id, data.deal_type || null, data.title_deed_number ?? null];
     const scope = scopeCondition("c", ENTITY, access, values);
     const result = await query(
-      `UPDATE contracts c SET project_id=$1,property_id=$2,client_id=$3,client_name=$4,contract_type=$5,value=$6,original_price=$7,discount_pct=$8,discount_amount=$9,start_date=$10,end_date=$11,terms=$12,notes=$13,requires_management_approval=$14,updated_by=$15,updated_at=NOW()
+      `UPDATE contracts c SET project_id=$1,property_id=$2,client_id=$3,client_name=$4,contract_type=$5,value=$6,original_price=$7,discount_pct=$8,discount_amount=$9,start_date=$10,end_date=$11,terms=$12,notes=$13,requires_management_approval=$14,updated_by=$15,updated_at=NOW(),deal_type=COALESCE($18,c.deal_type),title_deed_number=COALESCE($19,c.title_deed_number)
        WHERE c.id=$17 AND c.organization_id=$16 AND ${scope}`,
       values,
     );

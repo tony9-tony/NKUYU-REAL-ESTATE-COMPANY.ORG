@@ -168,6 +168,10 @@ const permissions = [
   // its own (MD, ICT administration, the sales officers, Legal Officer), not
   // something every document user can do.
   ["upload_contract_templates", "Upload and manage contract templates"],
+  // Read-only sight of a module: the holder may look, never change anything.
+  ["view_projects", "See projects (read only)"],
+  ["view_properties", "See properties (read only)"],
+  ["view_appointments", "See appointments (read only)"],
   ...MODULES.map((module) => [`access_${module}`, `Access ${MODULE_LABELS[module] || module}`]),
 ];
 const businessAccess = MODULES.map((module) => `access_${module}`);
@@ -203,16 +207,16 @@ export const defaultRoles = [
   ["Managing Director", "Organization-wide business authority and management approval. No system administration.", 80, "organization", ["access_projects", "access_properties", "access_clients", "access_leads", "access_contracts", "access_documents", "access_appointments", "access_follow_ups", "access_debts", "access_payments", "access_reminders", "access_reports", "view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "approve_management", "request_changes", ...taskWorkflow, "upload_contract_templates"]],
 
   // LEGAL. Owns the contract lifecycle and the final contract record.
-  ["Legal Manager", "Owns the contract record and supervises the legal desk", 45, "department", ["access_contracts", "access_documents", "access_clients", "access_projects", "access_reports", "view", "create", "edit", "delete", "approve", "export", "view_reports", "review_legal", "request_changes", "approve_legal", ...taskWorkflow]],
-  ["Legal Officer", "Prepares, reviews and controls contract records", 35, "department", ["access_contracts", "access_documents", "access_clients", "access_projects", "access_reports", "view", "create", "edit", "delete", "approve", "view_reports", "review_legal", "request_changes", "approve_legal", "upload_contract_templates"]],
+  ["Legal Manager", "Owns the contract record and supervises the legal desk", 45, "department", ["access_contracts", "access_documents", "access_clients", "view_projects", "view_properties", "view_appointments", "access_reports", "view", "create", "edit", "delete", "approve", "export", "view_reports", "review_legal", "request_changes", "approve_legal", ...taskWorkflow]],
+  ["Legal Officer", "Prepares, reviews and controls contract records", 35, "department", ["access_contracts", "access_documents", "access_clients", "view_projects", "view_properties", "view_appointments", "access_reports", "view", "create", "edit", "delete", "approve", "view_reports", "review_legal", "request_changes", "approve_legal", "upload_contract_templates"]],
 
   // ICT & ADMINISTRATION. Controls the system, never the business.
   ["ICTO", "Controls accounts, roles, permissions, settings, security and audit. No business authority.", 35, "organization", [...systemAccess, "upload_contract_templates"]],
   ["Administration & IT Support Officer", "Staff support, staff records and technical support. No business authority.", 20, "department", ["manage_users", "view", "view_reports", "export"]],
 
   // FINANCE & ACCOUNTS. Owns money and validates the financial terms.
-  ["Finance Manager", "Runs finance operations and validates contract financial terms", 30, "department", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "access_follow_ups", "view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "validate_finance", "request_changes", ...taskWorkflow]],
-  ["Finance Officer", "Payments, installments, receipts and financial term validation", 15, "own", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "view", "create", "edit", "view_financial", "view_reports", "validate_finance", "request_changes"]],
+  ["Finance Manager", "Runs finance operations and validates contract financial terms", 30, "department", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "access_follow_ups", "view_projects", "view_properties", "view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "validate_finance", "request_changes", ...taskWorkflow]],
+  ["Finance Officer", "Payments, installments, receipts and financial term validation", 15, "own", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "view_projects", "view_properties", "view", "create", "edit", "view_financial", "view_reports", "validate_finance", "request_changes"]],
 
   // SALES, MARKETING & OPERATIONS. Initiates deals, never approves them.
   ["Department Manager", "Department-wide operational management and team supervision", 40, "department", ["access_projects", "access_properties", "access_clients", "access_leads", "access_appointments", "access_documents", "access_follow_ups", "access_reports", "access_contracts", "view", "create", "edit", "delete", "approve", "export", "view_reports", "submit_contract", "request_changes", ...taskWorkflow]],
@@ -222,8 +226,8 @@ export const defaultRoles = [
   ["Property Officer", "Estate inventory, listings and viewings", 15, "own", ["access_properties", "access_projects", "access_clients", "access_appointments", "access_documents", "view", "create", "edit"]],
 
   // CUSTOMER SERVICE. Communicates and follows up; owns no contract content.
-  ["Customer Service Manager", "Runs the customer service desk and its follow-up discipline", 32, "department", ["access_clients", "access_appointments", "access_leads", "access_follow_ups", "access_properties", "access_reports", "view", "create", "edit", "delete", "approve", "export", "view_reports", ...taskWorkflow]],
-  ["Customer Service Officer", "Customer communication, viewings and follow-up; escalates contract questions to Legal", 15, "own", ["access_clients", "access_appointments", "access_leads", "access_follow_ups", "access_properties", "access_reports", "view", "create", "edit", "view_reports"]],
+  ["Customer Service Manager", "Runs the customer service desk and its follow-up discipline", 32, "department", ["access_clients", "access_appointments", "access_leads", "access_follow_ups", "view_properties", "access_reports", "view", "create", "edit", "delete", "approve", "export", "view_reports", ...taskWorkflow]],
+  ["Customer Service Officer", "Customer communication, viewings and follow-up; escalates contract questions to Legal", 15, "own", ["access_clients", "access_appointments", "access_leads", "access_follow_ups", "view_properties", "access_reports", "view", "create", "edit", "view_reports"]],
 
   ["Staff Member", "Basic operational access to own records", 10, "own", ["access_clients", "access_appointments", "view", "create", "edit"]],
 
@@ -235,7 +239,7 @@ export const defaultRoles = [
   ["Sales & Marketing Officer", "Leads, clients, properties, listings and viewings for the whole sales desk. Creates and submits contracts; never approves them.", 25, "department", ["access_leads", "access_clients", "access_properties", "access_projects", "access_contracts", "access_appointments", "access_documents", "access_follow_ups", "access_reports", "view", "create", "edit", "delete", "export", "view_reports", "submit_contract", "request_changes", "upload_contract_templates", ...taskWorkflow]],
   // Organization scope on purpose: installments belong to the SALES department
   // that made the deal, so a department-scoped accountant would not see them.
-  ["Accountant", "Deposits, installments, payments and overdue follow-up for the whole finance desk. Checks the money on every contract.", 25, "organization", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "access_follow_ups", "view", "create", "edit", "delete", "export", "view_financial", "view_reports", "validate_finance", "request_changes"]],
+  ["Accountant", "Deposits, installments, payments and overdue follow-up for the whole finance desk. Checks the money on every contract.", 25, "organization", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "access_follow_ups", "view_projects", "view_properties", "view", "create", "edit", "delete", "export", "view_financial", "view_reports", "validate_finance", "request_changes"]],
   ["ICT Officer", "Staff accounts, settings, security, backups and technical support. No business authority.", 35, "organization", [...systemAccess, "upload_contract_templates"]],
 ];
 
@@ -273,6 +277,60 @@ const roleRenames = { "Contracts & Legal Officer": "Legal Officer" };
  * published", so nothing reaches the public site until someone publishes it.
  */
 // Sessions carry how long they may live and when they were last used (MK-06).
+// Every contract says which deal it is: Buy, Rent or Sell. Required for new
+// contracts (the API refuses a contract without it); older rows stay NULL
+// and show as "not recorded" until someone edits them.
+// Payment approval (Finance). A newly recorded payment is "pending" until an
+// authorised Finance user approves it. Payments recorded before approval
+// existed are treated as approved, so nothing already in the books changes.
+// A Sell submission from the website carries the seller's property details.
+async function migrateSellLeads() {
+  await query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS sell_details JSONB");
+}
+
+async function migratePaymentApproval() {
+  const had = await queryOne("SELECT 1 AS ok FROM information_schema.columns WHERE table_name='payments' AND column_name='status'");
+  await query("ALTER TABLE payments ADD COLUMN IF NOT EXISTS status TEXT");
+  await query("ALTER TABLE payments ADD COLUMN IF NOT EXISTS approved_by INTEGER REFERENCES users(id) ON DELETE SET NULL");
+  await query("ALTER TABLE payments ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ");
+  if (!had) await query("UPDATE payments SET status='approved' WHERE status IS NULL");
+  await query("UPDATE payments SET status='pending' WHERE status IS NULL");
+  await query("ALTER TABLE payments ALTER COLUMN status SET DEFAULT 'pending'");
+  await query("ALTER TABLE payments ALTER COLUMN status SET NOT NULL");
+  await query("ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_status_check");
+  await query("ALTER TABLE payments ADD CONSTRAINT payments_status_check CHECK (status IN ('pending','approved'))");
+}
+
+async function migrateContractDealType() {
+  // Who approved a request becoming a client (Sales or the MD).
+  await query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS converted_by INTEGER REFERENCES users(id) ON DELETE SET NULL");
+  // A Rent contract is about a property only: it has no project.
+  await query("ALTER TABLE contracts ALTER COLUMN project_id DROP NOT NULL");
+  // A property's state per category: sale (available/reserved/sold) and rent
+  // (available/reserved/rented). Backfilled once from the single status.
+  await query("ALTER TABLE properties ADD COLUMN IF NOT EXISTS sale_status TEXT");
+  await query("ALTER TABLE properties ADD COLUMN IF NOT EXISTS rent_status TEXT");
+  await query(`UPDATE properties SET sale_status = CASE status WHEN 'sold' THEN 'sold' WHEN 'reserved' THEN 'reserved' ELSE 'available' END WHERE sale_status IS NULL`);
+  await query(`UPDATE properties SET rent_status = CASE status WHEN 'leased' THEN 'rented' WHEN 'reserved' THEN 'reserved' ELSE 'available' END WHERE rent_status IS NULL`);
+  await query("ALTER TABLE properties ALTER COLUMN sale_status SET DEFAULT 'available'");
+  await query("ALTER TABLE properties ALTER COLUMN rent_status SET DEFAULT 'available'");
+  await query("ALTER TABLE properties DROP CONSTRAINT IF EXISTS properties_sale_status_check");
+  await query("ALTER TABLE properties ADD CONSTRAINT properties_sale_status_check CHECK (sale_status IN ('available','reserved','sold'))");
+  await query("ALTER TABLE properties DROP CONSTRAINT IF EXISTS properties_rent_status_check");
+  await query("ALTER TABLE properties ADD CONSTRAINT properties_rent_status_check CHECK (rent_status IN ('available','reserved','rented'))");
+  await query("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS deal_type TEXT");
+  await query("ALTER TABLE contracts DROP CONSTRAINT IF EXISTS contracts_deal_type_check");
+  await query("ALTER TABLE contracts ADD CONSTRAINT contracts_deal_type_check CHECK (deal_type IS NULL OR deal_type IN ('buy','rent','sell'))");
+  await query("CREATE INDEX IF NOT EXISTS idx_contracts_deal_type ON contracts(deal_type)");
+  // The title deed (or certificate of occupancy) the agreement is about.
+  await query("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS title_deed_number TEXT");
+  // A contract template may be written for one kind of deal (Buy, Rent or
+  // Sell) or, when NULL, be the letterhead every contract is placed on.
+  await query("ALTER TABLE documents ADD COLUMN IF NOT EXISTS template_deal_type TEXT");
+  await query("ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_template_deal_type_check");
+  await query("ALTER TABLE documents ADD CONSTRAINT documents_template_deal_type_check CHECK (template_deal_type IS NULL OR template_deal_type IN ('buy','rent','sell'))");
+}
+
 async function migrateSessionSecurity() {
   await query("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()");
   await query("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS remember BOOLEAN NOT NULL DEFAULT TRUE");
@@ -394,7 +452,7 @@ async function migrateContractPricing() {
   await query("ALTER TABLE contracts ALTER COLUMN original_price SET DEFAULT 0");
 }
 
-export async function runMigrations() {
+export async function runMigrations({ seedDemo = process.env.MKUYU_IS_TEST_DATABASE === "1" } = {}) {
   await query(schema);
   await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_photo_stored_name TEXT");
   await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_photo_mime_type TEXT");
@@ -408,6 +466,9 @@ export async function runMigrations() {
   await migrateContractPricing();
   await migratePublicListing();
   await migrateSessionSecurity();
+  await migrateContractDealType();
+  await migratePaymentApproval();
+  await migrateSellLeads();
   for (const table of scopedTables) {
     await query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL`);
     await query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id) ON DELETE SET NULL`);
@@ -532,9 +593,29 @@ export async function runMigrations() {
       [defaultRoles.map(([name]) => name)],
     );
   });
-  await seedDemoAccounts();
-  await rotateLegacyPasswords();
+  if (seedDemo) {
+    await seedDemoAccounts();
+    await rotateLegacyPasswords();
+  }
   await repairRetiredRoleDisplayNames();
+  // Contact-page messages belong to Customer Service. Messages that arrived
+  // before this rule get the same home, once (never an allocated record).
+  await query(
+    `UPDATE leads l SET department_id = d.id, visibility = 'department'
+       FROM departments d
+      WHERE d.organization_id = l.organization_id AND d.name = 'CUSTOMER SERVICE'
+        AND l.source = 'website-contact' AND l.department_id IS NULL AND l.owner_id IS NULL`,
+  );
+  // Contact messages handed to Customer Service before hand-offs were linked
+  // to them: the task names its message ("(Lead W-7)"), so the link - and with
+  // it Customer Service's report - is restored. Only unlinked messages, once.
+  await query(
+    `UPDATE leads l SET task_id = t.id, handed_off_at = COALESCE(l.handed_off_at, t.created_at), status = CASE WHEN l.status = 'new' THEN 'handed_off' ELSE l.status END
+       FROM tasks t
+      WHERE l.source = 'website-contact' AND l.task_id IS NULL AND t.organization_id = l.organization_id
+        AND t.status <> 'cancelled' AND t.description LIKE '%(Lead W-' || l.id || ')%'
+        AND t.id = (SELECT MAX(x.id) FROM tasks x WHERE x.organization_id = l.organization_id AND x.status <> 'cancelled' AND x.description LIKE '%(Lead W-' || l.id || ')%')`,
+  );
   // Staff profile photos, and a lawyer's signature image used on contracts.
   for (const column of ["photo_stored_name TEXT", "photo_mime TEXT", "signature_stored_name TEXT", "signature_mime TEXT", "signature_title TEXT"]) {
     await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS ${column}`);
@@ -690,6 +771,7 @@ async function seedDemoAccounts() {
 }
 
 if (process.argv.includes("--seed-only")) {
-  await runMigrations();
+  if (process.env.NODE_ENV === "production") throw new Error("demo seeding is disabled in production");
+  await runMigrations({ seedDemo: true });
   console.log("PostgreSQL schema ready");
 }

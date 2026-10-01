@@ -37,7 +37,7 @@ try {
     project_id: project.id,
     client_id: client.id,
     client_name: `Partial Client ${suffix}`,
-    contract_type: "new",
+    contract_type: "new", deal_type: "buy",
     value: 1000,
   });
 

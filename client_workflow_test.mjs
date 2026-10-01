@@ -106,7 +106,7 @@ try {
 
   const contract = await call("/contracts", {
     token: salesToken, method: "POST",
-    body: { project_id: projectId, client_id: buyer.body.id, client_name: `Workflow Buyer ${suffix}`, contract_type: "new", original_price: 100000000, discount_pct: 10 },
+    body: { project_id: projectId, client_id: buyer.body.id, client_name: `Workflow Buyer ${suffix}`, contract_type: "new", deal_type: "buy", original_price: 100000000, discount_pct: 10 },
   });
   check(contract.status === 201, `a contract is created for that client (${contract.status})`);
   check(Number(contract.body.final_price) === 90000000, `the contract carries the discounted final price (${contract.body.final_price})`);
@@ -171,7 +171,7 @@ try {
   //    completed later.
   const standalone = await call("/contracts", {
     token: salesToken, method: "POST",
-    body: { project_id: projectId, client_name: `Workflow Standalone ${suffix}`, contract_type: "new", original_price: 1000, discount_pct: 0 },
+    body: { project_id: projectId, client_name: `Workflow Standalone ${suffix}`, contract_type: "new", deal_type: "buy", original_price: 1000, discount_pct: 0 },
   });
   check(standalone.status === 201, `a contract can still be created without a linked client (${standalone.status})`);
   if (standalone.body.id) createdContracts.push(standalone.body.id);

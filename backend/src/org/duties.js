@@ -116,7 +116,7 @@ export const ROLE_DUTIES = {
     { key: "contract_ownership", label: "Own the contract record", description: "Legal holds the final record and its revision history.", permissions: ["access_contracts", "view", "create", "edit", "delete"] },
     { key: "legal_review", label: "Review and approve contracts", description: "Prepares, reviews and approves contracts from the legal perspective.", permissions: ["review_legal", "approve_legal", "request_changes", "approve"] },
     { key: "legal_documents", label: "Manage legal documents", description: "Owns agreements, titles and legal attachments on the contract.", permissions: ["access_documents", "view", "create", "edit", "delete"] },
-    { key: "party_verification", label: "Verify the parties on a contract", description: "Confirms the client and project named before the contract is signed.", permissions: ["access_clients", "access_projects", "view"] },
+    { key: "party_verification", label: "Verify the parties on a contract", description: "Confirms the client, project and property named before the contract is signed, and follows the appointments Sales arranges with customers. Sees projects, properties and appointments; never changes them.", permissions: ["access_clients", "view_projects", "view_properties", "view_appointments", "view"] },
     { key: "contract_lifecycle_control", label: "Control the contract lifecycle", description: "Releases the approved contract to the customer and records the signature.", permissions: ["approve_legal", "access_contracts"] },
     { key: "legal_team_leadership", label: "Supervise the legal desk", description: "Reviews legal work and escalates to management when required.", permissions: ["request_changes", "access_reports", "view_reports"] },
     { key: "work_assignment", label: "Assign work within the legal desk", description: "Hands work to legal staff and reviews what they submit. Cannot assign outside the department.", permissions: ["assign_tasks", "review_tasks"] },
@@ -128,7 +128,8 @@ export const ROLE_DUTIES = {
     { key: "legal_approval", label: "Approve contracts legally", description: "Gives or withholds legal approval. Sole owner of this permission outside administrators.", permissions: ["approve_legal", "approve"] },
     { key: "legal_documents", label: "Manage legal documents", description: "Attaches and maintains agreements, titles and legal records.", permissions: ["access_documents", "view", "create", "edit"] },
     { key: "revision_history", label: "Maintain contract history", description: "Keeps revisions, clauses and the final record traceable.", permissions: ["access_contracts", "access_reports", "view", "view_reports"] },
-    { key: "customer_verification", label: "Verify customer and project detail", description: "Confirms the parties and property named on the contract.", permissions: ["access_clients", "access_projects", "view"] },
+    { key: "customer_verification", label: "Verify customer and project detail", description: "Confirms the parties and property named on the contract. Sees projects and properties, never changes them.", permissions: ["access_clients", "view_projects", "view_properties", "view"] },
+    { key: "appointment_awareness", label: "Follow customer appointments", description: "Sees every appointment Sales arranges with a customer, to prepare the contract in time. Read only: never arranges, edits or cancels one.", permissions: ["view_appointments", "view"] },
     { key: "contract_templates", label: "Maintain contract templates", description: "Uploads the Word templates contracts are generated on and chooses the default.", permissions: ["upload_contract_templates"] },
   ],
   "Finance Manager": [
@@ -137,6 +138,7 @@ export const ROLE_DUTIES = {
     { key: "collections_management", label: "Manage collections", description: "Chases arrears, raises overdue balances and records payments.", permissions: ["access_debts", "access_payments", "access_follow_ups", "access_reminders", "view", "create", "edit", "view_financial"] },
     { key: "finance_reporting", label: "Produce finance reporting", description: "Publishes income, debt and collection reporting for management.", permissions: ["access_reports", "view_reports", "export", "view_financial"] },
     { key: "finance_team_leadership", label: "Supervise the finance desk", description: "Reviews and approves finance work within the department.", permissions: ["approve", "view", "edit", "access_reports"] },
+    { key: "deal_context", label: "See the deal behind the money", description: "Looks up the project and property a contract or payment belongs to. Read only: never creates, edits or deletes them, and never generates contracts.", permissions: ["view_projects", "view_properties", "view"] },
     { key: "work_assignment", label: "Assign work within the finance desk", description: "Hands work to finance staff and reviews what they submit. Cannot assign outside the department.", permissions: ["assign_tasks", "review_tasks"] },
   ],
   "Finance Officer": [
@@ -144,6 +146,7 @@ export const ROLE_DUTIES = {
     { key: "installment_tracking", label: "Track installments and due dates", description: "Maintains the installment register and payment reminders.", permissions: ["access_debts", "access_reminders", "view", "create", "edit", "view_financial"] },
     { key: "financial_term_validation", label: "Validate contract financial terms", description: "Confirms payment plans match the approved price.", permissions: ["validate_finance", "request_changes", "access_contracts", "access_clients"] },
     { key: "client_balance_service", label: "Answer client balance questions", description: "Responds to customers on what they owe and when.", permissions: ["access_clients", "view", "view_financial"] },
+    { key: "deal_context", label: "See the deal behind the money", description: "Looks up the project and property a contract or payment belongs to. Read only: never creates, edits or deletes them, and never generates contracts.", permissions: ["view_projects", "view_properties", "view"] },
     { key: "finance_reporting", label: "Report on collections", description: "Reports income and outstanding balances for the finance desk.", permissions: ["access_reports", "view_reports"] },
   ],
   "Department Manager": [
@@ -191,7 +194,7 @@ export const ROLE_DUTIES = {
     { key: "customer_service_leadership", label: "Supervise the customer service desk", description: "Reviews service quality, workload and outstanding customer commitments.", permissions: ["access_clients", "access_appointments", "access_leads", "access_follow_ups", "view", "create", "edit", "approve"] },
     { key: "work_assignment", label: "Assign work within the service desk", description: "Hands work to service staff and reviews what they submit. Cannot assign outside the department.", permissions: ["assign_tasks", "review_tasks"] },
     { key: "service_quality", label: "Own service quality", description: "Removes or corrects records that misrepresent a customer commitment.", permissions: ["delete", "view", "edit"] },
-    { key: "escalation_management", label: "Manage escalations", description: "Routes contract questions to Legal and property questions to the property desk. Deliberately no contract module access.", permissions: ["access_properties", "view"] },
+    { key: "escalation_management", label: "Manage escalations", description: "Routes contract questions to Legal and property questions to the property desk. Sees properties read-only; deliberately no contract module access.", permissions: ["view_properties", "view"] },
     { key: "customer_reporting", label: "Report on customer service", description: "Reports response times, follow-up completion and enquiry volume.", permissions: ["access_reports", "view_reports", "export"] },
   ],
   "Customer Service Officer": [
@@ -199,7 +202,7 @@ export const ROLE_DUTIES = {
     { key: "inquiry_and_lead_handling", label: "Handle incoming enquiries", description: "Captures customer enquiries and routes them to the right desk.", permissions: ["access_leads", "view", "create", "edit"] },
     { key: "appointment_coordination", label: "Coordinate appointments", description: "Books and confirms viewings, calls and inspections.", permissions: ["access_appointments", "view", "create", "edit"] },
     { key: "signing_follow_up", label: "Follow up on contract signing", description: "Chases signatures. Escalates contract questions to Legal rather than answering them.", permissions: ["access_follow_ups", "view", "create", "edit"] },
-    { key: "property_enquiry", label: "Handle property enquiries", description: "Answers availability and viewing questions on estate.", permissions: ["access_properties", "view"] },
+    { key: "property_enquiry", label: "Handle property enquiries", description: "Answers availability and viewing questions on estate. Sees properties read-only.", permissions: ["view_properties", "view"] },
     { key: "service_reporting", label: "Report on service activity", description: "Reports enquiry volume and follow-up completion to the desk manager.", permissions: ["access_reports", "view_reports"] },
   ],
   "Staff Member": [
@@ -221,6 +224,7 @@ export const ROLE_DUTIES = {
     { key: "installment_tracking", label: "Track installments and due dates", description: "Maintains the installment register and payment reminders.", permissions: ["access_debts", "access_reminders", "view", "create", "edit", "view_financial"] },
     { key: "financial_term_validation", label: "Check the money on contracts", description: "Confirms price, deposit, payment plan and due dates before the MD approves.", permissions: ["validate_finance", "request_changes", "access_contracts", "access_clients"] },
     { key: "overdue_follow_up", label: "Follow up overdue balances", description: "Chases arrears and records what the customer promised.", permissions: ["access_debts", "access_follow_ups", "view", "create", "edit", "view_financial"] },
+    { key: "deal_context", label: "See the deal behind the money", description: "Looks up the project and property a contract or payment belongs to. Read only: never creates, edits or deletes them, and never generates contracts.", permissions: ["view_projects", "view_properties", "view"] },
     { key: "finance_reporting", label: "Report on income and balances", description: "Reports income, debt and collections for the MD.", permissions: ["access_reports", "view_reports", "export", "view_financial"] },
   ],
   "ICT Officer": [

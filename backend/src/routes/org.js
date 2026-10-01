@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { query, queryOne, withTransaction } from "../db.js";
 import { BUSINESS_PERMISSIONS, organizationId, permissionKeys, requirePermission, requireAdmin, requireModuleAccess, requireScope } from "../org/rbac.js";
-import { addRecordShare, can, canAccessModule, clearAccessCache, currentAccess, isScope, isVisibility, listRecordShares, ownershipFields, removeRecordShare, scopeCondition } from "../org/access.js";
+import { addRecordShare, can, canAccessModule, canReadModule, isReadOnlyModule, clearAccessCache, currentAccess, isScope, isVisibility, listRecordShares, ownershipFields, removeRecordShare, scopeCondition } from "../org/access.js";
 import { audit } from "../org/audit.js";
 import { attentionCount } from "../tasks/tasks.js";
 import { hashPassword, publicUser, revokeUserSessions } from "../auth.js";
@@ -20,6 +20,7 @@ import { CONTRACT_ACTIONS, WORKFLOW_STAGES, WORKFLOW_EXCEPTIONS, availableAction
 import { ROLE_DUTIES, CONTRACT_OWNERSHIP, ROLE_HOME_DEPARTMENT, TASK_HANDOFF, SYSTEM_PERMISSIONS, departmentDutyTree, checkRoleDuties, checkContractOwnership, checkNoSystemAdminLeak, checkDeadPermissions } from "../org/duties.js";
 import taskRoutes from "./tasks.js";
 import { EXISTING_CLIENT_SQL, findExistingClient } from "../org/clientMatch.js";
+import { APPOINTMENT_TYPES, arrangeRequestAppointment } from "../org/requestAppointment.js";
 import { cleanupUploadedFile, profileImageExtensions, profileUploadsDir, removeStoredFile, resolveStoredFile, uploadProfileImageFile, validateUploadedFile } from "../uploads.js";
 
 const router = Router();
@@ -165,10 +166,12 @@ async function buildMe(req) {
   // The System Administrator never carries business permissions (see rbac.js).
   const permissions = req.access?.isAdmin ? granted.filter((key) => !BUSINESS_PERMISSIONS.has(key)) : granted;
   // `modules` uses the same keys as the `access_<module>` permission keys.
-  const modules = Object.entries(recordTables)
-    .filter(([, entry]) => canAccessModule(req.access, entry.module))
-    .map(([, entry]) => entry.module)
+  const modules = [...new Set(Object.entries(recordTables)
+    .filter(([, entry]) => canReadModule(req.access, entry.module))
+    .map(([, entry]) => entry.module))]
     .sort();
+  // Modules the caller may look at but not change (e.g. Finance on properties).
+  const readonlyModules = modules.filter((module) => isReadOnlyModule(req.access, module));
   return {
     organization_id: await organizationId(),
     permissions,
@@ -176,6 +179,7 @@ async function buildMe(req) {
     scope: req.access?.scope || "own",
     rank: req.access?.rank ?? 0,
     modules,
+    readonly_modules: readonlyModules,
     // The navigation attention badge. A real count computed from task rows the
     // caller is party to, not a decoration - it is 0 for a user with nothing
     // outstanding and never counts another department's private work.
@@ -406,7 +410,7 @@ router.get("/workspace", async (req, res, next) => {
     const financial = can(access, "view_financial");
     const admin = req.user?.role === "admin";
     const staffAdmin = can(access, "manage_users") || can(access, "manage_roles");
-    const has = (module) => canAccessModule(access, module);
+    const has = (module) => canReadModule(access, module);
     const org = await organizationId();
     const empty = { rows: [], pagination: { page: 1, page_size: WORKSPACE_PAGE_SIZE, total: 0, total_pages: 0, has_next: false, has_previous: false } };
     // A module the caller does not hold is reported as an EMPTY PAGE with total
@@ -844,17 +848,68 @@ router.post("/leads", requireModuleAccess("leads"), requirePermission("create"),
 router.get("/requests", requireModuleAccess("leads"), async(req,res,next)=>{try{
   const values=[await organizationId()];const visible=scopeCondition("l","lead",req.access,values);
   res.json(await rows(`SELECT l.*, p.name AS property_name, t.status AS task_status, t.assigned_to AS task_assignee_id, u.display_name AS task_assignee, t.submitted_at AS task_submitted_at, t.approved_at AS task_approved_at,
-      ec.id AS existing_client_id, ec.name AS existing_client_name
+      tb.display_name AS task_assigned_by, rv.display_name AS task_reviewer, ap.display_name AS task_approved_by, t.updated_at AS task_updated_at,
+      ap_row.starts_at AS appointment_starts_at,
+      cl.name AS client_name, cv.display_name AS converted_by_name,
+      ec.id AS existing_client_id, ec.name AS existing_client_name,
+      rp.body AS task_report, rp.created_at AS task_report_at
     FROM leads l LEFT JOIN properties p ON p.id=l.property_id LEFT JOIN tasks t ON t.id=l.task_id LEFT JOIN users u ON u.id=t.assigned_to
+    LEFT JOIN users tb ON tb.id=t.assigned_by LEFT JOIN users rv ON rv.id=t.reviewer_id LEFT JOIN users ap ON ap.id=t.approved_by
+    LEFT JOIN appointments ap_row ON ap_row.id=l.appointment_id
+    LEFT JOIN clients cl ON cl.id=l.client_id LEFT JOIN users cv ON cv.id=l.converted_by
+    LEFT JOIN LATERAL (SELECT c.body, c.created_at FROM task_comments c WHERE c.task_id=t.id AND c.author_id=t.assigned_to ORDER BY c.created_at DESC, c.id DESC LIMIT 1) rp ON TRUE
     LEFT JOIN clients ec ON l.client_id IS NULL AND ec.id = ${EXISTING_CLIENT_SQL}
-    WHERE l.organization_id=$1 AND l.source='website' AND ${visible} ORDER BY l.created_at DESC LIMIT 500`,values));
+    WHERE l.organization_id=$1 AND l.source IN ('website','website-contact') AND ${visible} ORDER BY l.created_at DESC LIMIT 500`,values));
+}catch(e){next(e);}});
+// Sales arranges the agreed appointment for a request once Customer Service
+// has reported back (or moves it). It goes straight into Appointments.
+/** Whether a user works in Sales (who own website requests end to end). */
+async function inSalesDepartment(userId){
+  return Boolean(await queryOne("SELECT 1 FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=$1 AND d.active=TRUE AND d.name='SALES, MARKETING & OPERATIONS'",[userId]));
+}
+router.post("/requests/:id/appointment", requireModuleAccess("leads"), requireModuleAccess("appointments"), requirePermission("assign_tasks"), async(req,res,next)=>{try{
+  if(!await inSalesDepartment(req.user.id))return res.status(403).json({error:"Sales arranges the appointment; the MD can see it under Appointments"});
+  const leadId=id(req.params.id,"lead_id");const org=await organizationId();
+  const values=[leadId,org];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND l.source IN ('website','website-contact') AND ${scopeCondition("l","lead",req.access,values)}`,values);
+  if(!lead)return res.status(404).json({error:"request not found"});
+  // A report must have come back and been accepted first (unless one is already booked).
+  if(!lead.appointment_id){
+    const task=lead.task_id?await queryOne("SELECT status FROM tasks WHERE id=$1",[lead.task_id]):null;
+    if(!task||!["approved","completed"].includes(task.status))return res.status(409).json({error:"approve Customer Service's report first, then arrange the appointment"});
+  }
+  const when=new Date(String(req.body?.starts_at||""));
+  if(Number.isNaN(when.getTime()))return res.status(400).json({error:"give the appointment date and time"});
+  if(when.getTime()<Date.now()-60*60*1000)return res.status(400).json({error:"the appointment must be in the future"});
+  const type=String(req.body?.appointment_type||"viewing");
+  if(!APPOINTMENT_TYPES.includes(type))return res.status(400).json({error:"appointment type must be viewing, meeting or call"});
+  const note=typeof req.body?.note==="string"?req.body.note.trim().slice(0,2000):"";
+  const result=await arrangeRequestAppointment(lead,{when,type,note},ownershipFields(req.access));
+  await audit(req,result.created?"created":"updated","appointment",result.appointmentId,{from_request:leadId});
+  res.status(result.created?201:200).json({appointment_id:result.appointmentId,client_id:result.clientId,created:result.created});
+}catch(e){next(e);}});
+// A Contact-page message is Customer Service's to answer. The officer who
+// replied to the visitor records it here, with what was said.
+router.post("/requests/:id/answer", requireModuleAccess("leads"), requirePermission("edit"), async(req,res,next)=>{try{
+  const leadId=id(req.params.id,"lead_id");const org=await organizationId();
+  const inCs=await queryOne("SELECT 1 FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=$1 AND d.active=TRUE AND d.name='CUSTOMER SERVICE'",[req.user.id]);
+  if(!inCs)return res.status(403).json({error:"Customer Service answers website messages"});
+  const values=[leadId,org];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND l.source='website-contact' AND ${scopeCondition("l","lead",req.access,values)}`,values);
+  if(!lead)return res.status(404).json({error:"message not found"});
+  const note=typeof req.body?.note==="string"?req.body.note.trim().slice(0,2000):"";
+  if(!note)return res.status(400).json({error:"say how the visitor was answered"});
+  const r=await queryOne("UPDATE leads SET outcome='answered',outcome_note=$1,outcome_at=NOW(),outcome_by=$2,status='contacted' WHERE id=$3 RETURNING *",[note,req.user.id,leadId]);
+  await audit(req,"answered","lead",leadId,{});res.json(r);
 }catch(e){next(e);}});
 // Records which Customer Service task a request was handed to. The task must
 // already exist and have been assigned by the caller (POST /tasks decided
 // whether they may assign it); this only ties the two together.
 router.post("/requests/:id/handed-off", requireModuleAccess("leads"), requirePermission("assign_tasks"), async(req,res,next)=>{try{
+  // Requests are Sales's work: only Sales hands them to Customer Service. The
+  // MD follows them (sees every step) but does not hand them over.
+  if(!await inSalesDepartment(req.user.id))return res.status(403).json({error:"Sales hands requests to Customer Service; the MD can follow them under Requests"});
   const leadId=id(req.params.id,"lead_id");const taskId=id(req.body?.task_id,"task_id");const org=await organizationId();
-  const values=[leadId,org];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND l.source='website' AND ${scopeCondition("l","lead",req.access,values)}`,values);
+  // Contact-page messages may be handed to Customer Service the same way.
+  const values=[leadId,org];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND l.source IN ('website','website-contact') AND ${scopeCondition("l","lead",req.access,values)}`,values);
   if(!lead)return res.status(404).json({error:"request not found"});
   if(lead.client_id)return res.status(409).json({error:"this request is already a client"});
   const task=await queryOne("SELECT id,assigned_to FROM tasks WHERE id=$1 AND organization_id=$2 AND assigned_by=$3",[taskId,org,req.user.id]);
@@ -869,10 +924,19 @@ router.post("/requests/:id/handed-off", requireModuleAccess("leads"), requirePer
 // record is therefore created as a PROSPECT ('lead'), so the completed-client rule
 // (a client must have a contract) is never violated by converting a lead. Sales
 // attaches the contract and completes the client afterwards.
-router.post("/leads/:id/convert", requireModuleAccess("leads"), requirePermission("create"), async(req,res,next)=>{try{const leadId=id(req.params.id,"lead_id");const values=[leadId,await organizationId()];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND ${scopeCondition("l","lead",req.access,values)}`,values);if(!lead)return res.status(404).json({error:"lead not found"});if(lead.client_id)return res.status(409).json({error:"already a client"});
-    const existing=await findExistingClient(values[1],{email:lead.email,phone:lead.phone});
-    if(existing){await query("UPDATE leads SET client_id=$1,status='converted',converted_at=NOW() WHERE id=$2",[existing.id,lead.id]);await audit(req,"converted","lead",lead.id,{client_id:existing.id,existing:true});return res.json(await queryOne("SELECT * FROM clients WHERE id=$1",[existing.id]));}
-    const client=await queryOne("INSERT INTO clients(organization_id,name,email,phone,client_type,status,notes,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,'buyer','lead',$5,$6,$7,$8,$9) RETURNING *",[values[1],lead.name,lead.email,lead.phone,lead.notes,lead.owner_id,lead.created_by,lead.department_id,lead.visibility]);await query("UPDATE leads SET client_id=$1,status='converted',converted_at=NOW() WHERE id=$2",[client.id,lead.id]);await audit(req,"converted","lead",lead.id,{client_id:client.id});res.status(201).json(client);}catch(e){next(e);}});
+// "Become a client". Only two may approve it: Sales (who own the customer)
+// and the MD. The approver is recorded, so everyone - and the contract made
+// later - knows exactly which client the customer is and who accepted them.
+// When the customer matches an existing client (same phone or email), the
+// approver chooses: the same person (link to that client) or a new client.
+router.post("/leads/:id/convert", requireModuleAccess("leads"), async(req,res,next)=>{try{
+    if(!(await inSalesDepartment(req.user.id)||can(req.access,"approve_management")))return res.status(403).json({error:"only Sales or the MD can approve a customer becoming a client"});
+    const leadId=id(req.params.id,"lead_id");const values=[leadId,await organizationId()];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND ${scopeCondition("l","lead",req.access,values)}`,values);if(!lead)return res.status(404).json({error:"lead not found"});if(lead.client_id)return res.status(409).json({error:"already a client"});
+    const mode=req.body?.mode==="new"?"new":req.body?.mode==="existing"?"existing":"auto";
+    const existing=mode==="new"?null:await findExistingClient(values[1],{email:lead.email,phone:lead.phone});
+    if(mode==="existing"&&!existing)return res.status(409).json({error:"no existing client matches this customer; choose 'new client'"});
+    if(existing){await query("UPDATE leads SET client_id=$1,status='converted',converted_at=NOW(),converted_by=$3 WHERE id=$2",[existing.id,lead.id,req.user.id]);await audit(req,"converted","lead",lead.id,{client_id:existing.id,existing:true});return res.json(await queryOne("SELECT * FROM clients WHERE id=$1",[existing.id]));}
+    const clientType=lead.service==="sell"?"seller":lead.service==="rent"?"tenant":"buyer";const client=await queryOne("INSERT INTO clients(organization_id,name,email,phone,client_type,status,notes,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,$10,'lead',$5,$6,$7,$8,$9) RETURNING *",[values[1],lead.name,lead.email,lead.phone,lead.notes,lead.owner_id,lead.created_by,lead.department_id,lead.visibility,clientType]);await query("UPDATE leads SET client_id=$1,status='converted',converted_at=NOW(),converted_by=$3 WHERE id=$2",[client.id,lead.id,req.user.id]);await audit(req,"converted","lead",lead.id,{client_id:client.id});res.status(201).json(client);}catch(e){next(e);}});
 // Follow-ups. Opt-in pagination; the default response is the bare array the
 // workspace aggregate and the existing tests depend on.
 router.get("/follow-ups", requireModuleAccess("follow_ups"), async(req,res,next)=>{try{

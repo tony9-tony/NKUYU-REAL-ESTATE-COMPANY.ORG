@@ -5,7 +5,7 @@ import { clearRecordShares, currentAccess, OWNERSHIP_COLUMNS, ownershipValues, s
 import { deriveInstallmentStatus } from "./debt.js";
 
 const ENTITY = "payment";
-const paymentSelect = `SELECT p.*, c.project_id, c.contract_type, c.status AS contract_status, pr.name AS project_name, d.due_date AS installment_due, d.notes AS installment_notes, doc.original_filename AS receipt_filename, doc.stored_name AS receipt_stored_name, doc.mime_type AS receipt_mime_type FROM payments p JOIN contracts c ON c.id=p.contract_id LEFT JOIN projects pr ON pr.id=c.project_id LEFT JOIN debts d ON d.id=p.debt_id LEFT JOIN documents doc ON doc.id=p.receipt_document_id`;
+const paymentSelect = `SELECT p.*, ab.display_name AS approved_by_name, c.project_id, c.contract_type, c.status AS contract_status, pr.name AS project_name, d.due_date AS installment_due, d.notes AS installment_notes, doc.original_filename AS receipt_filename, doc.stored_name AS receipt_stored_name, doc.mime_type AS receipt_mime_type FROM payments p JOIN contracts c ON c.id=p.contract_id LEFT JOIN projects pr ON pr.id=c.project_id LEFT JOIN debts d ON d.id=p.debt_id LEFT JOIN documents doc ON doc.id=p.receipt_document_id LEFT JOIN users ab ON ab.id=p.approved_by`;
 
 export const Payment = {
   async all(filters = {}) {
@@ -55,11 +55,18 @@ export const Payment = {
     const access = await currentAccess();
     const values = [data.contract_id, data.debt_id || null, data.client_name, data.amount, data.paid_at, data.method || "cash", data.reference || null, data.notes || null, id, await organizationId()];
     const scope = scopeCondition("p", ENTITY, access, values);
-    return query(`UPDATE payments p SET contract_id=$1,debt_id=$2,client_name=$3,amount=$4,paid_at=$5,method=$6,reference=$7,notes=$8 WHERE p.id=$9 AND p.organization_id=$10 AND ${scope}`, values);
+    return query(`UPDATE payments p SET contract_id=$1,debt_id=$2,client_name=$3,amount=$4,paid_at=$5,method=$6,reference=$7,notes=$8,status='pending',approved_by=NULL,approved_at=NULL WHERE p.id=$9 AND p.organization_id=$10 AND ${scope}`, values);
   },
   async setReceipt(id, documentId) {
     const values = [documentId || null, id, await organizationId()];
     return query("UPDATE payments SET receipt_document_id=$1 WHERE id=$2 AND organization_id=$3", values);
+  },
+  /** Marks a pending payment approved; scoped like every other write. */
+  async approve(id, userId) {
+    const access = await currentAccess();
+    const values = [userId, id, await organizationId()];
+    const scope = scopeCondition("p", ENTITY, access, values);
+    return query(`UPDATE payments p SET status='approved', approved_by=$1, approved_at=NOW() WHERE p.id=$2 AND p.organization_id=$3 AND p.status='pending' AND ${scope}`, values);
   },
   async remove(id) {
     const access = await currentAccess();

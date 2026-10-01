@@ -226,7 +226,7 @@ try {
       token: salesToken, method: "POST",
       body: {
         project_id: project.id, client_id: client.id,
-        client_name: "SEC Client", contract_type: "new",
+        client_name: "SEC Client", contract_type: "new", deal_type: "buy",
         original_price: 1000, discount_pct: 0,
         // Forged: the server must price the contract, not accept these.
         final_price: 1, discount_amount: 999, status: "active",
@@ -249,7 +249,7 @@ try {
     }
     const bornCancelled = await call("/contracts", {
       token: salesToken, method: "POST",
-      body: { project_id: project.id, client_id: client.id, client_name: "SEC Client", contract_type: "new", value: 500, status: "cancelled" },
+      body: { project_id: project.id, client_id: client.id, client_name: "SEC Client", contract_type: "new", deal_type: "buy", value: 500, status: "cancelled" },
     });
     check(bornCancelled.status === 201 ? bornCancelled.body?.status === "draft" : bornCancelled.status === 400,
       `a contract cannot be created already cancelled (${bornCancelled.status} / ${bornCancelled.body?.status})`);

@@ -148,6 +148,7 @@ function setAuthPortal(portal) {
 
 function endSession(message = "") {
   currentUser = null;
+  stopLive();
   closeModal();
   // Cached picture blobs belong to the session that fetched them. Signing out
   // releases them rather than leaving them for whoever signs in next.
@@ -204,6 +205,8 @@ function enterWorkspace(user) {
   // the server reported rather than the tab they happened to click.
   if (brandSub) brandSub.textContent = isAdmin ? "Admin Portal" : "Staff Portal";
   bootstrap();
+  // Changes made by anyone appear here without a refresh.
+  startLive();
 }
 
 function setUserAvatar() {
@@ -237,8 +240,9 @@ const viewMeta = {
   clients: ["Clients", "People and companies, from first enquiry to signed agreement"],
   contracts: ["Contracts", "Every agreement and where it sits in the approval workflow"],
   debts: ["Payments & debts", "Installments, balances, recorded payments and reminders"],
+  reminders: ["Reminders", "Installments due now and falling due soon, so no payment date is missed"],
   appointments: ["Appointments", "Viewings, calls, meetings and inspections"],
-  requests: ["Requests", "Buy and Rent requests from the website, from arrival to client"],
+  requests: ["Requests", "Buy, Rent and Sell requests and Contact-page messages from the website, from arrival to answer"],
   leads: ["Leads", "Enquiries and prospects, before they become clients"],
   documents: ["Documents", "Agreements, titles, receipts, reports and permits"],
   templates: ["Contract templates", "The Word files every new contract is produced on"],
@@ -246,7 +250,8 @@ const viewMeta = {
   "admin-dashboard": ["Admin overview", "Staff access, privileges and organization health"],
   duties: ["Duties & approvals", "The approval path, and every duty on every department"],
   assignments: ["Assignments", "Work assigned to you, and the decisions waiting on you"],
-  organization: ["Administration", "Staff, roles, departments, approvals and activity"],
+  organization: ["Staff", "Staff accounts A to Z, roles and access, approvals and activity"],
+  departments: ["Departments", "Every department A to Z, with its staff"],
 };
 
 // Contract lifecycle labels. The status vocabulary is defined server-side in
@@ -445,7 +450,8 @@ function emptyState(title, text = "", { iconName = "inbox", action = "", compact
 function rowMenu(items) {
   const entries = (items || []).filter((entry) => entry && String(entry).trim());
   if (!entries.length) return "";
-  return `<div class="row-menu"><button type="button" class="btn btn-ghost btn-small btn-icon" data-action="toggle-row-menu" aria-haspopup="menu" aria-expanded="false" aria-label="More actions" title="More actions">${icon("more")}</button><div class="row-menu-list" role="menu" hidden>${entries.join("")}</div></div>`;
+  // Opens on click only: no hover tooltip (the aria-label names it for screen readers).
+  return `<div class="row-menu"><button type="button" class="btn btn-ghost btn-small btn-icon" data-action="toggle-row-menu" aria-haspopup="menu" aria-expanded="false" aria-label="More actions">${icon("more")}</button><div class="row-menu-list" role="menu" hidden>${entries.join("")}</div></div>`;
 }
 
 function closeRowMenus(except = null) {
@@ -665,7 +671,11 @@ async function api(path, options = {}) {
     endSession("Your session has expired. Please sign in again.");
     throw error;
   }
-  if (!response.ok) throw new Error(payload.error || "Request failed");
+  if (!response.ok) {
+    const error = new Error(payload.error || "Request failed");
+    error.status = response.status;
+    throw error;
+  }
   return payload;
 }
 
@@ -859,6 +869,8 @@ async function refresh() {
   updateNavigation();
   render();
   refreshAttention();
+  // Payments falling due soon feed the Reminders badge and the bell.
+  loadUpcomingReminders().then(() => { updateNavigation(); updateNotificationDot(); if (state.view === "reminders") render(); });
   // Keeps the Requests count in the navigation current.
   if (canModule("leads") && can("view")) reloadRequests().then(() => { updateNavigation(); if (state.view === "requests") render(); });
 }
@@ -933,7 +945,7 @@ function isAdmin() {
 // Administrator runs the system (staff, departments, roles), never the business.
 const BUSINESS_PERMISSIONS = new Set([
   "submit_contract", "review_legal", "request_changes", "approve_legal", "validate_finance", "approve_management",
-  "view_financial", "approve",
+  "view_financial", "approve", "view_projects", "view_properties", "view_appointments",
 ]);
 
 function can(permission) {
@@ -944,6 +956,27 @@ function can(permission) {
 function canModule(module) {
   // Every module is a business module, so the administrator holds none.
   return !isAdmin() && (state.organization.me?.modules || []).includes(module);
+}
+
+// Contracts are created by Sales, Legal or the MD (the server's
+// `mayAuthorContracts`). Finance holds `create` for payments, not contracts.
+function canAuthorContracts() {
+  return canModule("contracts") && can("create") && ["submit_contract", "approve_legal", "approve_management"].some((permission) => can(permission));
+}
+
+// Mirrors the server's delete rule: the MD and Legal always, Sales only while
+// the contract is still before approval.
+const PRE_APPROVAL_CONTRACT_STATUSES = new Set(["draft", "submitted", "under_review", "changes_requested"]);
+function canDeleteContract(contract) {
+  if (!canModule("contracts")) return false;
+  if (can("approve_legal") || can("approve_management")) return true;
+  return can("submit_contract") && PRE_APPROVAL_CONTRACT_STATUSES.has(contract?.status);
+}
+
+// A module the caller may change: held in full, not just the read-only grant
+// (Finance, Legal and Customer Service SEE projects/properties, never edit them).
+function canChange(module, permission) {
+  return canModule(module) && can(permission) && !(state.organization.me?.readonly_modules || []).includes(module);
 }
 
 function canSeeFinancial() {
@@ -995,13 +1028,16 @@ const NAV_ITEMS = [
   { view: "templates", label: "Contract templates", icon: "file", permission: "upload_contract_templates", group: "Contracts & records" },
   { view: "reports", label: "Reports", icon: "chart", module: "reports", permission: "view_reports", group: "Contracts & records" },
   { view: "debts", label: "Payments & debts", icon: "wallet", module: "debts", permission: "view_financial", group: "Finance" },
+  // Installments falling due: Finance is reminded before the due date.
+  { view: "reminders", label: "Reminders", icon: "bell", module: "reminders", permission: "view_financial", group: "Finance" },
   // Reference view, not a module: every signed-in member may read the duty
   // catalogue and the approval path. It exposes no record and no way to act.
   { view: "duties", label: "Duties & approvals", icon: "scale", group: "Organization" },
   // Staff administration is a duty, not an account type: the ICT Officer holds
   // manage_users / manage_roles and runs it day to day. The server still
   // refuses anything above their own rank.
-  { view: "organization", label: "Administration", icon: "settings", anyOf: ["manage_users", "manage_roles"], group: "Organization" },
+  { view: "organization", label: "Staff", icon: "users", anyOf: ["manage_users", "manage_roles"], group: "Organization" },
+  { view: "departments", label: "Departments", icon: "building", anyOf: ["manage_users", "manage_roles"], group: "Organization" },
 ];
 
 /** Whether the caller is entitled to a navigation entry at all. */
@@ -1018,33 +1054,113 @@ function canSeeNavItem(item) {
 // Navigation mirrors the server's module list, so a visible item is also a
 // request the server would allow. Items the caller may not open are never
 // written into the DOM, so they cannot be clicked, focused or inspected.
+/* --------------------------------------------------------------------------
+   "Seen" markers. A badge shows what is NEW since this person last looked, so
+   it reacts to what they do: opening a page clears its number, opening the
+   notifications marks them read, and a new item makes the number come back.
+   Each source is a list of item keys (or a plain count) drawn from records the
+   caller can already open. Stored per user in this browser only; the server's
+   own counts (Needs your attention on the dashboard) are never changed by it.
+   -------------------------------------------------------------------------- */
+let seenCache = null;
+function seenStore() {
+  const key = `mkuyu.seen.${state.organization?.me?.user?.id || "anon"}`;
+  if (seenCache?.key === key) return seenCache.data;
+  let data = {};
+  try { data = JSON.parse(localStorage.getItem(key) || "{}") || {}; } catch { data = {}; }
+  seenCache = { key, data };
+  return data;
+}
+function saveSeen() {
+  try { localStorage.setItem(seenCache.key, JSON.stringify(seenCache.data)); } catch { /* private mode: badges just stay */ }
+}
+/** How many of `current` (item keys or a count) this person has not seen yet. */
+function unseenCount(key, current) {
+  const store = seenStore();
+  const seen = store[key];
+  if (Array.isArray(current)) {
+    if (!Array.isArray(seen)) return current.length;
+    const live = new Set(current.map(String));
+    // Forget items that are finished, so a finished-then-reopened item is new again.
+    const kept = seen.filter((item) => live.has(String(item)));
+    if (kept.length !== seen.length) { store[key] = kept; saveSeen(); }
+    const known = new Set(kept.map(String));
+    return current.filter((item) => !known.has(String(item))).length;
+  }
+  const count = Number(current) || 0;
+  const was = Number(seen);
+  if (!Number.isFinite(was)) return count;
+  if (count < was) { store[key] = count; saveSeen(); return 0; }
+  return count - was;
+}
+function markSeen(key, current) {
+  const store = seenStore();
+  const value = Array.isArray(current) ? current.map(String) : Number(current) || 0;
+  if (JSON.stringify(store[key]) === JSON.stringify(value)) return;
+  store[key] = value;
+  saveSeen();
+}
+
+/**
+ * What each navigation item counts. Attention, not inventory: a contract
+ * counts only when the SERVER offers this caller a step on it, an installment
+ * only when overdue, a request only when it is this person's turn.
+ */
+function navSources() {
+  return {
+    contracts: canModule("contracts") ? [...new Set([...contractsAwaitingCaller(), ...contractsNeedingPlan()].map((contract) => `${contract.id}:${contract.status}`))] : [],
+    debts: canModule("debts") && canSeeFinancial() ? (state.debts || []).filter((debt) => debtState(debt) === "overdue").map((debt) => debt.id) : [],
+    // Payment reminders due now or within the next days (see Reminders).
+    reminders: canModule("reminders") && canSeeFinancial() ? [...(state.reminders || []), ...(state.upcomingReminders || [])].map((reminder) => reminder.id) : [],
+    documents: canModule("documents") && can("edit") ? (state.documents || []).filter((doc) => doc.status === "pending").map((doc) => doc.id) : [],
+    // New appointments: every upcoming scheduled appointment this person has
+    // not seen yet (Sales, Legal and everyone else with Appointments).
+    appointments: canModule("appointments") ? upcomingAppointments().map((apt) => `${apt.id}:${apt.starts_at}`) : [],
+    // The SERVER's count of tasks that need this user (new, returned, to review).
+    assignments: Number((state.attention || {}).total || 0),
+    // New requests and reports waiting for this person; a request that moves to
+    // a new stage counts again.
+    requests: (state.requests || []).filter(requestNeedsMe).map((row) => `${row.id}:${requestStage(row)}`),
+  };
+}
+
+/** Scheduled appointments from today on (the ones worth a badge). */
+function upcomingAppointments() {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  return (state.appointments || []).filter((apt) => apt.status === "scheduled" && new Date(String(apt.starts_at).replace(" ", "T")) >= start);
+}
+
+// The administrator's menu, in this order, under one heading.
+const ADMIN_NAV_ORDER = ["organization", "departments", "assignments", "templates", "duties"];
+
 function updateNavigation() {
   const nav = document.getElementById("primary-nav");
   if (nav) {
-    const allowed = NAV_ITEMS.filter(canSeeNavItem);
+    let allowed = NAV_ITEMS.filter(canSeeNavItem);
+    // An administration account (no business modules) gets: Staff,
+    // Departments, Assignments, Contract templates, Duties & approvals.
+    if (isSystemAdminOnly()) {
+      allowed = [
+        ...ADMIN_NAV_ORDER.map((view) => allowed.find((item) => item.view === view)).filter(Boolean),
+        ...allowed.filter((item) => !ADMIN_NAV_ORDER.includes(item.view)),
+      ].map((item) => ({ ...item, group: "Administration" }));
+    }
     const activeView = state.view;
     // The count is a hint drawn from records the caller can already open. It is
     // only ever attached to an item they are entitled to, so it cannot disclose
-    // the existence of anything hidden from them.
-    const counts = {
-      // Attention, not inventory: a contract counts only when the SERVER offers
-      // this caller a step to take on it (`available_actions`), ignoring the
-      // withdraw-anytime "cancel". A register of 40 open deals nobody here can
-      // move shows no number at all.
-      contracts: canModule("contracts") ? new Set([...contractsAwaitingCaller(), ...contractsNeedingPlan()].map((contract) => contract.id)).size : 0,
-      debts: canModule("debts") && canSeeFinancial() ? (state.debts || []).filter((debt) => debtState(debt) === "overdue").length : 0,
-      documents: canModule("documents") && can("edit") ? (state.documents || []).filter((doc) => doc.status === "pending").length : 0,
-      // The attention badge is the SERVER's count of items that need this user
-      // to act (new or returned work they own, plus work awaiting their review).
-      // It is never derived from a list the browser happens to hold, so it is
-      // correct after a refresh and cannot include another department's work.
-      assignments: Number((state.attention || {}).total || 0),
-      // New requests and reports waiting for Sales.
-      requests: (state.requests || []).filter(requestNeedsMe).length,
-    };
+    // the existence of anything hidden from them. The page being looked at is
+    // seen, so its own badge clears.
+    // Assignments is the exception: it is the server's own count of work
+    // waiting on this person, which already falls as they act, so it stays
+    // until the work is done rather than clearing on sight.
+    const sources = navSources();
+    const live = new Set(["assignments"]);
+    if (sources[activeView] !== undefined && !live.has(activeView)) markSeen(`nav:${activeView}`, sources[activeView]);
     let lastGroup = null;
     nav.innerHTML = allowed.map((item) => {
-      const count = counts[item.view] || 0;
+      const source = sources[item.view];
+      const count = source === undefined ? 0 : live.has(item.view) ? Number(source) || 0 : unseenCount(`nav:${item.view}`, source);
       const heading = item.group && item.group !== lastGroup ? `<div class="nav-group-label">${escapeHtml(item.group)}</div>` : "";
       lastGroup = item.group || null;
       return `${heading}<button class="nav-item${item.view === activeView ? " active" : ""}" data-view="${item.view}"${item.view === activeView ? ' aria-current="page"' : ""}><span class="nav-ic">${icon(item.icon)}</span><span class="nav-label">${escapeHtml(item.label)}</span>${count > 0 ? `<span class="nav-count">${count > 99 ? "99+" : count}</span>` : ""}</button>`;
@@ -1247,8 +1363,32 @@ function taskNoteBox(task) {
   const me = Number(state.organization.me?.user?.id);
   const party = [task.assigned_to, task.assigned_by, task.reviewer_id, task.created_by].map(Number).includes(me);
   if (!party) return "";
-  const reporting = (task.available_actions || []).includes("submit") && !task.request_id;
+  // A Contact-page message is answered with a written report, like ordinary work.
+  const reporting = (task.available_actions || []).includes("submit") && (!task.request_id || task.request_source === "website-contact");
   return `<div class="field" style="margin-top:12px"><label for="task-note">${reporting ? "Your report <span class=\"req\">*</span>" : "Note"}</label><textarea id="task-note" rows="3" maxlength="2000" placeholder="${reporting ? "What was done, what you found, what happens next" : "Add a note for the others on this task"}"></textarea>${reporting ? `<p class="muted" style="margin:.3rem 0 0">Sent with Submit to ${escapeHtml(task.reviewer_name || task.assigned_by_name || "the reviewer")}.</p>` : ""}</div>`;
+}
+
+/**
+ * What the person who did the work reported, shown FIRST on the task, so the
+ * reviewer (Sales) reads Customer Service's note before deciding. Covers a
+ * request's outcome (with its note) and any written report sent with Submit.
+ */
+function taskReportPanel(task) {
+  const outcome = task.request_outcome ? outcomeText(task.request_outcome, task.request_outcome_note, task.request_appointment_at, task.request_appointment_type) : "";
+  // A request's report is its outcome + note (already shown by `outcome`);
+  // any other written report is shown in full.
+  const report = task.report && !(task.request_outcome && /^Outcome:/.test(task.report)) ? `<p class="task-report-text">${escapeHtml(task.report)}</p>` : "";
+  if (!outcome && !report) {
+    return ["submitted", "under_review"].includes(task.status) ? `<div class="task-report task-report-empty">No report was written with this submission.</div>` : "";
+  }
+  const when = task.report_at ? ` · ${formatDateTime(task.report_at, true)}` : "";
+  const booking = task.request_outcome === "appointment" && !task.request_appointment_id ? `<p class="muted task-report-hint">Approving books this appointment and registers the customer as a client.</p>` : "";
+  return `<section class="task-report" aria-label="Report">
+      <div class="task-report-head">${icon("file")}<strong>Report from ${escapeHtml(task.assigned_to_name || "the assignee")}</strong><span class="muted">${escapeHtml(when.replace(/^ · /, ""))}</span></div>
+      ${outcome ? `<div class="task-report-outcome">${outcome}</div>` : ""}
+      ${report}
+      ${booking}
+    </section>`;
 }
 
 /** One line describing what Customer Service reported on a request. */
@@ -1263,7 +1403,7 @@ function taskActionButtons(task) {
   // report (appointment / interested / declined / unreachable), not a bare
   // Submit: the one button starts and submits the task with that report.
   const mine = Number(task.assigned_to) === Number(state.organization.me?.user?.id);
-  if (task.request_id && mine && (task.available_actions || []).some((a) => a === "start" || a === "submit")) {
+  if (task.request_id && task.request_source !== "website-contact" && mine && (task.available_actions || []).some((a) => a === "start" || a === "submit")) {
     const rest = (task.available_actions || []).filter((a) => a !== "start" && a !== "submit");
     return `<button class="btn btn-primary btn-small" data-action="request-outcome" data-id="${task.id}">Report outcome to Sales</button>` + taskActionButtons({ ...task, request_id: null, available_actions: rest });
   }
@@ -1282,7 +1422,7 @@ function taskRow(task) {
   const secondary = [...forward.slice(1), ...actions.filter((action) => action === "cancel")];
   const overdue = task.due_date && String(task.due_date).slice(0, 10) < today() && !["approved", "completed", "cancelled"].includes(task.status);
   return `<tr>
-    <td><button class="cell-link" data-action="open-task" data-id="${task.id}"><span class="cell-main">${escapeHtml(task.title)}</span></button>${task.description ? `<span class="cell-sub">${escapeHtml(String(task.description).slice(0, 140))}</span>` : ""}${link}</td>
+    <td><button class="cell-link" data-action="open-task" data-id="${task.id}"><span class="cell-main">${escapeHtml(task.title)}</span></button>${task.report && ["submitted", "under_review", "approved", "completed"].includes(task.status) ? `<span class="cell-sub request-report"><strong>Report from ${escapeHtml(task.assigned_to_name || "the assignee")}:</strong> ${escapeHtml(String(task.report).slice(0, 180))}</span>` : task.description ? `<span class="cell-sub">${escapeHtml(String(task.description).slice(0, 140))}</span>` : ""}${link}</td>
     <td>${escapeHtml(task.assigned_by_name || "—")}</td>
     <td>${escapeHtml(task.assigned_to_name || "—")}</td>
     <td>${priorityBadge(task.priority)}</td>
@@ -1373,8 +1513,8 @@ async function openTask(id) {
       <div><span>Due</span><strong>${shortDate(task.due_date)}</strong></div>
       ${task.linked_entity ? `<div><span>Linked record</span><strong>${escapeHtml(task.linked_entity)} #${task.linked_record_id}</strong></div>` : ""}
     </div>
-    ${task.description ? `<p class="task-instructions">${escapeHtml(task.description)}</p>` : ""}
-    ${task.request_outcome ? `<div class="panel" style="margin-top:12px"><span class="toolbar-label">Outcome reported by Customer Service</span><div>${outcomeText(task.request_outcome, task.request_outcome_note, task.request_appointment_at, task.request_appointment_type)}</div>${task.request_outcome === "appointment" && !task.request_appointment_id ? `<p class="muted" style="margin:.4rem 0 0">Approving books this appointment and registers the customer as a client.</p>` : ""}</div>` : ""}
+    ${taskReportPanel(task)}
+    ${task.description ? `<details class="task-brief"${task.report ? "" : " open"}><summary>Instructions from ${escapeHtml(task.assigned_by_name || "the assigner")}</summary><p class="task-instructions">${escapeHtml(task.description)}</p></details>` : ""}
     ${taskNoteBox(task)}
     <div class="row-actions" style="margin:14px 24px">${taskActionButtons(task)}${taskNoteBox(task) ? `<button class="btn btn-soft btn-small" data-action="add-task-note" data-id="${task.id}">Save note only</button>` : ""}</div>
     ${(task.available_actions || []).includes("request_changes") ? `<div class="field"><label for="task-review-comment">Review comment (required to request changes)</label><textarea id="task-review-comment" name="comment" rows="2" placeholder="What must change?"></textarea></div>` : ""}
@@ -1442,6 +1582,15 @@ function wireTaskDepartment(assignees, lockTo = null, departmentList = null) {
   }
   deptSelect.addEventListener("change", fill);
   fill();
+}
+
+// Every contract is a Buy, a Rent or a Sell. Required on every new contract.
+const DEAL_TYPES = [["buy", "Buy"], ["rent", "Rent"], ["sell", "Sell"]];
+function dealTypeLabel(value) {
+  return (DEAL_TYPES.find(([key]) => key === value) || [null, ""])[1];
+}
+function dealTypeField(id, selected = "", { required = true } = {}) {
+  return `<div class="field"><label for="${id}">Contract type${required ? ' <span class="req">*</span>' : ""}</label><select id="${id}" name="deal_type"${required ? " required" : ""}><option value="">Choose Buy, Rent or Sell</option>${DEAL_TYPES.map(([value, label]) => `<option value="${value}"${selected === value ? " selected" : ""}>${label}</option>`).join("")}</select></div>`;
 }
 
 async function openTaskModal(prefill = {}) {
@@ -1514,33 +1663,88 @@ async function openTaskModal(prefill = {}) {
   modalBackdrop.hidden = false;
 }
 
+const SERVICE_LABELS = { rent: "Rent", buy: "Buy", sell: "Sell" };
+const SELL_TYPE_LABELS = { house: "House", apartment: "Apartment", villa: "Villa", land: "Land / plot", commercial: "Commercial", other: "Other" };
+/** The seller's property, as submitted on the website's Sell form. */
+function sellSummary(details) {
+  const d = details || {};
+  return [SELL_TYPE_LABELS[d.property_type] || "Property", d.location, d.area ? `${Number(d.area).toLocaleString("en-US")} m²` : null, d.bedrooms ? `${d.bedrooms} bedroom${Number(d.bedrooms) === 1 ? "" : "s"}` : null, d.title_deed ? `Title deed: ${{ yes: "yes", no: "no", in_progress: "in progress" }[d.title_deed] || d.title_deed}` : null].filter(Boolean).join(" · ");
+}
+
 /** A website lead handed to Customer Service to contact the customer. */
 function handOffLead(leadId) {
   const lead = [...(state.requests || []), ...(state.organization.leads || [])].find((row) => String(row.id) === String(leadId));
   if (!lead) return;
   const means = { phone: "Phone call", whatsapp: "WhatsApp", email: "Email" }[lead.preferred_contact] || "Phone call";
   const lines = [
-    lead.service ? `Website request to ${lead.service === "rent" ? "RENT" : "BUY"}.` : "Website enquiry.",
+    lead.service === "sell" ? `Website SELL submission: ${sellSummary(lead.sell_details)}.` : lead.service ? `Website request to ${lead.service === "rent" ? "RENT" : "BUY"}.` : "Website enquiry.",
     "",
     `Customer: ${lead.name}`,
     `Phone: ${lead.phone || "—"}`,
     `Email: ${lead.email || "—"}`,
-    lead.budget ? `Budget: TZS ${Number(lead.budget).toLocaleString("en-US")}` : null,
+    lead.budget ? `${lead.service === "sell" ? "Asking price" : "Budget"}: TZS ${Number(lead.budget).toLocaleString("en-US")}` : null,
     `Contact by: ${means}`,
     "",
     lead.notes || "",
     "",
-    `Please contact the customer by ${means.toLowerCase()} and report back. (Lead W-${lead.id})`,
+    lead.service === "sell"
+      ? `Please contact the owner by ${means.toLowerCase()}, explain how selling with MKUYU works and arrange a visit if they wish, then report back. (Lead W-${lead.id})`
+      : `Please contact the customer by ${means.toLowerCase()} and report back. (Lead W-${lead.id})`,
   ].filter((line) => line !== null);
   openTaskModal({
-    requestId: lead.source === "website" ? lead.id : null,
+    // Buy/Rent/Sell requests and Contact-page messages are both followed under
+    // Requests, so both are tied to the task and its report comes back there.
+    requestId: ["website", "website-contact"].includes(lead.source) ? lead.id : null,
     department: "CUSTOMER SERVICE",
     heading: "Hand to Customer Service",
-    title: `Contact ${lead.name}${lead.service ? ` (${lead.service === "rent" ? "rent" : "buy"} request)` : ""}`,
+    title: `Contact ${lead.name}${lead.service ? ` (${SERVICE_LABELS[lead.service]?.toLowerCase() || lead.service} request)` : ""}`,
     description: lines.join("\n"),
     priority: "high",
     reviewerId: state.organization.me?.user?.id,
   });
+}
+
+/**
+ * Sales arranges the agreed appointment for a request after approving
+ * Customer Service's report (or moves an existing one). It is booked straight
+ * into Appointments.
+ */
+function mayArrangeAppointments() {
+  return can("assign_tasks") && inSales() && canChange("appointments", "create") && canModule("leads");
+}
+function openArrangeAppointment(leadId) {
+  const request = (state.requests || []).find((row) => String(row.id) === String(leadId));
+  if (!request) { showToast("Open Requests and try again."); return; }
+  const local = (value) => {
+    if (!value) return { date: "", time: "" };
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return { date: "", time: "" };
+    const pad = (n) => String(n).padStart(2, "0");
+    return { date: `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`, time: `${pad(date.getHours())}:${pad(date.getMinutes())}` };
+  };
+  const at = local(request.appointment_at);
+  const report = request.task_report && !/^Outcome:/.test(request.task_report) ? request.task_report : request.outcome_note || "";
+  const moving = Boolean(request.appointment_id);
+  const types = [["viewing", "Site visit / viewing"], ["meeting", "Meeting at the office"], ["call", "Phone call"]];
+  openSmallForm(moving ? `Change appointment · ${request.name}` : `Arrange appointment · ${request.name}`,
+    moving ? "Move the booked appointment. Appointments shows the new time." : "Book the time agreed with the customer. It goes straight into Appointments.",
+    `${report ? `<div class="field full"><span class="toolbar-label">What Customer Service reported</span><p class="task-report-text" style="margin:.3rem 0 0">${escapeHtml(report)}</p></div>` : ""}
+     <div class="field"><label for="arrange-date">Date <span class="req">*</span></label><input id="arrange-date" name="date" type="date" required min="${today()}" value="${escapeHtml(at.date)}"></div>
+     <div class="field"><label for="arrange-time">Time <span class="req">*</span></label><input id="arrange-time" name="time" type="time" required step="900" value="${escapeHtml(at.time)}"><div class="field-help">Choose the time agreed with the customer, e.g. 2:00 PM.</div></div>
+     <div class="field"><label for="arrange-type">Type</label><select id="arrange-type" name="appointment_type">${types.map(([value, label]) => `<option value="${value}"${(request.appointment_type || "viewing") === value ? " selected" : ""}>${label}</option>`).join("")}</select></div>
+     <div class="field full"><label for="arrange-note">Note for the appointment</label><textarea id="arrange-note" name="note" rows="2" maxlength="2000" placeholder="e.g. Meet at the site office; discuss price and the contract"></textarea></div>`,
+    moving ? "Save new time" : "Book appointment",
+    async (data) => {
+      if (!data.date) throw new Error("Choose the appointment date.");
+      if (!data.time) throw new Error("Choose the appointment time agreed with the customer.");
+      const startsAt = new Date(`${data.date}T${data.time}`);
+      if (Number.isNaN(startsAt.getTime())) throw new Error("The date or time is not valid.");
+      await api(`/org/requests/${leadId}/appointment`, { method: "POST", body: JSON.stringify({ starts_at: startsAt.toISOString(), appointment_type: data.appointment_type || "viewing", note: data.note || "" }) });
+      await reloadRequests();
+      refresh();
+      const when = startsAt.toLocaleString("en-GB", { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", hour12: true });
+      return `${moving ? "Appointment moved to" : "Appointment booked for"} ${when}. It is in Appointments.`;
+    });
 }
 
 async function submitTaskAction(taskId, action) {
@@ -1573,7 +1777,13 @@ async function submitTaskAction(taskId, action) {
   // Approving a request's report can create a client and an appointment, so
   // the workspace lists are re-read; a request's stage follows its task too.
   if (action === "approve") await refresh();
-  if (state.requests) { await reloadRequests(); if (state.view === "requests") render(); }
+  if (state.requests || action === "approve") { await reloadRequests(); if (state.view === "requests") render(); }
+  // Report approved: Sales now arranges the agreed appointment (unless the
+  // customer's appointment is already booked from Customer Service's report).
+  if (action === "approve" && mayArrangeAppointments()) {
+    const request = (state.requests || []).find((row) => String(row.task_id) === String(taskId));
+    if (request && !request.appointment_id && !["declined", "unreachable"].includes(request.outcome)) openArrangeAppointment(request.id);
+  }
   // Beginning a review leads straight to the decision: reopen the task with
   // Approve / Request changes instead of making the reviewer find it again.
   if (action === "begin_review") openTask(taskId);
@@ -1602,14 +1812,25 @@ function propertyOptionsForProject(projectId, selected = "") {
   return pool.map((property) => `<option value="${property.id}" ${String(property.id) === String(selected) ? "selected" : ""}>${escapeHtml(property.name)} · ${escapeHtml(property.location || "")}</option>`).join("");
 }
 
-function contractTemplateOptions(selected = "") {
-  // Nothing chosen yet: the organization's default template is preselected.
-  // "builtin" is an explicit choice of the built-in agreement, so going back
-  // from the review step never silently swaps the template.
-  const fallback = (state.contractTemplates || []).find((template) => template.is_default);
-  const chosen = selected || (fallback ? String(fallback.id) : "builtin");
-  const built = `<option value="builtin" ${chosen === "builtin" ? "selected" : ""}>Built-in Sale Agreement</option>`;
-  return built + (state.contractTemplates || []).map((template) => `<option value="${template.id}" ${String(template.id) === String(chosen) ? "selected" : ""}>${escapeHtml(template.title)}${template.is_default ? " (default)" : ""}</option>`).join("");
+/** Every property, those offered for rent first: a lease names no project. */
+function rentalPropertyOptions(selected = "") {
+  const pool = [...(state.properties || [])].sort((a, b) => Number(Boolean(b.offer_rent)) - Number(Boolean(a.offer_rent)));
+  if (!pool.length) return `<option value="">No property yet</option>`;
+  return pool.map((property) => `<option value="${property.id}" ${String(property.id) === String(selected) ? "selected" : ""}>${escapeHtml(property.name)} · ${escapeHtml(property.location || "")}${property.offer_rent ? " · for rent" : ""}</option>`).join("");
+}
+
+function contractTemplateOptions(selected = "", dealType = "") {
+  // Only templates that fit this kind of contract: letterheads (any type) and
+  // templates written for this type. Nothing chosen yet: the same automatic
+  // choice the server makes - a template for this type, else the default.
+  // "builtin" is an explicit choice of the built-in MKUYU letterhead, so going
+  // back from the review step never silently swaps the template.
+  const fits = (state.contractTemplates || []).filter((template) => !template.deal_type || template.deal_type === dealType);
+  const fallback = fits.find((template) => template.deal_type === dealType && template.is_default) || fits.find((template) => template.deal_type === dealType) || fits.find((template) => template.is_default);
+  const chosen = selected && (selected === "builtin" || fits.some((template) => String(template.id) === String(selected))) ? selected : (fallback ? String(fallback.id) : "builtin");
+  const agreement = contractKind(dealType)?.agreement || "Agreement";
+  const built = `<option value="builtin" ${chosen === "builtin" ? "selected" : ""}>Built-in MKUYU letterhead · ${escapeHtml(agreement)}</option>`;
+  return built + fits.map((template) => `<option value="${template.id}" ${String(template.id) === String(chosen) ? "selected" : ""}>${escapeHtml(template.title)}${template.letterhead ? " · letterhead" : ""}${template.is_default ? " (default)" : ""}</option>`).join("");
 }
 
 /** Reads the overlay's own inputs. The form is the only thing that changes. */
@@ -1629,12 +1850,14 @@ function generateContractFormData() {
     agreement_duration_unit: value("gc-duration-unit", "agreement_duration_unit", "months") || null,
     contract_date: value("gc-date", "contract_date") || null,
     contract_type: value("gc-type", "contract_type", "new"),
+    deal_type: value("gc-deal", "deal_type", ""),
     original_price: value("gc-original", "original_price"),
     discount_pct: value("gc-discount", "discount_pct", "0") || "0",
     deposit: value("gc-deposit", "deposit"),
     installments: value("gc-installments", "installments"),
     frequency: value("gc-frequency", "frequency", "monthly"),
     first_due_date: value("gc-first-due", "first_due_date") || null,
+    title_deed_number: value("gc-title-deed", "title_deed_number").trim(),
     template_choice: value("gc-template", "template_choice") || "",
     template_document_id: (() => { const raw = value("gc-template", "template_choice"); return raw && raw !== "builtin" ? raw : null; })(),
     notes: value("gc-notes", "notes").trim(),
@@ -1708,16 +1931,21 @@ function generateContractFormBody() {
   return `<form id="contract-generate-form" class="form-grid">
     <fieldset class="gen-section"><legend>Client information</legend>
       <div class="field full"><label for="gc-client">Client from register (optional)</label><select id="gc-client" name="client_id"><option value="">Type a new name below</option>${clients}</select></div>
-      ${text("gc-client-name", "Client / buyer name", data.client_name, 'required maxlength="120" placeholder="Client full name"')}
+      ${text("gc-client-name", `${contractKind(data.deal_type)?.client || "Client"} name`, data.client_name, 'required maxlength="120" placeholder="Full name"')}
       ${text("gc-client-phone", "Client phone", data.client_phone, 'maxlength="40" placeholder="+255 ..."')}
       ${text("gc-client-email", "Client email", data.client_email, 'type="email" maxlength="120" placeholder="client@example.com"')}
       <div class="field full"><label for="gc-company">Company</label><input id="gc-company" type="text" value="${escapeHtml(state.organization?.me?.organization_name || "MKUYU")}" readonly aria-readonly="true" tabindex="-1" title="Taken from the organization record"></div>
     </fieldset>
 
     <fieldset class="gen-section"><legend>Property information</legend>
-      <div class="field"><label for="gc-project">Project <span class="req">*</span></label><select id="gc-project" name="project_id" required><option value="">Select project</option>${projectOptions(data.project_id)}</select></div>
-      <div class="field"><label for="gc-property">Property <span class="req">*</span></label><select id="gc-property" name="property_id" required><option value="">Select property</option>${propertyOptionsForProject(data.project_id, data.property_id)}</select></div>
+      ${data.deal_type === "rent"
+        // A lease is about a property only: no project to choose.
+        ? `<input type="hidden" id="gc-project" name="project_id" value="">
+      <div class="field"><label for="gc-property">Property to rent <span class="req">*</span></label><select id="gc-property" name="property_id" required><option value="">Select property</option>${rentalPropertyOptions(data.property_id)}</select></div>`
+        : `<div class="field"><label for="gc-project">Project <span class="req">*</span></label><select id="gc-project" name="project_id" required><option value="">Select project</option>${projectOptions(data.project_id)}</select></div>
+      <div class="field"><label for="gc-property">Property <span class="req">*</span></label><select id="gc-property" name="property_id" required><option value="">Select property</option>${propertyOptionsForProject(data.project_id, data.property_id)}</select></div>`}
       <div class="field"><label for="gc-property-number">Property number</label><input id="gc-property-number" type="text" readonly aria-readonly="true" tabindex="-1" value="${property ? escapeHtml(`P-${String(property.id).padStart(4, "0")}`) : ""}" title="Read from the property record"></div>
+      ${genField("gc-title-deed", "Title deed / certificate no.", `<input id="gc-title-deed" name="title_deed_number" maxlength="80" value="${escapeHtml(data.title_deed_number || "")}" placeholder="e.g. CT-45821 (printed on the agreement)">`)}
       <div class="field"><label for="gc-property-location">Location</label><input id="gc-property-location" type="text" readonly aria-readonly="true" tabindex="-1" value="${escapeHtml(property?.location || "")}" title="Read from the property record"></div>
     </fieldset>
 
@@ -1727,7 +1955,8 @@ function generateContractFormBody() {
       <div class="field"><label for="gc-duration-unit">Duration unit</label><select id="gc-duration-unit" name="agreement_duration_unit">${units}</select></div>
       ${text("gc-end", "Agreement end date", data.end_date, 'type="date"')}
       ${text("gc-date", "Contract date", data.contract_date || today(), 'type="date"')}
-      <div class="field"><label for="gc-type">Contract type</label><select id="gc-type" name="contract_type"><option value="new" ${data.contract_type !== "terminal" ? "selected" : ""}>New</option><option value="terminal" ${data.contract_type === "terminal" ? "selected" : ""}>Terminal</option></select></div>
+      <div class="field"><label>Contract type</label><div class="gen-kind-chosen"><input type="hidden" id="gc-deal" name="deal_type" value="${escapeHtml(data.deal_type || "")}"><strong>${escapeHtml(contractKind(data.deal_type)?.title || "Not chosen")}</strong><span class="muted">${escapeHtml(contractKind(data.deal_type)?.agreement || "")}</span><button type="button" class="btn btn-small btn-ghost" data-action="contract-change-kind">Change</button></div></div>
+      <div class="field"><label for="gc-type">Agreement (new / terminal)</label><select id="gc-type" name="contract_type"><option value="new" ${data.contract_type !== "terminal" ? "selected" : ""}>New</option><option value="terminal" ${data.contract_type === "terminal" ? "selected" : ""}>Terminal</option></select></div>
       <div class="field full"><div class="field-help">The end date is derived from the duration; the server refuses a stated end date that disagrees with it.</div></div>
     </fieldset>
 
@@ -1747,8 +1976,8 @@ function generateContractFormBody() {
     </fieldset>
 
     <fieldset class="gen-section"><legend>Contract</legend>
-      <div class="field full"><label for="gc-template">Contract template</label><select id="gc-template" name="template_document_id">${contractTemplateOptions(data.template_choice)}</select></div>
-      <div class="field full"><div class="field-help">New contracts use the default template automatically.${can("upload_contract_templates") ? " To add or change templates, open <strong>Contract templates</strong> in the sidebar." : " Templates are maintained by the MD, ICT, sales officers and Legal Officers."}</div></div>
+      <div class="field full"><label for="gc-template">Contract template</label><select id="gc-template" name="template_document_id">${contractTemplateOptions(data.template_choice, data.deal_type)}</select></div>
+      <div class="field full"><div class="field-help">The ${escapeHtml(contractKind(data.deal_type)?.agreement || "agreement")} is placed on this template; its header and footer repeat on every page.${can("upload_contract_templates") ? " To add or change templates, open <strong>Contract templates</strong> in the sidebar." : " Templates are maintained by the MD, ICT, sales officers and Legal Officers."}</div></div>
       ${canModule("documents") && can("create") ? `<div class="field full"><label for="gc-attachment">Supporting document (optional)</label><input id="gc-attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.png,.jpg,.jpeg,.gif,.webp,.bmp">${state.contractGen?.attachment ? `<div class="field-help">Selected: ${escapeHtml(state.contractGen.attachment.name)}</div>` : `<div class="field-help">The uploaded file will be linked to this contract in Documents.</div>`}</div>` : ""}
       <div class="field full"><label for="gc-contract-number">Contract number</label><input id="gc-contract-number" value="${escapeHtml(data.contract_number || "")}" placeholder="Issued automatically when generated" readonly aria-readonly="true" tabindex="-1"></div>
       ${genField("gc-notes", "Notes", `<textarea id="gc-notes" name="notes" maxlength="2000" placeholder="Internal notes">${escapeHtml(data.notes)}</textarea>`)}
@@ -1780,7 +2009,9 @@ function generateContractReviewBody(data) {
       ${row("Client phone", data.client_phone)}
       ${row("Client email", data.client_email)}
       <h3 class="review-heading">Property & agreement</h3>
-      ${row("Project", project?.name)}
+      ${row("Contract type", contractKind(data.deal_type) ? `${contractKind(data.deal_type).title} · ${contractKind(data.deal_type).agreement}` : "—")}
+      ${row("Title deed / certificate", data.title_deed_number || "To be confirmed")}
+      ${data.deal_type === "rent" ? "" : row("Project", project?.name)}
       ${row("Property", property ? `${property.name} · ${property.location || ""}` : "—")}
       ${row("Agreement", `${data.start_date ? formatDate(data.start_date) : "—"} → ${data.end_date ? formatDate(data.end_date) : "—"}`)}
       ${row("Duration", data.agreement_duration ? `${data.agreement_duration} ${data.agreement_duration_unit || "months"}` : "—")}
@@ -1794,7 +2025,7 @@ function generateContractReviewBody(data) {
       ${row("Frequency", data.frequency || "—")}
       ${row("First due date", data.first_due_date ? formatDate(data.first_due_date) : "—")}
       <h3 class="review-heading">Document</h3>
-      ${row("Template", template?.title || "Built-in Sale Agreement")}
+      ${row("Template", template ? `${template.title}${template.letterhead ? " (letterhead)" : ""}` : `Built-in MKUYU letterhead · ${contractKind(data.deal_type)?.agreement || "Agreement"}`)}
       ${state.contractGen?.attachment ? row("Supporting document", state.contractGen.attachment.name) : ""}
       ${row("Contract number", "Issued automatically when generated")}
     </div>
@@ -1834,15 +2065,48 @@ function generateContractSuccessBody(result) {
 
 /** Details -> Review -> Done, shown at the top of the overlay. */
 function generateContractSteps(step) {
-  const order = ["form", "review", "success"];
-  const labels = { form: "Contract details", review: "Review", success: "Generated" };
+  const order = ["type", "form", "review", "success"];
+  const labels = { type: "Contract type", form: "Contract details", review: "Review", success: "Generated" };
   const current = order.indexOf(step);
   return `<ol class="stepper" aria-label="Contract generation progress">${order.map((key, index) => `<li class="${index < current ? "done" : index === current ? "current" : ""}"${index === current ? ' aria-current="step"' : ""}><span class="stepper-dot">${index < current ? icon("check") : index + 1}</span><span>${labels[key]}</span></li>`).join("")}</ol>`;
+}
+
+// The three agreements (the server's contracts/agreements.js). Choosing one is
+// the first step: it decides the wording that is placed on the template.
+const CONTRACT_KINDS = [
+  { type: "buy", title: "Buying", agreement: "Sale Agreement", note: "MKUYU sells a property to a buyer.", client: "Buyer", icon: "home" },
+  { type: "rent", title: "Renting", agreement: "Lease Agreement", note: "MKUYU lets a property to a tenant.", client: "Tenant", icon: "calendar" },
+  { type: "sell", title: "Company and seller", agreement: "Property Sale Mandate", note: "A property owner sells through MKUYU.", client: "Seller", icon: "users" },
+];
+function contractKind(type) {
+  return CONTRACT_KINDS.find((kind) => kind.type === type) || null;
+}
+
+function generateContractTypeBody(selected = "") {
+  return `<div class="gen-type">
+      <p class="field-help">What is this contract for? The system writes the matching agreement (introduction, the property and its title deed, price and payment, obligations, termination and signatures) and places it on the company's contract template. Longer agreements continue onto more pages, each carrying the template.</p>
+      <div class="gen-type-grid" role="radiogroup" aria-label="Contract type">
+        ${CONTRACT_KINDS.map((kind) => `<button type="button" class="gen-type-card${selected === kind.type ? " selected" : ""}" role="radio" aria-checked="${selected === kind.type}" data-action="contract-kind" data-kind="${kind.type}">
+          <span class="gen-type-icon">${icon(kind.icon)}</span>
+          <strong>${escapeHtml(kind.title)}</strong>
+          <span class="gen-type-agreement">${escapeHtml(kind.agreement)}</span>
+          <span class="gen-type-note">${escapeHtml(kind.note)}</span>
+        </button>`).join("")}
+      </div>
+    </div>
+    <div class="form-actions">
+      <button class="btn" type="button" data-action="close-modal">Cancel</button>
+    </div>`;
 }
 
 function renderGenerateContractModal() {
   const step = state.contractGen.step;
   const close = `<button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button>`;
+  if (step === "type") {
+    modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">Generate contract</h2><p class="modal-sub">Choose the kind of agreement first.</p></div>${close}</div>${generateContractSteps("type")}<div class="modal-body">${generateContractTypeBody(state.contractGen.data?.deal_type || "")}</div>`;
+    modal.dataset.type = "contract-generate";
+    return;
+  }
   if (step === "success") {
     modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">Contract generated</h2><p class="modal-sub">The contract and its document are saved.</p></div>${close}</div>${generateContractSteps("success")}<div class="modal-body">${generateContractSuccessBody(state.contractGen.result || {})}</div>`;
     return;
@@ -1855,8 +2119,10 @@ function renderGenerateContractModal() {
 }
 
 /** Opens the overlay. Loading the template list is all that happens here. */
-async function openGenerateContractModal() {
-  state.contractGen = { step: "form", result: null, error: null, data: {}, attachment: null };
+async function openGenerateContractModal(prefill = {}) {
+  // The wizard starts by asking what the contract is for. A Sell request opens
+  // it already set to Sell for that seller, straight on the details.
+  state.contractGen = { step: prefill.deal_type ? "form" : "type", result: null, error: null, data: { ...prefill }, attachment: null };
   if (!state.contractTemplates) {
     // A caller without document access still gets the built-in template, so a
     // refusal here must not block contract generation.
@@ -1865,7 +2131,7 @@ async function openGenerateContractModal() {
   modal.classList.add("modal-wide");
   renderGenerateContractModal();
   modalBackdrop.hidden = false;
-  updateGenerateContractPreview();
+  if (state.contractGen.step === "form") updateGenerateContractPreview();
 }
 
 /**
@@ -1880,9 +2146,11 @@ async function submitGenerateContract() {
   const payload = {
     client_id: data.client_id,
     client_name: data.client_name,
-    project_id: data.project_id,
+    project_id: data.deal_type === "rent" ? null : data.project_id,
     property_id: data.property_id,
     contract_type: data.contract_type,
+    deal_type: data.deal_type,
+    title_deed_number: data.title_deed_number,
     start_date: data.start_date,
     end_date: data.end_date,
     agreement_duration: data.agreement_duration,
@@ -1928,12 +2196,12 @@ async function submitGenerateContract() {
   }
 }
 
-function renderOrganization() {
+function renderOrganization(section = "staff") {
   const org = state.organization;
   const permissions = org.me?.permissions || [];
   const canManage = permissions.includes("manage_permissions") || permissions.includes("manage_roles");
   const metrics = org.dashboard || {};
-  const leadRows = org.leads.map((lead) => `<tr><td><strong>${escapeHtml(lead.name)}</strong><div class="table-sub">${escapeHtml(lead.email || lead.phone || "No contact")}</div></td><td>${badge(lead.status)}</td><td>${escapeHtml(lead.source || "Direct")}</td><td>${lead.client_id ? "Converted" : `<button class="btn btn-soft" data-action="convert-lead" data-id="${lead.id}">Convert</button>`}</td></tr>`).join("");
+  const leadRows = org.leads.map((lead) => `<tr><td><strong>${escapeHtml(lead.name)}</strong><div class="table-sub">${escapeHtml(lead.email || lead.phone || "No contact")}</div></td><td>${badge(lead.status)}</td><td>${escapeHtml(lead.source || "Direct")}</td><td>${lead.client_id ? "Converted" : mayApproveClients() ? `<button class="btn btn-soft" data-action="convert-lead" data-id="${lead.id}">Become a client</button>` : ""}</td></tr>`).join("");
   // The staff register is grouped by DEPARTMENT, in the organization's declared
   // order, because that is the structure MKUYU actually runs on. A person's role
   // is shown inside their department as a badge - a role is never used as a
@@ -1968,7 +2236,7 @@ function renderOrganization() {
   const canManageAccount = (user) => isAdmin() || (user.role !== "admin" && user.id !== org.me?.user?.id
     && Math.max(0, ...(user.roles || []).map((role) => Number(role.rank || 0))) <= Number(org.me?.rank || 0));
   const meId = org.me?.user?.id;
-  const userRow = (user) => `<tr><td><strong>${escapeHtml(user.display_name)}</strong>${user.id === meId ? ` ${badge("You", "open")}` : ""}<div class="table-sub">${escapeHtml(user.email)}</div></td><td>${user.roles?.map((role) => badge(role.name)).join(" ") || "No role"}</td><td>${user.active ? badge("Active", "approved") : badge("Inactive", "archived")}</td><td><div class="row-actions">${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="reset-password" data-id="${user.id}" title="Set a new sign-in password without changing the account">Reset password</button>` : ""}${canManageAccount(user) || user.id === meId ? `<button class="btn btn-soft btn-small" data-action="change-staff-department" data-id="${user.id}" title="Move to another department">Move department</button><button class="btn btn-soft btn-small" data-action="change-staff-role" data-id="${user.id}" title="Give a different role">Change role</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="toggle-user" data-id="${user.id}" data-active="${user.active ? 0 : 1}">${user.active ? "Deactivate" : "Activate"}</button>` : ""}</div></td></tr>`;
+  const userRow = (user) => `<tr><td><strong>${escapeHtml(user.display_name)}</strong>${user.id === meId ? ` ${badge("You", "open")}` : ""}<div class="table-sub">${escapeHtml(user.email)}${(user.departments || []).length ? ` · ${escapeHtml((user.departments || []).map((d) => titleCase(d.name)).join(", "))}` : ""}</div></td><td>${user.roles?.map((role) => badge(role.name)).join(" ") || "No role"}</td><td>${user.active ? badge("Active", "approved") : badge("Inactive", "archived")}</td><td><div class="row-actions">${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="reset-password" data-id="${user.id}" title="Set a new sign-in password without changing the account">Reset password</button>` : ""}${canManageAccount(user) || user.id === meId ? `<button class="btn btn-soft btn-small" data-action="change-staff-department" data-id="${user.id}" title="Move to another department">Move department</button><button class="btn btn-soft btn-small" data-action="change-staff-role" data-id="${user.id}" title="Give a different role">Change role</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="toggle-user" data-id="${user.id}" data-active="${user.active ? 0 : 1}">${user.active ? "Deactivate" : "Activate"}</button>` : ""}</div></td></tr>`;
 
   const usersByDepartment = new Map(DEPARTMENT_ORDER.map((name) => [name, []]));
   const unassigned = [];
@@ -2019,10 +2287,26 @@ function renderOrganization() {
   const staffRoleOptions = org.roles.filter(assignable).map((role) => `<option value="${role.id}">${escapeHtml(role.name)} · rank ${Number(role.rank || 0)}</option>`).join("");
   const departmentOptions = org.departments.filter((department) => department.active !== false).map((department) => `<option value="${department.id}">${escapeHtml(titleCase(department.name))}</option>`).join("");
   const permissionOptions = org.permissions.filter((permission) => isAdmin() || !RESERVED_KEYS.has(permission.permission_key)).map((permission) => `<label class="check-field"><input type="checkbox" name="permissions" value="${escapeHtml(permission.permission_key)}">${escapeHtml(permission.permission_key)}</label>`).join("");
+  const staffForm = `<form id="staff-form" class="form-grid"><div class="field"><label for="staff-name">Display name</label><input id="staff-name" name="display_name" required placeholder="Staff member"></div><div class="field"><label for="staff-email">Email</label><input id="staff-email" name="email" type="email" required placeholder="staff@company.com"></div><div class="field"><label for="staff-password">Temporary password</label><input id="staff-password" name="password" type="password" minlength="8" required placeholder="At least 8 characters"></div><div class="field"><label for="staff-role">Role and privilege rank</label><select id="staff-role" name="role_ids" required><option value="">Select role</option>${staffRoleOptions}</select></div><div class="field"><label for="staff-department">Department</label><select id="staff-department" name="department_ids"><option value="">The role's own department</option>${departmentOptions}</select></div><button class="btn btn-primary" type="submit">Create staff</button></form>`;
+  const mayAdminister = canManage || permissions.includes("manage_users");
+
+  // Departments page: every department (A-Z) with its staff behind "Show staff".
+  if (section === "departments") {
+    return `<div class="section-grid org-grid">
+      ${mayAdminister ? renderAdminConsole(org, { canManage, canAddStaff: false, userRow }) : `<section class="card glass">${emptyState("No access", "Departments are managed by the administrator.", { iconName: "settings", compact: true })}</section>`}
+    </div>`;
+  }
+
+  // Staff page: everyone A-Z, with department, role and the account actions.
+  const staffAlphabetical = org.users.slice().sort((a, b) => String(a.display_name).localeCompare(String(b.display_name)));
+  const staffRegister = mayAdminister ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Staff</h2><div class="section-note">${org.users.filter((u) => u.active).length} active · ${org.users.length} in total · A to Z</div></div></div>
+      ${permissions.includes("manage_users") ? `<details class="panel add-panel"><summary>${icon("plus")}Add a staff member</summary>${staffForm}</details>` : ""}
+      <div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>Name · department</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead><tbody>${staffAlphabetical.map(userRow).join("")}</tbody></table></div>
+    </section>` : "";
   return `<div class="section-grid org-grid">
-    <section class="card glass org-intro"><div><div class="eyebrow">System administration</div><h2>Administration</h2><p>Departments, staff, roles and access, in one place. Business work stays with the departments.</p></div><div class="org-intro-stats"><span><strong>${permissions.length}</strong> permissions</span><span><strong>${org.users.filter((user) => user.active).length}</strong> active staff</span><span><strong>${org.approvals.filter((item) => item.status === "pending").length}</strong> pending approvals</span></div></section>
+    <section class="card glass org-intro"><div><div class="eyebrow">System administration</div><h2>Staff</h2><p>Staff accounts, roles and access. Departments have their own page. Business work stays with the departments.</p></div><div class="org-intro-stats"><span><strong>${permissions.length}</strong> permissions</span><span><strong>${org.users.filter((user) => user.active).length}</strong> active staff</span><span><strong>${org.approvals.filter((item) => item.status === "pending").length}</strong> pending approvals</span></div></section>
+    ${staffRegister}
     ${canSeeFinancial() && canModule("reports") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Management overview</h2><div class="section-note">Live organization records and financial position</div></div></div><div class="metric-grid"><div class="metric"><span>Projects</span><strong>${metrics.projects ?? 0}</strong></div><div class="metric"><span>Properties</span><strong>${metrics.properties ?? 0}</strong></div><div class="metric"><span>Available</span><strong>${metrics.available_properties ?? 0}</strong></div><div class="metric"><span>Clients</span><strong>${metrics.clients ?? 0}</strong></div><div class="metric"><span>Leads</span><strong>${metrics.leads ?? 0}</strong></div><div class="metric"><span>Contracts</span><strong>${metrics.contracts ?? 0}</strong></div><div class="metric"><span>Income</span><strong>${money(metrics.payments)}</strong></div><div class="metric"><span>Outstanding</span><strong>${money(metrics.outstanding)}</strong></div><div class="metric"><span>Overdue</span><strong>${money(metrics.overdue)}</strong></div></div></section>` : ""}
-    ${canManage || permissions.includes("manage_users") ? renderAdminConsole(org, { canManage, canAddStaff: permissions.includes("manage_users"), userRow, staffForm: `<form id="staff-form" class="form-grid"><div class="field"><label for="staff-name">Display name</label><input id="staff-name" name="display_name" required placeholder="Staff member"></div><div class="field"><label for="staff-email">Email</label><input id="staff-email" name="email" type="email" required placeholder="staff@company.com"></div><div class="field"><label for="staff-password">Temporary password</label><input id="staff-password" name="password" type="password" minlength="8" required placeholder="At least 8 characters"></div><div class="field"><label for="staff-role">Role and privilege rank</label><select id="staff-role" name="role_ids" required><option value="">Select role</option>${staffRoleOptions}</select></div><div class="field"><label for="staff-department">Department</label><select id="staff-department" name="department_ids"><option value="">The role's own department</option>${departmentOptions}</select></div><button class="btn btn-primary" type="submit">Create staff</button></form>` }) : ""}
     <section class="card glass"><div class="section-head"><div><h2 class="section-title">Access map</h2><div class="section-note">${escapeHtml(org.me?.user?.display_name || "Workspace")} · ${permissions.length} permissions</div></div></div><div class="table-wrap"><table><thead><tr><th>Departments</th><th>Roles</th><th>Staff</th></tr></thead><tbody><tr><td>${org.departments.length}</td><td>${org.roles.length}</td><td>${org.users.length}</td></tr></tbody></table></div>${canManage ? `<div class="form-grid" style="margin-top:18px"><div class="field"><label for="org-role">New role</label><input id="org-role" data-org-field="role" placeholder="Role name"></div><div class="field"><label for="org-role-rank">Role rank</label><input id="org-role-rank" data-org-field="role-rank" type="number" min="0" max="100" value="20" placeholder="20"></div><div class="field"><label for="org-role-scope">Data scope</label><select id="org-role-scope" data-org-field="role-scope"><option value="own">Own records only</option><option value="department">Department records</option><option value="organization">Whole organization</option></select></div><button class="btn btn-primary" data-action="create-role">Add role</button><div class="field"><label for="org-role-select">Assign permissions to role</label><select id="org-role-select" data-org-field="role-id"><option value="">Select role</option>${roleOptions}</select></div><div class="field"><label for="org-role-rank-edit">Selected role rank</label><input id="org-role-rank-edit" data-org-field="role-rank-edit" type="number" min="0" max="100" value="0" placeholder="20"></div><div class="field"><label for="org-role-scope-edit">Selected role scope</label><select id="org-role-scope-edit" data-org-field="role-scope-edit"><option value="">Keep current</option><option value="own">Own records only</option><option value="department">Department records</option><option value="organization">Whole organization</option></select></div><div class="field full check-grid">${permissionOptions}</div><button class="btn btn-gold" data-action="save-role-permissions">Save role permissions</button><button class="btn btn-soft" data-action="save-role-rank">Save role rank</button></div>` : ""}</section>
     ${canModule("leads") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Lead intake</h2><div class="section-note">Sales and marketing queue</div></div></div><form id="lead-form" class="form-grid"><div class="field"><label for="lead-name">Name</label><input id="lead-name" name="name" required placeholder="Customer inquiry"></div><div class="field"><label for="lead-contact">Email</label><input id="lead-contact" name="email" type="email" placeholder="customer@example.com"></div><div class="field"><label for="lead-source">Source</label><input id="lead-source" name="source" placeholder="Public website"></div><button class="btn btn-primary" type="submit">Add lead</button></form><div class="table-wrap" style="margin-top:18px"><table><thead><tr><th>Lead</th><th>Status</th><th>Source</th><th>Next</th></tr></thead><tbody>${leadRows || `<tr><td colspan="4" class="empty">No leads yet</td></tr>`}</tbody></table></div></section>` : ""}
     ${canModule("follow_ups") ? `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Follow-up desk</h2><div class="section-note">Sales, service, and collections activity</div></div></div><form id="follow-up-form" class="form-grid"><div class="field"><label for="follow-up-date">Due date</label><input id="follow-up-date" name="due_at" type="datetime-local" required></div><div class="field"><label for="follow-up-type">Type</label><select id="follow-up-type" name="follow_up_type"><option value="call">Call</option><option value="meeting">Meeting</option><option value="visit">Visit</option><option value="message">Message</option></select></div><div class="field"><label for="follow-up-notes">Notes</label><input id="follow-up-notes" name="notes" placeholder="Next action"></div><button class="btn btn-primary" type="submit">Schedule follow-up</button></form><div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Type</th><th>Due</th><th>Status</th><th>Outcome</th></tr></thead><tbody>${followUpRows || `<tr><td colspan="4" class="empty">No follow-ups yet</td></tr>`}</tbody></table></div></section>` : ""}
@@ -2039,13 +2323,14 @@ function renderOrganization() {
  * reset password, activate/deactivate, change role, move department - and the
  * department's own rename / deactivate / delete. Core departments are fixed.
  */
-function renderAdminConsole(org, { canManage, canAddStaff, userRow, staffForm }) {
+function renderAdminConsole(org, { canManage, canAddStaff, userRow, staffForm = "" }) {
   const open = state.openDepartments || (state.openDepartments = new Set());
   const members = (dept) => org.users.filter((u) => (u.departments || []).some((d) => Number(d.id) === Number(dept.id)));
-  const byRank = (a, b) => Math.max(0, ...(b.roles || []).map((r) => Number(r.rank || 0))) - Math.max(0, ...(a.roles || []).map((r) => Number(r.rank || 0))) || String(a.display_name).localeCompare(String(b.display_name));
-  const staffTable = (list) => `<div class="table-wrap" style="margin-top:10px"><table><thead><tr><th>Name</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead><tbody>${list.slice().sort(byRank).map(userRow).join("")}</tbody></table></div>`;
+  // A to Z: staff by name, departments by name.
+  const byName = (a, b) => String(a.display_name).localeCompare(String(b.display_name));
+  const staffTable = (list) => `<div class="table-wrap" style="margin-top:10px"><table><thead><tr><th>Name</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead><tbody>${list.slice().sort(byName).map(userRow).join("")}</tbody></table></div>`;
   const blocks = (org.departments || []).slice()
-    .sort((a, b) => (b.active !== false) - (a.active !== false) || String(a.name).localeCompare(String(b.name)))
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)))
     .map((d) => {
       const people = members(d);
       const active = people.filter((u) => u.active).length;
@@ -2064,12 +2349,12 @@ function renderAdminConsole(org, { canManage, canAddStaff, userRow, staffForm })
           <span class="dept-group-count">${active} staff · ${Number(d.client_count || 0)} client${Number(d.client_count || 0) === 1 ? "" : "s"}</span>
           <span class="row-actions" style="margin-left:auto">${deptActions}<button class="btn btn-small${isOpen ? "" : " btn-primary"}" data-action="toggle-dept-staff" data-id="${d.id}" aria-expanded="${isOpen}">${isOpen ? "Hide staff" : `Show staff (${people.length})`}</button></span>
         </div>
-        ${isOpen ? (people.length ? staffTable(people) : `<p class="muted" style="margin:.5rem 0 0">No staff yet. Add one above and choose this department.</p>`) : ""}
+        ${isOpen ? (people.length ? staffTable(people) : `<p class="muted" style="margin:.5rem 0 0">No staff yet. Add one on the Staff page and choose this department.</p>`) : ""}
       </div>`;
     }).join("");
   const loose = org.users.filter((u) => !(u.departments || []).length);
   const looseBlock = loose.length ? `<div class="dept-group"><div class="dept-group-head"><span class="dept-group-name">No department</span><span class="dept-group-count">${loose.length} to place</span></div>${staffTable(loose)}</div>` : "";
-  return `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Departments &amp; staff</h2><div class="section-note">${(org.departments || []).filter((d) => d.active !== false).length} departments · ${org.users.filter((u) => u.active).length} active staff · choose a department and press Show staff</div></div></div>
+  return `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Departments</h2><div class="section-note">${(org.departments || []).filter((d) => d.active !== false).length} departments · ${org.users.filter((u) => u.active).length} active staff · A to Z · press Show staff to see who is in each</div></div></div>
     <div class="form-grid">
       ${canManage ? `<div class="field"><label for="dept-new-name">New department</label><input id="dept-new-name" data-org-field="department" maxlength="80" placeholder="e.g. Property Management"></div><button class="btn btn-primary" data-action="create-department">Create department</button>` : ""}
     </div>
@@ -2140,18 +2425,21 @@ async function openRequestOutcome(taskId) {
   const choices = Object.entries(REQUEST_OUTCOMES).map(([value, label]) => `<label class="check-field"><input type="radio" name="outcome" value="${value}" required> ${escapeHtml(label)}</label>`).join("");
   openSmallForm(`Outcome for ${task.request_customer || "the customer"}`, "Sales is notified at once and approves your report.",
     `<div class="field full"><span class="toolbar-label">What happened? <span class="req">*</span></span>${choices}</div>
-     <div class="field" data-appointment hidden><label for="outcome-when">Appointment date and time <span class="req">*</span></label><input id="outcome-when" name="appointment_at" type="datetime-local"></div>
+     <div class="field" data-appointment hidden><label for="outcome-date">Appointment date <span class="req">*</span></label><input id="outcome-date" name="appointment_date" type="date" min="${today()}"></div>
+     <div class="field" data-appointment hidden><label for="outcome-time">Appointment time <span class="req">*</span></label><input id="outcome-time" name="appointment_time" type="time" step="900"></div>
      <div class="field" data-appointment hidden><label for="outcome-type">Type</label><select id="outcome-type" name="appointment_type"><option value="viewing">Viewing</option><option value="meeting">Meeting</option><option value="call">Call</option></select></div>
-     <div class="field full"><label for="outcome-note">Note for Sales <span class="muted" data-note-hint></span></label><textarea id="outcome-note" name="note" rows="3" maxlength="2000" placeholder="What did the customer say?"></textarea></div>`,
+     <div class="field full"><label for="outcome-note">Note for Sales <span class="req">*</span> <span class="muted" data-note-hint></span></label><textarea id="outcome-note" name="note" rows="3" maxlength="2000" required placeholder="What did the customer say? What happens next?"></textarea><p class="muted" style="margin:.3rem 0 0">Sales reads this note before approving your report.</p></div>`,
     "Send to Sales",
     async (data) => {
       const body = { outcome: data.outcome, note: data.note || null };
       if (data.outcome === "appointment") {
-        if (!data.appointment_at) throw new Error("Give the appointment date and time.");
-        body.appointment_at = new Date(data.appointment_at).toISOString();
+        if (!data.appointment_date) throw new Error("Choose the appointment date.");
+        if (!data.appointment_time) throw new Error("Choose the appointment time agreed with the customer.");
+        body.appointment_at = new Date(`${data.appointment_date}T${data.appointment_time}`).toISOString();
         body.appointment_type = data.appointment_type || "viewing";
       }
       if (data.outcome === "declined" && !data.note) throw new Error("Say why the customer declined.");
+      if (!String(data.note || "").trim()) throw new Error("Write a note for Sales: what did the customer say?");
       await api(`/org/tasks/${taskId}/outcome`, { method: "POST", body: JSON.stringify(body) });
       state.tasks = null;
       state.tasksRequested = false;
@@ -2163,8 +2451,7 @@ async function openRequestOutcome(taskId) {
     if (event.target.name !== "outcome") return;
     const appointment = event.target.value === "appointment";
     form.querySelectorAll("[data-appointment]").forEach((el) => { el.hidden = !appointment; });
-    const when = form.querySelector('[name="appointment_at"]');
-    if (when) when.required = appointment;
+    form.querySelectorAll('[name="appointment_date"], [name="appointment_time"]').forEach((field) => { field.required = appointment; });
     const hint = form.querySelector("[data-note-hint]");
     if (hint) hint.textContent = event.target.value === "declined" ? "(required: why?)" : "";
     const note = form.querySelector('[name="note"]');
@@ -2545,10 +2832,10 @@ function renderDashboard() {
   const hasRecords = visibleRecordCount > 0;
 
   const quickActions = [];
-  if (canModule("contracts") && can("create")) quickActions.push(`<button class="btn btn-primary" data-action="generate-contract">${icon("contract")}Generate contract</button>`);
-  if (canModule("properties") && can("create")) quickActions.push(`<button class="btn" data-action="new-property">${icon("plus")}Property</button>`);
+  if (canAuthorContracts()) quickActions.push(`<button class="btn btn-primary" data-action="generate-contract">${icon("contract")}Generate contract</button>`);
+  if (canChange("properties", "create")) quickActions.push(`<button class="btn" data-action="new-property">${icon("plus")}Property</button>`);
   if (canModule("clients") && can("create")) quickActions.push(`<button class="btn" data-action="new-client">${icon("plus")}Client</button>`);
-  if (canModule("projects") && can("create")) quickActions.push(`<button class="btn" data-action="new-project">${icon("plus")}Project</button>`);
+  if (canChange("projects", "create")) quickActions.push(`<button class="btn" data-action="new-project">${icon("plus")}Project</button>`);
 
   // ---- 1. Needs your attention ---------------------------------------------
   const attentionItems = [];
@@ -2594,10 +2881,10 @@ function renderDashboard() {
   const startStep = (n, title, text, action) => startSteps.push(`<li class="start-step"><span class="start-num">${n}</span><div class="start-copy"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(text)}</span></div>${action}</li>`);
   if (!hasRecords) {
     let n = 1;
-    if (canModule("projects") && can("create")) startStep(n++, "Create a project", "Group properties by development.", `<button class="btn btn-small" data-action="new-project">Create project</button>`);
-    if (canModule("properties") && can("create")) startStep(n++, "Add your first property", "Price, location, status and photos.", `<button class="btn btn-small" data-action="new-property">Add property</button>`);
+    if (canChange("projects", "create")) startStep(n++, "Create a project", "Group properties by development.", `<button class="btn btn-small" data-action="new-project">Create project</button>`);
+    if (canChange("properties", "create")) startStep(n++, "Add your first property", "Price, location, status and photos.", `<button class="btn btn-small" data-action="new-property">Add property</button>`);
     if (canModule("clients") && can("create")) startStep(n++, "Register a client", "A client can exist before any contract.", `<button class="btn btn-small" data-action="new-client">Add client</button>`);
-    if (canModule("contracts") && can("create")) startStep(n++, "Generate a contract", "Pricing, payment plan and the full document.", `<button class="btn btn-small btn-primary" data-action="generate-contract">Generate</button>`);
+    if (canAuthorContracts()) startStep(n++, "Generate a contract", "Pricing, payment plan and the full document.", `<button class="btn btn-small btn-primary" data-action="generate-contract">Generate</button>`);
   }
 
   // ---- 4. Module panels ---------------------------------------------------
@@ -2614,7 +2901,7 @@ function renderDashboard() {
     panels.push(dashPanel(
       "Recent contracts",
       hasContracts ? `${newContracts.count || 0} new · ${terminal.count || 0} terminal` : "",
-      hasContracts && list ? `<ul class="list">${list}</ul>` : emptyState("No active contracts", "Contracts will appear here once created.", { iconName: "contract", compact: true, action: can("create") ? `<button class="btn btn-small btn-primary" data-action="generate-contract">Generate contract</button>` : "" }),
+      hasContracts && list ? `<ul class="list">${list}</ul>` : emptyState("No active contracts", "Contracts will appear here once created.", { iconName: "contract", compact: true, action: canAuthorContracts() ? `<button class="btn btn-small btn-primary" data-action="generate-contract">Generate contract</button>` : "" }),
       hasContracts ? `<button class="btn btn-ghost btn-small" data-action="open-alert-view" data-view="contracts">View all${icon("arrow")}</button>` : "",
     ));
   }
@@ -2697,15 +2984,15 @@ function renderProjects() {
   // rollup is computed with the same scope predicate as everything else, so the
   // figures are the caller's own and are correct for the whole set.
   const rollup = new Map((state.projectReports || []).map((entry) => [String(entry.id), entry]));
-  const mayCreate = canModule("projects") && can("create");
+  const mayCreate = canChange("projects", "create");
   const cards = state.projects.map((project) => {
     const report = rollup.get(String(project.id));
     const contracts = report ? Number(report.new_contracts || 0) + Number(report.terminal_contracts || 0) : 0;
     const value = report ? numberValue(report.contract_value) : 0;
     const properties = report ? Number(report.properties || 0) : 0;
     const clients = report ? Number(report.clients || 0) : 0;
-    const edit = can("edit") ? `<button class="btn btn-small" data-action="edit-project" data-id="${project.id}">Edit</button>` : "";
-    const remove = can("delete") ? `<button class="btn btn-small btn-danger-ghost" data-action="delete-project" data-id="${project.id}" title="Delete project">Delete project</button>` : "";
+    const edit = canChange("projects", "edit") ? `<button class="btn btn-small" data-action="edit-project" data-id="${project.id}">Edit</button>` : "";
+    const remove = canChange("projects", "delete") ? `<button class="btn btn-small btn-danger-ghost" data-action="delete-project" data-id="${project.id}" title="Delete project">Delete project</button>` : "";
     return `<article class="project-card" data-searchable>
       <div class="project-card-head"><span class="project-icon">${icon("building")}</span><div class="project-title"><strong>${escapeHtml(project.name)}</strong><span>Created ${formatDate(project.created_at)}</span></div>${badge(project.status)}</div>
       <dl class="project-stats">
@@ -2765,14 +3052,14 @@ function renderContracts() {
       generatedDocumentAction(contract),
       canModule("documents") && can("create") ? `<button class="btn btn-small" data-action="upload-contract-document" data-id="${contract.id}">Upload document</button>` : "",
       `<button class="btn btn-small" data-action="contract-history" data-id="${contract.id}">History</button>`,
-      can("edit") ? `<button class="btn btn-small" data-action="edit-contract" data-id="${contract.id}">Edit details</button>` : "",
+      can("edit") && canAuthorContracts() ? `<button class="btn btn-small" data-action="edit-contract" data-id="${contract.id}">Edit details</button>` : "",
       scheduleAction(contract.id),
-      can("delete") ? `<button class="btn btn-danger-ghost btn-small" data-action="delete-contract" data-id="${contract.id}" title="Delete contract">Delete contract</button>` : "",
+      canDeleteContract(contract) ? `<button class="btn btn-danger-ghost btn-small" data-action="delete-contract" data-id="${contract.id}" title="Delete contract">Delete contract</button>` : "",
     ]);
     return `<tr data-searchable>
       <td><button class="cell-link" data-action="view-contract" data-id="${contract.id}"><span class="cell-main">${escapeHtml(contract.client_name)}</span></button><span class="cell-sub">${escapeHtml(contract.contract_number || "No number yet")}${contract.project_name ? ` · ${escapeHtml(contract.project_name)}` : ""}</span></td>
       <td>${contractStatusBadge(contract.status)}${stage ? `<span class="cell-sub stage-note" title="Department currently holding the contract">Stage ${stage.number} of ${stage.total} · Held by ${escapeHtml(titleCase(stage.owner))}</span>` : ""}${needsPlan ? `<span class="cell-sub plan-missing">No payment plan yet</span>` : ""}${contract.legal_signed_by ? `<span class="cell-sub signed-note">${icon("check")}Signed by Legal</span>` : ""}</td>
-      <td>${badge(contract.contract_type, "neutral")}</td>
+      <td>${contract.deal_type ? badge(dealTypeLabel(contract.deal_type), "open") : `<span class="muted cell-plain">Not recorded</span>`}<span class="cell-sub">${escapeHtml(humanize(contract.contract_type || ""))}</span></td>
       <td><span class="cell-main cell-plain">${formatDate(contract.start_date)}</span><span class="cell-sub">to ${formatDate(contract.end_date)}</span></td>
       <td class="amount">${money(contract.value)}${Number(contract.discount_pct || 0) > 0 ? `<span class="cell-sub">${numberValue(contract.discount_pct)}% discount</span>` : ""}</td>
       <td><div class="row-actions">${primary}${menu}</div></td>
@@ -2791,7 +3078,7 @@ function renderContracts() {
   const awaiting = contractsAwaitingCaller().length;
   content.innerHTML = `<div class="toolbar"><div class="toolbar-filters"><span class="toolbar-label">${icon("search")}Filter</span>${projectSelect(filters.project)}<select class="filter-input" data-filter="type" aria-label="Filter by contract type"><option value="">All types</option><option value="new" ${filters.type === "new" ? "selected" : ""}>New</option><option value="terminal" ${filters.type === "terminal" ? "selected" : ""}>Terminal</option></select><select class="filter-input" data-filter="status" aria-label="Filter by contract status"><option value="">All statuses</option>${statusOptions}</select></div><div class="toolbar-end"><span class="toolbar-count">${visibleLabel}${awaiting ? ` · <strong class="count-attention">${awaiting} awaiting you</strong>` : ""}</span>${pageActions()}</div></div>${rows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Contract</th><th>Status</th><th>Type</th><th>Term</th><th>Value</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>${pager("contracts")}` : `<div class="panel">${filtered
     ? emptyState("No contracts match these filters", "Try a different project, type or status.", { iconName: "search" })
-    : emptyState("No contracts yet", "Generate a contract to price the deal, build the payment plan and produce the full document.", { iconName: "contract", action: canModule("contracts") && can("create") ? `<button class="btn btn-primary" data-action="generate-contract">${icon("contract")}Generate contract</button>` : "" })}</div>`}`;
+    : emptyState("No contracts yet", "Generate a contract to price the deal, build the payment plan and produce the full document.", { iconName: "contract", action: canAuthorContracts() ? `<button class="btn btn-primary" data-action="generate-contract">${icon("contract")}Generate contract</button>` : "" })}</div>`}`;
 }
 
 function renderDebts() {
@@ -2866,20 +3153,84 @@ function renderRemindersTable() {
   return `<div class="table-wrap"><table><thead><tr><th>Client / project</th><th>Due date</th><th>Amount</th><th>Reminder at</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
+// The Reminders page: installments whose reminder is due now, and those whose
+// due date is coming up, so Finance is warned BEFORE the date, not after.
+const UPCOMING_REMINDER_DAYS = 14;
+async function loadUpcomingReminders() {
+  if (!(canModule("reminders") && canSeeFinancial())) { state.upcomingReminders = []; return; }
+  try { state.upcomingReminders = await api(`/reminders/upcoming?days=${UPCOMING_REMINDER_DAYS}`); }
+  catch { state.upcomingReminders = state.upcomingReminders || []; }
+}
+function daysUntil(date) {
+  const match = String(date || "").slice(0, 10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const due = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((due - start) / 86400000);
+}
+function dueWording(date) {
+  const days = daysUntil(date);
+  if (days === null) return "";
+  if (days < 0) return `${-days} day${days === -1 ? "" : "s"} overdue`;
+  if (days === 0) return "Due today";
+  if (days === 1) return "Due tomorrow";
+  return `Due in ${days} days`;
+}
+function renderReminders() {
+  if (state.upcomingReminders === undefined) {
+    state.upcomingReminders = null;
+    loadUpcomingReminders().then(() => { updateNavigation(); if (state.view === "reminders") render(); });
+  }
+  const due = state.reminders || [];
+  const upcoming = state.upcomingReminders || [];
+  const mayEdit = can("edit");
+  const row = (reminder, isDue) => {
+    const days = daysUntil(reminder.due_date);
+    const late = days !== null && days < 0;
+    const tone = late ? "danger-text" : "";
+    const rowClass = late ? "row-overdue" : "";
+    return `<tr data-searchable class="${rowClass}">
+      <td><span class="cell-main">${escapeHtml(reminder.client_name)}</span><span class="cell-sub">${escapeHtml(reminder.project_name || "")}${reminder.notes ? ` · ${escapeHtml(reminder.notes)}` : ""}</span></td>
+      <td>${formatDate(reminder.due_date)}<span class="cell-sub ${tone}">${escapeHtml(dueWording(reminder.due_date))}</span></td>
+      <td class="amount">${money(reminder.amount)}</td>
+      <td>${isDue ? badge("Remind now", "pending") : `<span class="muted cell-plain">From ${formatDate(reminder.remind_at, true)}</span>`}</td>
+      <td class="align-right"><div class="row-actions">${mayEdit && isDue ? `<button class="btn btn-primary btn-small" data-action="dismiss-reminder" data-id="${reminder.id}" title="The client has been reminded">Mark handled</button>` : ""}${can("create") ? `<button class="btn btn-small" data-action="record-payment" data-id="${reminder.debt_id}">Record payment</button>` : ""}</div></td>
+    </tr>`;
+  };
+  const table = (list, isDue) => `<div class="table-wrap"><table class="data-table"><thead><tr><th>Client / project</th><th>Due date</th><th>Amount</th><th>Reminder</th><th class="align-right">Actions</th></tr></thead><tbody>${list.map((reminder) => row(reminder, isDue)).join("")}</tbody></table></div>`;
+  content.innerHTML = `
+    <div class="section">
+      <div class="section-head"><div><h2 class="section-title">Remind now</h2><div class="section-note">The due date is 3 days away or less. Contact the client, then mark it handled.</div></div></div>
+      ${due.length ? table(due, true) : `<div class="panel">${emptyState("Nothing to remind today", "Installments appear here 3 days before they fall due.", { iconName: "bell", compact: true })}</div>`}
+    </div>
+    <div class="section">
+      <div class="section-head"><div><h2 class="section-title">Coming up</h2><div class="section-note">Installments falling due in the next ${UPCOMING_REMINDER_DAYS} days</div></div></div>
+      ${state.upcomingReminders === null ? `<div class="panel"><p class="muted">Loading…</p></div>` : upcoming.length ? table(upcoming, false) : `<div class="panel">${emptyState("Nothing due soon", `No installment falls due in the next ${UPCOMING_REMINDER_DAYS} days.`, { iconName: "calendar", compact: true })}</div>`}
+    </div>`;
+}
+
 // Payments history under the debts view; receipts open in a new tab.
 // The permissions are passed in by the caller so the row actions match exactly
 // the set the debts register offers on the same screen.
 function renderPaymentsTable(mayEdit = can("edit"), mayDelete = can("delete")) {
+  const mayApprove = can("validate_finance") && canSeeFinancial();
   const payments = [...(state.payments || [])].sort((a, b) => String(b.paid_at).localeCompare(String(a.paid_at)));
   if (!payments.length) return `<div class="panel">${emptyState("No payments recorded", "Use “Record payment” on an installment to log income with an optional receipt.", { iconName: "money", compact: true })}</div>`;
   const rows = payments.map((payment) => {
     const remove = mayDelete ? `<button class="btn btn-danger-ghost btn-small" data-action="delete-payment" data-id="${payment.id}" title="Delete payment">Delete payment</button>` : "";
+    const edit = mayEdit ? `<button class="btn btn-small" data-action="edit-payment" data-id="${payment.id}" title="Correct this payment">Edit payment</button>` : "";
+    // Finance approves a pending payment; the server re-checks authority, scope
+    // and that the approver is not the person who recorded it.
+    const approve = mayApprove && payment.status === "pending" && Number(payment.created_by) !== Number(state.organization.me?.user?.id)
+      ? `<button class="btn btn-primary btn-small" data-action="approve-payment" data-id="${payment.id}">Approve Payment</button>`
+      : "";
     const receipt = payment.has_receipt
       ? `<button class="btn btn-small" data-action="open-receipt" data-id="${payment.id}">${icon("receipt")}Receipt</button>`
       : `<span class="muted cell-plain">No receipt</span>`;
-    return `<tr data-searchable><td><span class="cell-main">${escapeHtml(payment.client_name)}</span><span class="cell-sub">${escapeHtml(payment.project_name || "")}</span></td><td>${formatDate(payment.paid_at, String(payment.paid_at).length > 10)}</td><td>${badge(humanize(payment.method), "neutral")}</td><td class="amount amount-positive">${money(payment.amount)}</td><td><span class="mono">${escapeHtml(payment.reference || "—")}</span></td><td><div class="row-actions">${receipt}${rowMenu([remove])}</div></td></tr>`;
+    return `<tr data-searchable><td><span class="cell-main">${escapeHtml(payment.client_name)}</span><span class="cell-sub">${escapeHtml(payment.project_name || "")}</span></td><td>${formatDate(payment.paid_at, String(payment.paid_at).length > 10)}</td><td>${badge(humanize(payment.method), "neutral")}</td><td class="amount amount-positive">${money(payment.amount)}</td><td><span class="mono">${escapeHtml(payment.reference || "—")}</span></td><td>${payment.status === "pending" ? badge("Pending approval", "pending") : `${badge("Approved", "approved")}${payment.approved_by_name ? `<span class="cell-sub">by ${escapeHtml(payment.approved_by_name)}</span>` : ""}`}</td><td><div class="row-actions">${approve}${receipt}${rowMenu([edit, remove])}</div></td></tr>`;
   }).join("");
-  return `<div class="table-wrap"><table class="data-table"><thead><tr><th>Client / project</th><th>Paid on</th><th>Method</th><th>Amount</th><th>Reference</th><th class="align-right">Receipt</th></tr></thead><tbody>${rows}</tbody></table></div>${pager("payments")}`;
+  return `<div class="table-wrap"><table class="data-table"><thead><tr><th>Client / project</th><th>Paid on</th><th>Method</th><th>Amount</th><th>Reference</th><th>Approval</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>${pager("payments")}`;
 }
 
 function renderReports() {
@@ -2927,6 +3278,64 @@ function renderReports() {
       : emptyState("No reports yet", "Generate a report from live records, or upload an existing report file to keep it in the history.", { iconName: "chart", action: emptyActions })}</div>`}`;
 }
 
+// A property's state per category. A property for sale has a sale state
+// (available / reserved / sold); one for rent a rent state (available /
+// reserved / rented). Offered for both, each closes on its own, or both at
+// once. Mirrors models/propertyStatus.js on the server.
+const STATE_WORD = { available: "Available", reserved: "Reserved", sold: "Sold", rented: "Rented" };
+const STATE_BADGE = { available: "available", reserved: "reserved", sold: "sold", rented: "leased" };
+function propertyCategories(property) {
+  const list = [];
+  if (property.offer_buy) list.push({ key: "sale", field: "sale_status", label: "For sale", closed: "sold", state: property.sale_status || "available" });
+  if (property.offer_rent) list.push({ key: "rent", field: "rent_status", label: "For rent", closed: "rented", state: property.rent_status || "available" });
+  return list;
+}
+/** Badges for the card: one per category ("For sale · Sold"), else the overall status. */
+function propertyStateBadges(property) {
+  const categories = propertyCategories(property);
+  if (!categories.length) return badge(property.status);
+  return categories.map((category) => badgeVariant(`${category.label} · ${STATE_WORD[category.state]}`, STATE_BADGE[category.state])).join("");
+}
+/** The "⋯" menu's status choices, according to how the property is offered. */
+function propertyStatusActions(property) {
+  const categories = propertyCategories(property);
+  const item = (label, change, confirm = "") => ({ label, change, confirm });
+  if (!categories.length) {
+    // Not offered for sale or rent: the overall status, as before.
+    return [["available", "Mark as available"], ["reserved", "Mark as reserved"], ["sold", "Mark as sold"], ["leased", "Mark as rented"]]
+      .filter(([status]) => status !== property.status)
+      .map(([status, label]) => item(label, { status }, status === "sold" || status === "leased" ? (status === "sold" ? "sold" : "rented") : ""));
+  }
+  const both = categories.length === 2;
+  const actions = [];
+  if (both && categories.some((category) => category.state !== category.closed)) {
+    actions.push(item("Mark as sold and rented (both)", { sale_status: "sold", rent_status: "rented" }, "sold and rented"));
+  }
+  for (const category of categories) {
+    const word = category.closed === "sold" ? "sold" : "rented";
+    const which = both ? (category.key === "sale" ? " for sale" : " for rent") : "";
+    if (category.state !== category.closed) actions.push(item(`Mark as ${word}`, { [category.field]: category.closed }, word));
+    if (category.state === "available") actions.push(item(`Mark as reserved${which}`, { [category.field]: "reserved" }));
+    if (category.state !== "available") actions.push(item(category.key === "sale" ? "Open for sale again" : "Open for rent again", { [category.field]: "available" }));
+  }
+  return actions;
+}
+async function changePropertyStatus(id, change, name, closing) {
+  // Closing a category is confirmed: the website will show it as sold/rented.
+  if (closing) {
+    const ok = await confirmDialog({ title: `Mark as ${closing}`, message: `${name || "This property"} will be marked ${closing}. The public website shows it as ${closing.toUpperCase()} on that page and stops taking requests there.`, confirmLabel: `Mark as ${closing}`, tone: "primary" });
+    if (!ok) return;
+  }
+  try {
+    await api(`/properties/${id}`, { method: "PUT", body: JSON.stringify(change) });
+    invalidateRecord("properties", id);
+    showToast(`${name || "Property"} updated.`);
+    await refresh();
+  } catch (error) {
+    showToast(error.message || "Unable to change the status.");
+  }
+}
+
 function renderProperties() {
   const filters = state.filters;
   const rows = (state.properties || []).filter((property) =>
@@ -2950,10 +3359,17 @@ function renderProperties() {
       property.bathrooms ? `${property.bathrooms} bath` : "",
       property.image_count ? `${property.image_count} photo${Number(property.image_count) === 1 ? "" : "s"}` : "",
     ].filter(Boolean);
-    const edit = can("edit") ? `<button class="btn btn-small" data-action="edit-property" data-id="${property.id}">Edit</button>` : "";
-    const remove = can("delete") ? `<button class="btn btn-small btn-danger-ghost" data-action="delete-property" data-id="${property.id}" title="Delete property">Delete property</button>` : "";
+    const edit = canChange("properties", "edit") ? `<button class="btn btn-small" data-action="edit-property" data-id="${property.id}">Edit</button>` : "";
+    // Delete: holders of `delete`, or Sales (the server refuses a property a
+    // contract names, and says to mark it sold or rented instead).
+    const mayDeleteProperty = canChange("properties", "delete") || (canChange("properties", "edit") && can("submit_contract"));
+    const remove = mayDeleteProperty ? `<button class="btn btn-small btn-danger-ghost" data-action="delete-property" data-id="${property.id}" title="Delete property">Delete property</button>` : "";
+    // The "⋯" menu: change the property's status in one click.
+    const statusItems = canChange("properties", "edit")
+      ? propertyStatusActions(property).map((action) => `<button class="btn btn-small" data-action="property-status" data-id="${property.id}" data-change="${escapeHtml(JSON.stringify(action.change))}" data-closing="${escapeHtml(action.confirm)}" data-name="${escapeHtml(property.name)}">${escapeHtml(action.label)}</button>`)
+      : [];
     return `<article class="property-card" data-searchable>
-      <div class="property-media">${cover}<div class="property-badges">${badge(property.status)}${property.featured ? `<span class="badge badge-featured">Featured</span>` : ""}</div></div>
+      <div class="property-media">${cover}<div class="property-badges">${propertyStateBadges(property)}${property.featured ? `<span class="badge badge-featured">Featured</span>` : ""}</div></div>
       <div class="property-body">
         <div class="property-head">
           <div class="property-name" title="${escapeHtml(property.name)}">${escapeHtml(property.name)}</div>
@@ -2965,11 +3381,11 @@ function renderProperties() {
       </div>
       <div class="property-foot">
         <div class="property-price"><span>Price</span><strong>${price}</strong></div>
-        <div class="row-actions">${edit}${rowMenu([remove])}</div>
+        <div class="row-actions">${edit}${rowMenu([...statusItems, remove])}</div>
       </div>
     </article>`;
   }).join("");
-  const mayCreate = canModule("properties") && can("create");
+  const mayCreate = canChange("properties", "create");
   const filtered = Boolean(filters.project || filters.propertyStatus || filters.type);
   content.innerHTML = `
     <div class="toolbar">
@@ -3069,12 +3485,13 @@ function renderLeads() {
   const statuses = [...new Set(leads.map((lead) => lead.status).filter(Boolean))].sort();
   const rows = leads.filter((lead) => !status || lead.status === status);
   const mayCreate = can("create");
-  const mayHandOff = can("assign_tasks");
+  // Only Sales hands requests to Customer Service; the MD follows, read only.
+  const mayHandOff = mayHandOffRequests();
   const means = { phone: "Phone", whatsapp: "WhatsApp", email: "Email" };
   const list = rows.map((lead) => {
     const website = String(lead.source || "").startsWith("website");
     const interest = [
-      lead.service ? badge(lead.service === "rent" ? "Rent" : "Buy", "open") : "",
+      lead.service ? badge(SERVICE_LABELS[lead.service] || lead.service, "open") : "",
       lead.budget ? `<span class="cell-sub">Budget TZS ${escapeHtml(Number(lead.budget).toLocaleString("en-US"))}</span>` : "",
       lead.preferred_contact ? `<span class="cell-sub">Contact by ${escapeHtml(means[lead.preferred_contact] || lead.preferred_contact)}</span>` : "",
     ].join("");
@@ -3084,7 +3501,7 @@ function renderLeads() {
       <td>${lead.client_id ? badge("Converted", "converted") : badge(lead.status || "new", lead.status === "new" ? "open" : lead.status)}</td>
       <td>${formatDate(lead.created_at)}</td>
       <td class="cell-note">${interest}${escapeHtml(lead.notes || "")}</td>
-      <td><div class="row-actions">${mayHandOff && !lead.client_id ? `<button class="btn btn-small" data-action="hand-off-lead" data-id="${lead.id}" title="Assign Customer Service to contact this customer">Hand to Customer Service</button>` : ""}${lead.client_id ? `<span class="muted cell-plain">Now a client</span>` : (mayCreate ? `<button class="btn btn-small btn-primary" data-action="convert-lead" data-id="${lead.id}" title="Register this person as a client (prospect)">Convert to client</button>` : "")}</div></td>
+      <td><div class="row-actions">${mayHandOff && !lead.client_id ? `<button class="btn btn-small" data-action="hand-off-lead" data-id="${lead.id}" title="Assign Customer Service to contact this customer">Hand to Customer Service</button>` : ""}${lead.client_id ? `<span class="muted cell-plain">Now a client</span>` : (mayApproveClients() ? `<button class="btn btn-small btn-primary" data-action="convert-lead" data-id="${lead.id}" title="Register this person as a client (prospect)">Convert to client</button>` : "")}</div></td>
     </tr>`;
   }).join("");
   const form = mayCreate ? `<details class="panel add-panel"${leads.length ? "" : " open"}><summary>${icon("plus")}Add a lead</summary>
@@ -3117,9 +3534,38 @@ const REQUEST_STAGES = [
   ["unreachable", "Not reached", "pending"],
   ["closed", "Declined", "archived"],
   ["client", "Became a client", "converted"],
+  // Contact-page messages: Customer Service answers them directly.
+  ["message", "Message for Customer Service", "open"],
+  ["answered", "Answered", "approved"],
 ];
 
+/** A question sent from the website's Contact page (not a Buy/Rent/Sell request). */
+function isContactMessage(row) {
+  return row.source === "website-contact";
+}
+function inCustomerService() {
+  return (state.organization.me?.user?.departments || []).some((department) => String(department.name).toUpperCase() === "CUSTOMER SERVICE");
+}
+/** Sales owns website requests end to end; the MD follows them, read only. */
+function inSales() {
+  return (state.organization.me?.user?.departments || []).some((department) => String(department.name).toUpperCase() === "SALES, MARKETING & OPERATIONS");
+}
+function mayHandOffRequests() {
+  return can("assign_tasks") && inSales();
+}
+
 function requestStage(row) {
+  if (isContactMessage(row)) {
+    if (row.appointment_id) return "appointment";
+    if (row.outcome === "answered") return "answered";
+    // Handed to Customer Service as a task: it follows that task.
+    if (row.task_id && row.task_status !== "cancelled") {
+      if (["submitted", "under_review"].includes(row.task_status)) return "reported";
+      if (["approved", "completed"].includes(row.task_status)) return "answered";
+      return "with_cs";
+    }
+    return "message";
+  }
   if (row.appointment_id) return "appointment";
   if (row.client_id) return "client";
   if (!row.task_id || row.task_status === "cancelled") return row.existing_client_id ? "existing" : "new";
@@ -3133,9 +3579,10 @@ function requestStage(row) {
 /** Whether this request is waiting on the person looking at it. */
 function requestNeedsMe(row) {
   const stage = requestStage(row);
+  if (isContactMessage(row) && stage === "message") return inCustomerService();
   const mine = row.task_id && Number(row.task_assignee_id) === Number(state.organization.me?.user?.id);
   if (mine) return stage === "with_cs";
-  if (!can("assign_tasks")) return false;
+  if (!mayHandOffRequests()) return false;
   return ["new", "existing", "reported"].includes(stage);
 }
 
@@ -3151,16 +3598,91 @@ function reloadRequests() {
   return loadRequests();
 }
 
+/**
+ * "Become a client": only Sales and the MD approve it, and the approver is
+ * recorded. When the customer matches an existing client (same phone or
+ * email) the approver says whether it is the same person or a new client, so
+ * the contract made later belongs to the right client.
+ */
+function mayApproveClients() {
+  return canModule("leads") && (inSales() || can("approve_management"));
+}
+async function openBecomeClient(leadId) {
+  const row = [...(state.requests || []), ...(state.organization.leads || [])].find((entry) => String(entry.id) === String(leadId));
+  const name = row?.name || "This customer";
+  const done = async (mode) => {
+    const client = await api(`/org/leads/${leadId}/convert`, { method: "POST", body: JSON.stringify({ mode }) });
+    await refresh();
+    if (state.requests) { await reloadRequests(); if (state.view === "requests") render(); }
+    return `${name} is now a client${client?.name && client.name !== name ? ` (${client.name})` : ""}.`;
+  };
+  if (row?.existing_client_id) {
+    openSmallForm(`Become a client · ${name}`, "This customer has the same phone or email as a client already on record. Is it the same person?",
+      `<div class="field full">
+        <label class="check-field"><input type="radio" name="mode" value="existing" required checked> Same person as client <strong>${escapeHtml(row.existing_client_name || "")}</strong> (link this request to that client)</label>
+        <label class="check-field"><input type="radio" name="mode" value="new"> A different person: create a new client <strong>${escapeHtml(name)}</strong></label>
+      </div>`,
+      "Approve as client",
+      async (data) => done(data.mode === "new" ? "new" : "existing"));
+    return;
+  }
+  const ok = await confirmDialog({ title: "Become a client", message: `${name} will be registered as a client. Contracts for this customer will be made on this client.`, confirmLabel: "Approve as client", tone: "primary" });
+  if (!ok) return;
+  try { showToast(await done("new")); } catch (error) { showToast(error.message || "Unable to approve the client."); }
+}
+
+/**
+ * Where a request stands, in words, from the request and its Customer Service
+ * task: what happened last (and who did it) and who acts next. It changes at
+ * every step, so anyone following the request (the MD) sees the real moment.
+ */
+function requestProgress(row, key) {
+  const cs = row.task_assignee || "Customer Service";
+  const sales = row.task_reviewer || row.task_assigned_by || "Sales";
+  const when = (value) => (value ? ` · ${formatDateTime(value, true)}` : "");
+  switch (key) {
+    case "new":
+    case "existing":
+      return { done: row.task_status === "cancelled" ? "The last hand-off was cancelled" : "", next: "Waiting for Sales to hand it to Customer Service" };
+    case "message":
+      return { done: "Message from the Contact page", next: "Waiting for Customer Service to answer" };
+    case "with_cs":
+      if (row.task_status === "in_progress") return { done: `${cs} is contacting the customer`, next: "Waiting for Customer Service to report back" };
+      if (row.task_status === "changes_requested") return { done: `${sales} asked ${cs} for more detail`, next: "Waiting for Customer Service to respond" };
+      return { done: `Handed to ${cs} by ${row.task_assigned_by || "Sales"}${when(row.handed_off_at)}`, next: "Waiting for Customer Service to respond" };
+    case "reported":
+      return { done: `${cs} reported back${when(row.task_submitted_at)}`, next: `Waiting for ${sales} (Sales) to approve the report` };
+    case "contacted":
+      return { done: `Report approved by ${row.task_approved_by || sales}${when(row.task_approved_at)}`, next: "Waiting for Sales to arrange the appointment" };
+    case "answered":
+      return { done: row.task_id ? `Report approved by ${row.task_approved_by || sales}` : "Answered by Customer Service", next: row.task_id ? "Waiting for Sales to arrange the appointment" : "Done" };
+    case "appointment":
+      return { done: `Appointment booked${row.appointment_starts_at ? ` for ${formatDateTime(row.appointment_starts_at, true)}` : ""}`, next: "Sales meets the customer" };
+    case "unreachable":
+      return { done: `${cs} could not reach the customer`, next: "Waiting for Sales to decide" };
+    case "closed":
+      return { done: "The customer declined", next: "Closed" };
+    case "client":
+      return { done: `Became a client${row.client_name ? `: ${row.client_name}` : ""}${row.converted_by_name ? ` · approved by ${row.converted_by_name}` : ""}${when(row.converted_at)}`, next: "Continue under Clients" };
+    default:
+      return { done: "", next: "" };
+  }
+}
+
 function renderRequests() {
   if (!state.requests) { content.innerHTML = `<div class="panel">${emptyState("Loading requests", "", { iconName: "inbox", compact: true })}</div>`; return; }
   const all = state.requests;
   const stage = state.requestStage || "";
   const rows = all.filter((row) => !stage || requestStage(row) === stage);
-  const mayHandOff = can("assign_tasks");
-  const mayCreate = can("create");
+  // Only Sales hands requests to Customer Service; the MD follows, read only.
+  const mayHandOff = mayHandOffRequests();
+  // Converting a request into a client is Sales's step too.
+  const mayCreate = can("create") && (inSales() || inCustomerService());
   const means = { phone: "Phone", whatsapp: "WhatsApp", email: "Email" };
   const count = (key) => all.filter((row) => requestStage(row) === key).length;
-  const tabs = [["", "All", all.length], ...REQUEST_STAGES.map(([key, label]) => [key, label, count(key)])]
+  // Only stages that hold requests (plus All and the one chosen), so the row
+  // of tabs fits the page instead of running off it.
+  const tabs = [["", "All", all.length], ...REQUEST_STAGES.map(([key, label]) => [key, label, count(key)]).filter(([key, , n]) => n > 0 || key === stage)]
     .map(([key, label, n]) => `<button class="seg-btn${stage === key ? " active" : ""}" data-action="request-stage" data-stage="${key}" aria-pressed="${stage === key}">${escapeHtml(label)} (${n})</button>`).join("");
   const me = Number(state.organization.me?.user?.id);
   const note = (text) => `<span class="muted cell-plain">${escapeHtml(text)}</span>`;
@@ -3171,39 +3693,71 @@ function renderRequests() {
     // Sales's: "Report outcome" while it is theirs, "Report sent" afterwards.
     const mineToReport = row.task_id && Number(row.task_assignee_id) === me;
     if (mineToReport && key === "reported") label = "Report sent to Sales";
-    const who = row.task_assignee && key !== "new" && key !== "client" ? `<span class="cell-sub">Customer Service: ${escapeHtml(row.task_assignee)}</span>` : "";
-    const known = row.existing_client_id ? `<span class="cell-sub">Already a client${row.existing_client_name && row.existing_client_name !== row.name ? ` (${escapeHtml(row.existing_client_name)})` : ""}: no new client record will be made</span>` : "";
+    const progress = requestProgress(row, key);
+    const who = progress.done ? `<span class="cell-sub request-progress">${escapeHtml(progress.done)}</span>` : "";
+    const nextLine = progress.next ? `<span class="cell-sub request-next"><strong>Next:</strong> ${escapeHtml(progress.next)}</span>` : "";
+    const known = row.existing_client_id && !row.client_id ? `<span class="cell-sub">Same phone/email as client <strong>${escapeHtml(row.existing_client_name || "")}</strong>: when approving, choose same person or new client</span>` : "";
     const reported = row.outcome && key !== "new" ? `<span class="cell-sub">${outcomeText(row.outcome, row.outcome_note, row.appointment_at, row.appointment_type)}</span>` : "";
     const cancelled = !row.client_id && row.task_status === "cancelled" ? `<span class="cell-sub">The last hand-off was cancelled</span>` : "";
-    const openTaskBtn = (primary) => row.task_id ? `<button class="btn btn-small${primary ? " btn-primary" : ""}" data-action="open-task" data-id="${row.task_id}">${primary ? "Review report" : "Open assignment"}</button>` : "";
+    const openTaskBtn = (primary) => row.task_id ? `<button class="btn btn-small${primary ? " btn-primary" : ""}" data-action="open-task" data-id="${row.task_id}">${primary ? (mayHandOff ? "Review report" : "View report") : (mayHandOff ? "Open assignment" : "View")}</button>` : "";
     // Only Sales (assign_tasks) hands requests over; everyone else is told who acts next.
     const handOff = mayHandOff ? `<button class="btn btn-small btn-primary" data-action="hand-off-lead" data-id="${row.id}">Hand to Customer Service</button>` : note("Waiting for Sales to hand it to Customer Service");
-    const convert = (primary) => mayCreate ? `<button class="btn btn-small${primary ? " btn-primary" : ""}" data-action="convert-lead" data-id="${row.id}" title="Register this customer as a client (prospect)">Convert to client</button>` : "";
-    const next = {
+    const convert = (primary) => mayApproveClients() && !row.client_id ? `<button class="btn btn-small${primary ? " btn-primary" : ""}" data-action="convert-lead" data-id="${row.id}" title="${row.service === "sell" ? "MKUYU accepts this owner as a Seller Client" : "Approve this customer as a client (only Sales and the MD can)"}">${row.service === "sell" ? "Accept as seller client" : "Become a client"}</button>` : "";
+    // An accepted seller (a Seller Client) goes on to a Sell contract.
+    const sellContractBtn = row.service === "sell" && row.client_id && canAuthorContracts()
+      ? `<button class="btn btn-small btn-primary" data-action="generate-contract" data-deal="sell" data-client-id="${row.client_id}" data-client-name="${escapeHtml(row.name)}" data-client-phone="${escapeHtml(row.phone || "")}" data-client-email="${escapeHtml(row.email || "")}" title="Create the Sell contract for this seller">Create Sell contract</button>`
+      : "";
+    // After Customer Service's report is approved, Sales arranges the appointment.
+    const arrangeBtn = (primary) => mayArrangeAppointments() && row.task_id && ["approved", "completed"].includes(row.task_status)
+      ? `<button class="btn btn-small${primary ? " btn-primary" : ""}" data-action="arrange-appointment" data-id="${row.id}">${row.appointment_id ? "Change appointment" : "Arrange appointment"}</button>` : "";
+    let next = {
       new: handOff,
-      existing: handOff,
+      existing: handOff + convert(false),
       with_cs: mineToReport ? `<button class="btn btn-small btn-primary" data-action="request-outcome" data-id="${row.task_id}">Report outcome to Sales</button>` : openTaskBtn(false),
       reported: mineToReport ? note("Waiting for Sales to approve") + openTaskBtn(false) : openTaskBtn(true),
-      contacted: convert(true) + openTaskBtn(false),
-      appointment: `<button class="btn btn-small" data-action="open-alert-view" data-view="appointments">Open Appointments</button>`,
+      contacted: arrangeBtn(true) + convert(!arrangeBtn(true)) + openTaskBtn(false),
+      appointment: `${sellContractBtn}${arrangeBtn(false)}<button class="btn btn-small" data-action="open-alert-view" data-view="appointments">Open Appointments</button>`,
       unreachable: (mayHandOff ? handOff.replace("Hand to Customer Service", "Hand off again") : note("Waiting for Sales to decide")) + openTaskBtn(false),
       closed: openTaskBtn(false),
-      client: `<span class="muted cell-plain">Continue under Clients</span>`,
+      client: sellContractBtn || arrangeBtn(true) || `<span class="muted cell-plain">Continue under Clients</span>`,
+      message: inCustomerService() && can("edit")
+        ? `<button class="btn btn-small btn-primary" data-action="answer-message" data-id="${row.id}">Mark answered</button>`
+        : mayHandOff ? handOff : note("Customer Service answers this message"),
+      answered: row.task_id ? arrangeBtn(true) + convert(false) + openTaskBtn(false) : note("Answered by Customer Service"),
     }[key];
+    // A message handed to Customer Service is answered with a written report.
+    if (isContactMessage(row) && key === "with_cs") {
+      next = mineToReport ? `<button class="btn btn-small btn-primary" data-action="open-task" data-id="${row.task_id}">Write report to Sales</button>` : openTaskBtn(false);
+    }
+    // Someone who follows requests without acting on them (the MD) sees where
+    // it stands and can open what was done; never a button to act.
+    if (!mayHandOff && !inCustomerService()) {
+      const views = `${row.task_id ? openTaskBtn(false) : ""}${key === "appointment" ? `<button class="btn btn-small" data-action="open-alert-view" data-view="appointments">Open Appointments</button>` : ""}`;
+      // The MD approves "Become a client" too (one of the two who may).
+      const approve = ["existing", "contacted", "answered", "unreachable"].includes(key) ? convert(false) : "";
+      next = `${approve}${views}` || note(progress.next);
+    }
+    // What Customer Service wrote back, on the request itself.
+    const reportLine = row.task_report && !/^Outcome:/.test(row.task_report) && key !== "answered" && row.task_report !== row.outcome_note
+      ? `<span class="cell-sub request-report"><strong>Report:</strong> ${escapeHtml(row.task_report)}</span>` : "";
+    const wants = isContactMessage(row)
+      ? `${badge("Message", "neutral")}<span class="cell-sub">${escapeHtml((String(row.notes || "").match(/^Website enquiry · ([^\n]*)/) || [])[1] || "General question")}</span>`
+      : `${row.service ? badge(SERVICE_LABELS[row.service] || row.service, "open") : ""}<span class="cell-sub">${escapeHtml(row.service === "sell" ? `Their property: ${sellSummary(row.sell_details)}` : (row.property_name || "Property no longer listed"))}</span>`;
+    const answeredNote = isContactMessage(row) && row.outcome_note ? `<span class="cell-sub">Reply: ${escapeHtml(row.outcome_note)}</span>` : "";
     return `<tr data-searchable>
       <td><span class="cell-main">${escapeHtml(row.name)}</span><span class="cell-sub">${escapeHtml([row.phone, row.email].filter(Boolean).join(" · ") || "No contact details")}</span><span class="cell-sub">W-${row.id}</span></td>
-      <td>${row.service ? badge(row.service === "rent" ? "Rent" : "Buy", "open") : ""}<span class="cell-sub">${escapeHtml(row.property_name || "Property no longer listed")}</span></td>
-      <td>${row.budget ? `TZS ${escapeHtml(Number(row.budget).toLocaleString("en-US"))}` : "—"}<span class="cell-sub">Contact by ${escapeHtml(means[row.preferred_contact] || "Phone")}</span></td>
+      <td>${wants}</td>
+      <td>${row.budget ? `${row.service === "sell" ? "Asking " : ""}TZS ${escapeHtml(Number(row.budget).toLocaleString("en-US"))}` : (row.service === "sell" ? "No asking price" : "—")}<span class="cell-sub">Contact by ${escapeHtml(means[row.preferred_contact] || "Phone")}</span></td>
       <td>${formatDate(row.created_at)}</td>
-      <td>${badge(label, tone)}${known}${who}${reported}${cancelled}</td>
-      <td class="cell-note">${escapeHtml(String(row.notes || "").replace(/^Website request to [^\n]*\n*/, "") || "—")}</td>
+      <td>${badge(label, tone)}${isContactMessage(row) ? `${who}${nextLine}${answeredNote}${reportLine}` : `${known}${who}${nextLine}${reported}${reportLine}`}</td>
+      <td class="cell-note">${escapeHtml(String(row.notes || "").replace(/^Website request to [^\n]*\n*/, "").replace(/^Website enquiry · [^\n]*\n*/, "") || "—")}</td>
       <td class="align-right"><div class="row-actions">${next}</div></td>
     </tr>`;
   }).join("");
   content.innerHTML = `
     <div class="toolbar"><div class="toolbar-filters"><div class="segmented" role="group" aria-label="Request stages">${tabs}</div></div><div class="toolbar-end"><span class="toolbar-count">${rows.length} request${rows.length === 1 ? "" : "s"}</span></div></div>
     ${rows.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Customer</th><th>Wants</th><th>Budget</th><th>Received</th><th>Stage</th><th>Message</th><th class="align-right">Next step</th></tr></thead><tbody>${list}</tbody></table></div>`
-      : `<div class="panel">${emptyState(stage ? "No requests at this stage" : "No requests yet", stage ? "Try another stage." : "When a visitor asks to buy or rent a property on the website, the request arrives here.", { iconName: "inbox" })}</div>`}`;
+      : `<div class="panel">${emptyState(stage ? "No requests at this stage" : "No requests yet", stage ? "Try another stage." : "When a visitor asks to buy, rent or sell on the website, or writes on the Contact page, it arrives here.", { iconName: "inbox" })}</div>`}`;
 }
 
 function renderAppointments() {
@@ -3221,8 +3775,8 @@ function renderAppointments() {
   const list = rows.map((apt) => {
     const start = timeOf(apt.starts_at);
     const end = timeOf(apt.ends_at);
-    const edit = can("edit") ? `<button class="btn btn-small" data-action="edit-appointment" data-id="${apt.id}">Edit</button>` : "";
-    const remove = can("delete") ? `<button class="btn btn-small btn-danger-ghost" data-action="delete-appointment" data-id="${apt.id}" title="Delete appointment">Delete appointment</button>` : "";
+    const edit = canChange("appointments", "edit") ? `<button class="btn btn-small" data-action="edit-appointment" data-id="${apt.id}">Edit</button>` : "";
+    const remove = canChange("appointments", "delete") ? `<button class="btn btn-small btn-danger-ghost" data-action="delete-appointment" data-id="${apt.id}" title="Delete appointment">Delete appointment</button>` : "";
     return `<article class="apt-row${apt.status === "cancelled" ? " is-muted" : ""}" data-searchable>
       <div class="date-chip date-chip-lg">${appointmentDateChip(apt.starts_at)}</div>
       <div class="apt-body">
@@ -3239,7 +3793,7 @@ function renderAppointments() {
       <div class="apt-actions">${edit}${rowMenu([remove])}</div>
     </article>`;
   }).join("");
-  const mayCreate = canModule("appointments") && can("create");
+  const mayCreate = canChange("appointments", "create");
   const filtered = Boolean(filters.project || filters.appointmentStatus || filters.type);
   content.innerHTML = `
     <div class="toolbar">
@@ -3302,6 +3856,7 @@ function renderTemplates() {
     const remove = mayCreate && !template.used_by ? `<button class="btn btn-small btn-danger-ghost" data-action="template-delete" data-id="${template.id}">Delete template</button>` : "";
     return `<tr>
       <td><span class="cell-main">${escapeHtml(template.title)}</span><span class="cell-sub">${escapeHtml(template.original_filename || "Typed template")}</span></td>
+      <td>${template.letterhead ? badge("Letterhead", "open") : badge("Full wording", "neutral")}<span class="cell-sub">${escapeHtml(template.deal_type ? `${contractKind(template.deal_type)?.title || template.deal_type} contracts only` : "Any contract type")}</span></td>
       <td>${template.is_default ? badge("Default", "approved") : `<span class="muted cell-plain">—</span>`}</td>
       <td>${escapeHtml(template.uploaded_by_name || "—")}</td>
       <td>${formatDate(template.uploaded_at || template.created_at)}</td>
@@ -3312,13 +3867,13 @@ function renderTemplates() {
   const placeholders = (state.placeholders || []).map((entry) => `<li><code>{{${escapeHtml(entry.token)}}}</code><span>${escapeHtml(entry.label || "")}</span></li>`).join("");
   return `
     <div class="template-guide panel">
-      <div class="panel-head"><div><h2 class="panel-title">How contract templates work</h2><div class="panel-note">Every new contract is generated from the default template, unless another is chosen.</div></div><a class="btn btn-small" href="#" data-action="template-starter">${icon("file")}Download starter template</a></div>
+      <div class="panel-head"><div><h2 class="panel-title">How contract templates work</h2><div class="panel-note">When a contract is generated, the system asks whether it is for Buying, Renting or Company and seller, writes that agreement, and places it on the default template.</div></div><a class="btn btn-small" href="#" data-action="template-starter">${icon("file")}Download starter letterhead</a></div>
       <div class="panel-body">
         <ol class="guide-steps">
-          <li><strong>Open your company's Word agreement</strong> (with your letterhead and logo), or download the starter template.</li>
-          <li><strong>Type placeholders</strong> where the contract details go, e.g. <code>{{CLIENT_NAME}}</code>, <code>{{PROPERTY_NAME}}</code>, <code>{{FINAL_PRICE}}</code>. Put <code>{{LAWYER_SIGNATURE}}</code> where the lawyer signs.</li>
-          <li><strong>Upload</strong> the .docx below and tick <em>Use as default</em>.</li>
-          <li>Every new contract is produced <strong>on your Word file</strong>: same design, with the client, property and price details filled in. At Legal approval the lawyer's signature is placed on the <code>{{LAWYER_SIGNATURE}}</code> spot.</li>
+          <li><strong>Letterhead template (recommended).</strong> Put the company's logo, name and address in the Word <em>header</em> and <em>footer</em> (Insert → Header), and type <code>{{CONTRACT_BODY}}</code> on the page where the agreement text goes. One letterhead serves all three contract types. The starter letterhead is ready to use.</li>
+          <li><strong>Longer contracts keep the template.</strong> The agreement (introduction, property and title deed, price, payment, obligations, termination, signatures) continues onto as many pages as it needs, and the header and footer repeat on every page. A picture placed <em>Behind text</em> (a page border or background) is repeated on every page too.</li>
+          <li><strong>Full-wording template (optional).</strong> Your own agreement text for one type, with placeholders such as <code>{{CLIENT_NAME}}</code>, <code>{{TITLE_DEED_NUMBER}}</code>, <code>{{FINAL_PRICE}}</code>. Choose the type it is for when uploading.</li>
+          <li>Put <code>{{LAWYER_SIGNATURE}}</code> where the lawyer signs; at Legal approval the lawyer's signature is placed there.</li>
         </ol>
         ${placeholders ? `<details class="placeholder-list"><summary>Placeholders you can use (${(state.placeholders || []).length})</summary><ul>${placeholders}</ul></details>` : ""}
       </div>
@@ -3327,14 +3882,15 @@ function renderTemplates() {
       <div class="panel-head"><div><h2 class="panel-title">Upload a template</h2><div class="panel-note">Word .docx only. Your layout is kept exactly: letterhead, logo, fonts, tables, headers and footers. Only the <code>{{PLACEHOLDERS}}</code> are filled in.</div></div></div>
       <div class="panel-body form-grid">
         <div class="field full"><label for="template-file">Template file (.docx)</label><input id="template-file" name="file" type="file" accept=".docx" required></div>
-        <div class="field"><label for="template-title">Template name</label><input id="template-title" name="title" maxlength="160" placeholder="e.g. MKUYU Sale Agreement 2026"></div>
+        <div class="field"><label for="template-title">Template name</label><input id="template-title" name="title" maxlength="160" placeholder="e.g. MKUYU Letterhead 2026"></div>
+        <div class="field"><label for="template-deal-type">Used for</label><select id="template-deal-type" name="deal_type"><option value="">Any contract type (letterhead)</option>${CONTRACT_KINDS.map((kind) => `<option value="${kind.type}">${escapeHtml(kind.title)} only · ${escapeHtml(kind.agreement)}</option>`).join("")}</select></div>
         <div class="field"><label class="checkbox-field"><input type="checkbox" name="is_default" value="true" ${templates.length ? "" : "checked"}><span>Use as default for new contracts</span></label></div>
         <div class="full row-actions"><button class="btn btn-primary" type="submit">${icon("plus")}Upload template</button></div>
       </div>
     </form>` : ""}
     ${!state.templatesLoaded ? `<div class="loading"><div class="spinner" aria-hidden="true"></div><span>Loading templates…</span></div>`
-      : rows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Template</th><th>Default</th><th>Uploaded by</th><th>Date</th><th>Used by</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`
-      : `<div class="panel">${emptyState("No templates yet", "Contracts use the built-in Sale Agreement until you upload your own template.", { iconName: "file", compact: true })}</div>`}`;
+      : rows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Template</th><th>Kind</th><th>Default</th><th>Uploaded by</th><th>Date</th><th>Used by</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<div class="panel">${emptyState("No templates yet", "Contracts use the built-in MKUYU letterhead (logo, header and page numbers on every page) until you upload your own.", { iconName: "file", compact: true })}</div>`}`;
 }
 
 function renderDocuments() {
@@ -3420,13 +3976,13 @@ function renderDocuments() {
  * filters it relates to - instead of being repeated in the topbar AND the page.
  */
 function pageActions() {
-  const view = (name, permission) => state.view === name && canModule(name) && can(permission);
+  const view = (name, permission) => state.view === name && canChange(name, permission);
   const plus = icon("plus");
   return (
     view("projects", "create") ? `<button class="btn btn-primary" data-action="new-project">${plus}New project</button>` :
     view("properties", "create") ? `<button class="btn btn-primary" data-action="new-property">${plus}New property</button>` :
     view("clients", "create") ? `<button class="btn btn-primary" data-action="new-client">${plus}New client</button>` :
-    view("contracts", "create") ? `<button class="btn btn-primary" data-action="generate-contract">${icon("contract")}Generate contract</button>` :
+    view("contracts", "create") && canAuthorContracts() ? `<button class="btn btn-primary" data-action="generate-contract">${icon("contract")}Generate contract</button>` :
     view("appointments", "create") ? `<button class="btn btn-primary" data-action="new-appointment">${plus}New appointment</button>` :
     view("documents", "create") ? `<button class="btn btn-primary" data-action="new-document">${plus}New document</button>` :
     state.view === "reports" && canModule("reports") && can("view_reports") ? `${can("export") ? `<button class="btn" data-action="open-report-upload">Upload report</button>` : ""}<button class="btn btn-primary" data-action="open-report-generate">${icon("chart")}Generate report</button>` :
@@ -3452,6 +4008,7 @@ function render() {
   if (state.view === "clients") renderClients();
   if (state.view === "contracts") renderContracts();
   if (state.view === "debts") renderDebts();
+  if (state.view === "reminders") renderReminders();
   if (state.view === "appointments") renderAppointments();
   if (state.view === "leads") renderLeads();
   if (state.view === "requests") {
@@ -3461,7 +4018,8 @@ function render() {
   if (state.view === "documents") renderDocuments();
   if (state.view === "templates") renderTemplatesPage();
   if (state.view === "reports") renderReports();
-  if (state.view === "organization") content.innerHTML = renderOrganization();
+  if (state.view === "organization") content.innerHTML = renderOrganization("staff");
+  if (state.view === "departments") content.innerHTML = renderOrganization("departments");
   if (state.view === "assignments") {
     content.innerHTML = renderAssignments();
     // Loaded on demand, like the duty catalogue. The guard stops a failed
@@ -3553,39 +4111,126 @@ function alertSummary() {
   // the caller may actually have 400 - confidently wrong rather than obviously
   // broken, which is the worst failure mode for an alert. `summary` already
   // computes the overdue and pending figures with the same scope predicate.
+  // Every alert carries `key` and `source` (item keys or a count), so the bell
+  // can tell what is new since the person last opened it.
   const summary = state.summary || {};
   const attention = state.attention || {};
-  if (Number(attention.mine || 0)) alerts.push({ label: `${attention.mine} new task${attention.mine === 1 ? "" : "s"} assigned to you`, view: "assignments" });
-  if (Number(attention.review || 0)) alerts.push({ label: `${attention.review} task${attention.review === 1 ? "" : "s"} waiting for your review`, view: "assignments" });
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const add = (key, count, label, view, source = count) => { if (count) alerts.push({ key, count, label, view, source }); };
+  add("tasks-mine", Number(attention.mine || 0), `${plural(Number(attention.mine || 0), "new task")} assigned to you`, "assignments");
+  add("tasks-review", Number(attention.review || 0), `${plural(Number(attention.review || 0), "task")} waiting for your review`, "assignments");
+  const sources = navSources();
+  add("requests", sources.requests.length, `${plural(sources.requests.length, "request")} from the website waiting for you`, "requests", sources.requests);
+  add("contracts", sources.contracts.length, `${plural(sources.contracts.length, "contract")} waiting for your step`, "contracts", sources.contracts);
   if (canModule("debts") && canSeeFinancial()) {
     const overdue = Number(summary.debts_overdue?.count || 0);
-    if (overdue) alerts.push({ label: `${overdue} overdue installment${overdue === 1 ? "" : "s"}`, view: "debts" });
-    const due = (state.reminders || []).length;
-    if (due) alerts.push({ label: `${due} payment reminder${due === 1 ? "" : "s"} due`, view: "debts" });
+    add("overdue", overdue, `${plural(overdue, "overdue installment")}`, "debts");
+  }
+  if (canModule("reminders") && canSeeFinancial()) {
+    const due = state.reminders || [];
+    add("reminders-due", due.length, `${plural(due.length, "payment")} due within 3 days: remind the client`, "reminders", due.map((reminder) => reminder.id));
+    const soon = state.upcomingReminders || [];
+    add("reminders-soon", soon.length, `${plural(soon.length, "installment")} falling due in the next ${UPCOMING_REMINDER_DAYS} days`, "reminders", soon.map((reminder) => reminder.id));
   }
   if (canModule("appointments")) {
-    const booked = Number(summary.appointments_scheduled || 0);
-    if (booked) alerts.push({ label: `${booked} scheduled appointment${booked === 1 ? "" : "s"}`, view: "appointments" });
+    const upcoming = sources.appointments;
+    add("appointments", upcoming.length, `${plural(upcoming.length, "upcoming appointment")}`, "appointments", upcoming);
   }
-  if (canModule("documents")) {
+  if (canModule("documents") && can("edit")) {
     const pending = Number(summary.documents_pending || 0);
-    if (pending) alerts.push({ label: `${pending} document${pending === 1 ? "" : "s"} awaiting approval`, view: "documents" });
+    add("documents", pending, `${plural(pending, "document")} awaiting approval`, "documents");
   }
-  if (canModule("follow_ups")) {
-    const open = Number(state.counts?.follow_ups || 0);
-    if (open) alerts.push({ label: `${open} follow-up${open === 1 ? "" : "s"} on record`, view: "dashboard" });
-  }
-  return alerts;
+  return alerts.map((alert) => ({ ...alert, fresh: unseenCount(`alert:${alert.key}`, alert.source) > 0 }));
 }
 
 function updateNotificationDot() {
-  const count = alertSummary().length;
+  // The bell counts only notifications that are NEW since it was last opened.
+  const count = alertSummary().filter((alert) => alert.fresh).length;
   if (bellDot) bellDot.hidden = count === 0;
   const sideCount = document.getElementById("side-alert-count");
   if (sideCount) {
     sideCount.hidden = count === 0;
     sideCount.textContent = String(count);
   }
+}
+
+/** Opening the notifications reads them. */
+function markAlertsSeen(alerts = alertSummary()) {
+  for (const alert of alerts) markSeen(`alert:${alert.key}`, alert.source);
+  updateNotificationDot();
+}
+
+/**
+ * Keeps badges and the bell current while the app stays open: every minute
+ * (while the tab is visible) the workspace is re-read quietly - no loading
+ * screen, no redraw of the page being worked on - and the badges repaint.
+ */
+async function refreshLive() {
+  if (!state.authorized || state.loading) return;
+  // A hidden tab catches up the moment it is shown again.
+  if (document.visibilityState !== "visible") { state.livePending = true; return; }
+  state.livePending = false;
+  // The workspace carries page 1 of every register. It is only re-read while
+  // every register IS on page 1 with no search, so a person paging through a
+  // list never has their page swapped underneath them.
+  const onFirstPages = Object.values(state.listState || {}).every((entry) => !entry || ((entry.page || 1) === 1 && !entry.search));
+  if (onFirstPages) {
+    try { applyWorkspace(await api("/org/workspace")); } catch { return; }
+  }
+  await Promise.all([
+    refreshAttention(),
+    loadUpcomingReminders(),
+    canModule("leads") && can("view") ? loadRequests() : null,
+    state.view === "assignments" || state.tasks ? loadTasks() : null,
+    state.view === "templates" ? (state.templatesLoaded = false, state.templatesRequested = false, null) : null,
+  ]);
+  updateNavigation();
+  updateNotificationDot();
+  // The page is redrawn in place (same scroll position) - but never under an
+  // open dialog or while the person is typing: then it waits, and catches up
+  // as soon as the dialog closes.
+  const typing = document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) && content.contains(document.activeElement);
+  // Pages that hold a form of their own (template upload, staff administration)
+  // are not redrawn under the person; their badges still update.
+  const formPage = ["templates", "organization", "departments"].includes(state.view);
+  if (!modalBackdrop.hidden || typing || formPage) { state.livePending = !formPage; return; }
+  const scrollY = window.scrollY;
+  render();
+  window.scrollTo(0, scrollY);
+}
+setInterval(() => { refreshLive(); }, 60 * 1000);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && state.livePending) refreshLive(); });
+
+/* --------------------------------------------------------------------------
+   Live updates. The server announces every change (a website request, a task
+   report, a contract step, a payment, a property status) over one open
+   connection; this screen then re-reads what it shows and redraws. Several
+   changes in a burst cause one refresh. The once-a-minute check above stays
+   as a safety net if the connection drops (it reconnects by itself).
+   -------------------------------------------------------------------------- */
+let liveSource = null;
+let liveTimer = null;
+function startLive() {
+  stopLive();
+  if (typeof EventSource === "undefined") return;
+  try {
+    liveSource = new EventSource(`${API_ROOT}/live`, { withCredentials: true });
+    liveSource.addEventListener("change", () => {
+      clearTimeout(liveTimer);
+      liveTimer = setTimeout(() => { refreshLive(); }, 700);
+    });
+  } catch { liveSource = null; }
+}
+function stopLive() {
+  clearTimeout(liveTimer);
+  if (liveSource) { try { liveSource.close(); } catch { /* already closed */ } }
+  liveSource = null;
+}
+// A change that arrived while a dialog was open is shown once it closes.
+if (typeof MutationObserver !== "undefined" && modalBackdrop) {
+  new MutationObserver(() => {
+    if (modalBackdrop.hidden && state.livePending) setTimeout(() => { refreshLive(); }, 300);
+  }).observe(modalBackdrop, { attributes: true, attributeFilter: ["hidden"] });
 }
 
 /**
@@ -3658,6 +4303,7 @@ function showAlertsPanel() {
     return;
   }
   openModal("alerts", { alerts });
+  markAlertsSeen(alerts);
 }
 
 /**
@@ -3719,7 +4365,7 @@ function clientContractStep(record) {
   return `<div class="field full"><div class="section-head"><div><h2 class="section-title">Contract (required to complete this client)</h2><div class="section-note">Client + project + pricing. Leave the status as a lead to save without one.</div></div></div>
     <div class="form-grid">
       <div class="field"><label for="field-client-contract-project">Contract project</label><select id="field-client-contract-project" name="contract_project_id">${projectOptions(record?.project_id)}</select></div>
-      <div class="field"><label for="field-client-contract-type">Contract type</label><select id="field-client-contract-type" name="contract_type"><option value="new">New</option><option value="terminal">Terminal</option></select></div>
+      ${dealTypeField("field-client-deal-type", "", { required: false })}<div class="field"><label for="field-client-contract-type">Agreement (new / terminal)</label><select id="field-client-contract-type" name="contract_type"><option value="new">New</option><option value="terminal">Terminal</option></select></div>
       <div class="field"><label for="field-client-original-price">Original price</label><input id="field-client-original-price" name="original_price" type="number" min="0" step="0.01" placeholder="0"></div>
       <div class="field"><label for="field-client-discount-pct">Discount %</label><input id="field-client-discount-pct" name="discount_pct" type="number" min="0" max="100" step="0.01" value="0" placeholder="0"></div>
       <div class="field"><label for="field-client-discount-amount">Discount amount</label><input id="field-client-discount-amount" type="text" value="${escapeHtml(money(0))}" readonly aria-readonly="true" tabindex="-1" title="Calculated by the system"></div>
@@ -3756,6 +4402,36 @@ function markRequiredFields(root) {
   });
 }
 
+// Property types and what each one has. Land and commercial property are
+// priced and measured only; homes also have bedrooms and bathrooms (both
+// optional). Mirrors PROPERTY_TYPE_ROOMS on the server.
+const PROPERTY_TYPES = [["land", "Land / plot"], ["house", "House"], ["apartment", "Apartment"], ["villa", "Villa"], ["penthouse", "Penthouse"], ["commercial", "Commercial"]];
+const PROPERTY_TYPE_INFO = {
+  land: { rooms: false, help: "A plot of land: enter the sale price and the size in square metres." },
+  house: { rooms: true, help: "A house: sale price, size in square metres, and bedrooms and bathrooms if you know them." },
+  apartment: { rooms: true, help: "A flat in a building: sale price, size, bedrooms and bathrooms." },
+  villa: { rooms: true, help: "A large stand-alone house, usually with a garden: sale price, size, bedrooms and bathrooms." },
+  penthouse: { rooms: true, help: "A luxury flat on the top floor of a building: sale price, size, bedrooms and bathrooms." },
+  commercial: { rooms: false, help: "Offices, shops or warehouses: enter the sale price and the size in square metres." },
+};
+function propertyTypeInfo(type) {
+  return PROPERTY_TYPE_INFO[type] || PROPERTY_TYPE_INFO.house;
+}
+/** Shows bedrooms/bathrooms only for property types that have them. */
+function wirePropertyTypeFields(container) {
+  const select = container.querySelector("#field-property-type");
+  if (!select) return;
+  select.addEventListener("change", () => {
+    const info = propertyTypeInfo(select.value);
+    container.querySelectorAll("[data-rooms]").forEach((field) => {
+      field.hidden = !info.rooms;
+      if (!info.rooms) field.querySelector("input").value = "";
+    });
+    const help = container.querySelector("[data-type-help]");
+    if (help) help.textContent = info.help;
+  });
+}
+
 function openModal(type, record = null) {
   modal.dataset.type = type;
   let title = "Create record";
@@ -3770,7 +4446,7 @@ function openModal(type, record = null) {
   if (type === "contract") {
     title = record ? "Edit contract" : "New contract";
     subtitle = record ? "Update contract details." : "Link a client agreement to a project.";
-    body = `<div class="form-grid">${formSection("Client & project")}<div class="field full"><label for="field-project">Project</label><select id="field-project" name="project_id" required><option value="">Select project</option>${projectOptions(record?.project_id)}</select></div><div class="field full"><label for="field-linked-client">Client from register (optional)</label><select id="field-linked-client" name="client_id">${linkedClientOptions(record?.client_id)}</select></div><div class="field"><label for="field-client">Client name</label><input id="field-client" name="client_name" required maxlength="120" value="${escapeHtml(record?.client_name || "")}" placeholder="Client full name"></div><div class="field"><label for="field-type">Contract type</label><select id="field-type" name="contract_type" required><option value="new" ${record?.contract_type === "new" ? "selected" : ""}>New</option><option value="terminal" ${record?.contract_type === "terminal" ? "selected" : ""}>Terminal</option></select></div><div class="field"><label for="field-contract-status">Status</label><select id="field-contract-status" name="status"><option value="active" ${record?.status !== "closed" && record?.status !== "cancelled" ? "selected" : ""}>Active</option><option value="closed" ${record?.status === "closed" ? "selected" : ""}>Closed</option><option value="cancelled" ${record?.status === "cancelled" ? "selected" : ""}>Cancelled</option></select></div>${formSection("Pricing", "Discount amount and final price are calculated by the system.")}<div class="field"><label for="field-original-price">Original price</label><input id="field-original-price" name="original_price" type="number" min="0" step="0.01" required value="${escapeHtml(record?.original_price ?? record?.value ?? "")}" placeholder="0"></div><div class="field"><label for="field-discount-pct">Discount %</label><input id="field-discount-pct" name="discount_pct" type="number" min="0" max="100" step="0.01" value="${escapeHtml(record?.discount_pct ?? 0)}" placeholder="0"></div><div class="field"><label for="field-discount-amount">Discount amount</label><input id="field-discount-amount" type="text" value="${escapeHtml(money(pricingPreview(record).discount_amount))}" readonly aria-readonly="true" tabindex="-1" title="Calculated by the system from the original price and discount"></div><div class="field"><label for="field-final-price">Final price</label><input id="field-final-price" type="text" value="${escapeHtml(money(pricingPreview(record).final_price))}" readonly aria-readonly="true" tabindex="-1" title="Calculated by the system. This is the amount the payment plan is built from."></div>${formSection("Agreement term")}<div class="field"><label for="field-start">Start date</label><input id="field-start" name="start_date" type="date" value="${escapeHtml(record?.start_date || "")}"></div><div class="field"><label for="field-end">End date</label><input id="field-end" name="end_date" type="date" value="${escapeHtml(record?.end_date || "")}"></div><div class="field full"><label for="field-notes">Notes</label><textarea id="field-notes" name="notes" placeholder="Property, unit, payment terms, or reference">${escapeHtml(record?.notes || "")}</textarea></div></div>`;
+    body = `<div class="form-grid">${formSection(record?.deal_type === "rent" ? "Client" : "Client & project")}${record?.deal_type === "rent" ? `<input type="hidden" name="project_id" value="">` : `<div class="field full"><label for="field-project">Project</label><select id="field-project" name="project_id" required><option value="">Select project</option>${projectOptions(record?.project_id)}</select></div>`}<div class="field full"><label for="field-linked-client">Client from register (optional)</label><select id="field-linked-client" name="client_id">${linkedClientOptions(record?.client_id)}</select></div><div class="field"><label for="field-client">Client name</label><input id="field-client" name="client_name" required maxlength="120" value="${escapeHtml(record?.client_name || "")}" placeholder="Client full name"></div>${dealTypeField("field-deal-type", record?.deal_type || "", { required: !record?.id })}<div class="field"><label for="field-type">Agreement (new / terminal)</label><select id="field-type" name="contract_type" required><option value="new" ${record?.contract_type === "new" ? "selected" : ""}>New</option><option value="terminal" ${record?.contract_type === "terminal" ? "selected" : ""}>Terminal</option></select></div><div class="field"><label for="field-contract-status">Status</label><select id="field-contract-status" name="status"><option value="active" ${record?.status !== "closed" && record?.status !== "cancelled" ? "selected" : ""}>Active</option><option value="closed" ${record?.status === "closed" ? "selected" : ""}>Closed</option><option value="cancelled" ${record?.status === "cancelled" ? "selected" : ""}>Cancelled</option></select></div>${formSection("Pricing", "Discount amount and final price are calculated by the system.")}<div class="field"><label for="field-original-price">Original price</label><input id="field-original-price" name="original_price" type="number" min="0" step="0.01" required value="${escapeHtml(record?.original_price ?? record?.value ?? "")}" placeholder="0"></div><div class="field"><label for="field-discount-pct">Discount %</label><input id="field-discount-pct" name="discount_pct" type="number" min="0" max="100" step="0.01" value="${escapeHtml(record?.discount_pct ?? 0)}" placeholder="0"></div><div class="field"><label for="field-discount-amount">Discount amount</label><input id="field-discount-amount" type="text" value="${escapeHtml(money(pricingPreview(record).discount_amount))}" readonly aria-readonly="true" tabindex="-1" title="Calculated by the system from the original price and discount"></div><div class="field"><label for="field-final-price">Final price</label><input id="field-final-price" type="text" value="${escapeHtml(money(pricingPreview(record).final_price))}" readonly aria-readonly="true" tabindex="-1" title="Calculated by the system. This is the amount the payment plan is built from."></div>${formSection("Agreement term")}<div class="field"><label for="field-start">Start date</label><input id="field-start" name="start_date" type="date" value="${escapeHtml(record?.start_date || "")}"></div><div class="field"><label for="field-end">End date</label><input id="field-end" name="end_date" type="date" value="${escapeHtml(record?.end_date || "")}"></div><div class="field full"><label for="field-notes">Notes</label><textarea id="field-notes" name="notes" placeholder="Property, unit, payment terms, or reference">${escapeHtml(record?.notes || "")}</textarea></div></div>`;
   }
   if (type === "schedule") {
     title = "Generate payment schedule";
@@ -3786,9 +4462,13 @@ function openModal(type, record = null) {
     </div>`;
   }
   if (type === "payment") {
-    title = "Record payment";
-    subtitle = "Log money received; attaching a receipt is optional.";
-    submitLabel = "Record payment";
+    // The same form records a new payment and corrects an existing one. A
+    // corrected payment goes back to "pending" so a second Finance person
+    // confirms it again (the server resets the approval).
+    const editing = Boolean(record?.id);
+    title = editing ? "Edit payment" : "Record payment";
+    subtitle = editing ? "Correct the payment details. It returns to pending approval." : "Log money received; attaching a receipt is optional.";
+    submitLabel = editing ? "Save payment" : "Record payment";
     const methods = (state.reportPaymentMethods || []).length
       ? state.reportPaymentMethods
       : [{ value: "cash", label: "Cash" }, { value: "bank", label: "Bank transfer" }, { value: "mobile", label: "Mobile money" }, { value: "card", label: "Card" }, { value: "other", label: "Other" }];
@@ -3798,11 +4478,11 @@ function openModal(type, record = null) {
       <div class="field full"><label for="field-payment-contract">Contract</label><select id="field-payment-contract" name="contract_id" required><option value="">Select contract</option>${contractOptions(prefill.contract_id)}</select></div>
       <div class="field"><label for="field-payment-debt">Installment (optional)</label><select id="field-payment-debt" name="debt_id"><option value="">None — general payment</option>${(state.debts || []).filter((debt) => !prefill.contract_id || String(debt.contract_id) === String(prefill.contract_id)).map((debt) => `<option value="${debt.id}" ${String(debt.id) === String(prefill.debt_id || "") ? "selected" : ""}>${escapeHtml(debt.client_name)} · ${money(debt.amount)} · ${formatDate(debt.due_date)}</option>`).join("")}</select></div>
       <div class="field"><label for="field-payment-amount">Amount</label><input id="field-payment-amount" name="amount" type="number" min="0" step="0.01" required value="${escapeHtml(prefill.amount ?? "")}" placeholder="0"></div>
-      <div class="field"><label for="field-payment-date">Paid at</label><input id="field-payment-date" name="paid_at" type="date" required value="${today()}"></div>
-      <div class="field"><label for="field-payment-method">Method</label><select id="field-payment-method" name="method">${methods.map((m) => `<option value="${escapeHtml(m.value)}">${escapeHtml(m.label)}</option>`).join("")}</select></div>
-      <div class="field"><label for="field-payment-reference">Reference</label><input id="field-payment-reference" name="reference" maxlength="120" placeholder="Receipt no. / transaction ID"></div>
+      <div class="field"><label for="field-payment-date">Paid at</label><input id="field-payment-date" name="paid_at" type="date" required value="${escapeHtml(String(prefill.paid_at || today()).slice(0, 10))}"></div>
+      <div class="field"><label for="field-payment-method">Method</label><select id="field-payment-method" name="method">${methods.map((m) => `<option value="${escapeHtml(m.value)}"${prefill.method === m.value ? " selected" : ""}>${escapeHtml(m.label)}</option>`).join("")}</select></div>
+      <div class="field"><label for="field-payment-reference">Reference</label><input id="field-payment-reference" name="reference" maxlength="120" value="${escapeHtml(prefill.reference || "")}" placeholder="Receipt no. / transaction ID"></div>
       ${formSection("Receipt & notes")}
-      <div class="field full"><label for="field-payment-receipt">Receipt (optional)</label><input id="field-payment-receipt" name="file" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.png,.jpg,.jpeg,.gif,.webp,.bmp"><div class="field-help">PDF or image of the receipt. You can attach it later too.</div></div>
+      <div class="field full"><label for="field-payment-receipt">${editing && prefill.has_receipt ? "Replace receipt (optional)" : "Receipt (optional)"}</label><input id="field-payment-receipt" name="file" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.png,.jpg,.jpeg,.gif,.webp,.bmp"><div class="field-help">PDF or image of the receipt. You can attach it later too.</div></div>
       <div class="field full"><label for="field-payment-notes">Notes</label><textarea id="field-payment-notes" name="notes" maxlength="2000" placeholder="Purpose or follow-up note">${escapeHtml(prefill.notes || "")}</textarea></div>
     </div>`;
   }
@@ -3819,18 +4499,18 @@ function openModal(type, record = null) {
       <div class="field full"><label for="field-name">Property name</label><input id="field-name" name="name" required maxlength="120" value="${escapeHtml(record?.name || "")}" placeholder="e.g. Signature Residence · Phase 1"></div>
       <div class="field full"><label for="field-project">Project</label><select id="field-project" name="project_id"><option value="">Select project</option>${projectOptions(record?.project_id)}</select></div>
       <div class="field"><label for="field-location">Location</label><input id="field-location" name="location" required maxlength="120" value="${escapeHtml(record?.location || "")}" placeholder="City or area"></div>
-      <div class="field"><label for="field-property-type">Type</label><select id="field-property-type" name="property_type"><option value="land" ${record?.property_type === "land" ? "selected" : ""}>Land</option><option value="house" ${record?.property_type === "house" ? "selected" : ""}>House</option><option value="apartment" ${record?.property_type === "apartment" ? "selected" : ""}>Apartment</option><option value="villa" ${record?.property_type === "villa" ? "selected" : ""}>Villa</option><option value="commercial" ${record?.property_type === "commercial" ? "selected" : ""}>Commercial</option><option value="penthouse" ${record?.property_type === "penthouse" ? "selected" : ""}>Penthouse</option></select></div>
+      <div class="field"><label for="field-property-type">Type</label><select id="field-property-type" name="property_type">${PROPERTY_TYPES.map(([value, label]) => `<option value="${value}" ${(record?.property_type || "land") === value ? "selected" : ""}>${label}</option>`).join("")}</select><div class="field-help" data-type-help>${escapeHtml(propertyTypeInfo(record?.property_type || "land").help)}</div></div>
       <div class="field"><label for="field-property-status">Status</label><select id="field-property-status" name="status"><option value="available" ${record?.status === "available" ? "selected" : ""}>Available</option><option value="reserved" ${record?.status === "reserved" ? "selected" : ""}>Reserved</option><option value="sold" ${record?.status === "sold" ? "selected" : ""}>Sold</option><option value="leased" ${record?.status === "leased" ? "selected" : ""}>Leased</option></select></div>
       ${formSection("Price & size")}
       <div class="field"><label for="field-price">Sale price (TZS)</label><input id="field-price" name="price" type="number" min="0" step="0.01" value="${escapeHtml(record?.price ?? "")}" placeholder="0"></div>
-      <div class="field"><label for="field-area">Area (m²)</label><input id="field-area" name="area" type="number" min="0" step="0.01" value="${escapeHtml(record?.area ?? "")}" placeholder="0"></div>
-      <div class="field"><label for="field-bedrooms">Bedrooms</label><input id="field-bedrooms" name="bedrooms" type="number" min="0" value="${escapeHtml(record?.bedrooms ?? "")}" placeholder="0"></div>
-      <div class="field"><label for="field-bathrooms">Bathrooms</label><input id="field-bathrooms" name="bathrooms" type="number" min="0" value="${escapeHtml(record?.bathrooms ?? "")}" placeholder="0"></div>
+      <div class="field"><label for="field-area">Size (square metres, m²)</label><input id="field-area" name="area" type="number" min="0" step="0.01" value="${escapeHtml(record?.area ?? "")}" placeholder="e.g. 600"></div>
+      <div class="field" data-rooms${propertyTypeInfo(record?.property_type || "land").rooms ? "" : " hidden"}><label for="field-bedrooms">Bedrooms <span class="muted">(optional)</span></label><input id="field-bedrooms" name="bedrooms" type="number" min="0" value="${escapeHtml(record?.bedrooms || "")}" placeholder="e.g. 3"></div>
+      <div class="field" data-rooms${propertyTypeInfo(record?.property_type || "land").rooms ? "" : " hidden"}><label for="field-bathrooms">Bathrooms <span class="muted">(optional)</span></label><input id="field-bathrooms" name="bathrooms" type="number" min="0" value="${escapeHtml(record?.bathrooms || "")}" placeholder="e.g. 2"></div>
       ${formSection("Listing & photos")}
       <div class="field full"><label for="field-description">Description</label><textarea id="field-description" name="description" maxlength="2000" placeholder="Property summary">${escapeHtml(record?.description || "")}</textarea></div>
       <div class="field"><label class="checkbox-field"><input type="checkbox" name="featured" ${record?.featured ? "checked" : ""}><span>Featured listing</span></label></div>
       ${record ? `<div class="field full"><label>Photos (optional)</label><div class="photo-strip" id="photo-strip" data-property-id="${record.id}">${renderPhotoStrip(record)}</div></div>` : ""}
-      <div class="field full"><label for="field-photo">Photo (optional)</label><input id="field-photo" name="photo" type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp" data-photo-upload>${record ? "" : `<div class="field-help">Optional. You can add more photos after saving.</div>`}</div>
+      <div class="field full"><label for="field-photo">${record ? "Add photos" : "Photos"} (optional)</label><input id="field-photo" name="photo" type="file" multiple accept=".png,.jpg,.jpeg,.gif,.webp,.bmp" data-photo-upload><div class="field-help">Choose one photo or several at once (up to 12 per property). The first photo is the cover on the website; visitors can click through all of them.</div></div>
       ${websiteListingFields(record)}
     </div>`;
   }
@@ -3937,7 +4617,7 @@ function openModal(type, record = null) {
     title = "Notifications";
     subtitle = "Work waiting on you across the workspace.";
     const rows = (record?.alerts || []).map((alert) =>
-      `<tr><td>${escapeHtml(alert.label)}</td><td class="align-right"><button class="btn btn-small" data-action="open-alert-view" data-view="${escapeHtml(alert.view)}">Open</button></td></tr>`
+      `<tr class="${alert.fresh ? "alert-fresh" : ""}"><td>${alert.fresh ? `<span class="badge badge-pending">New</span> ` : ""}${escapeHtml(alert.label)}</td><td class="align-right"><button class="btn btn-small${alert.fresh ? " btn-primary" : ""}" data-action="open-alert-view" data-view="${escapeHtml(alert.view)}">Open</button></td></tr>`
     ).join("");
     body = `<div class="table-wrap"><table><thead><tr><th>Item</th><th class="align-right">Action</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
@@ -3956,6 +4636,7 @@ function openModal(type, record = null) {
   markRequiredFields(modal);
   modalBackdrop.hidden = false;
   hydrateImages(modal);
+  if (type === "property") wirePropertyTypeFields(modal);
   const contractSelect = document.getElementById("field-contract");
   const clientInput = document.getElementById("field-debt-client");
   if (contractSelect && clientInput) {
@@ -4026,7 +4707,7 @@ function closeModal() {
   }
   modalBackdrop.hidden = true;
   modal.innerHTML = "";
-  modal.classList.remove("modal-wide");
+  modal.classList.remove("modal-wide", "modal-document");
 }
 
 /**
@@ -4163,7 +4844,17 @@ async function handleFormSubmit(event) {
       data.amount = numberValue(data.amount);
       const receiptFile = form.querySelector('input[type="file"][name="file"]')?.files?.[0] || null;
       delete data.file;
-      if (receiptFile) {
+      if (id) {
+        // Correcting a recorded payment; a new receipt replaces the old one.
+        await api(`/payments/${id}`, { method: "PUT", body: JSON.stringify(data) });
+        if (receiptFile) {
+          const payload = new FormData();
+          payload.append("file", receiptFile);
+          await api(`/payments/${id}/receipt`, { method: "POST", form: true, body: payload });
+        }
+        invalidateRecord("payments", id);
+        showToast("Payment updated. It is back in pending approval.");
+      } else if (receiptFile) {
         // Multipart path stores the receipt alongside the payment record.
         const payload = new FormData();
         payload.append("file", receiptFile);
@@ -4188,24 +4879,35 @@ async function handleFormSubmit(event) {
       data.area = numberValue(data.area);
       data.bedrooms = numberValue(data.bedrooms, 0);
       data.bathrooms = numberValue(data.bathrooms, 0);
+      // Land and commercial property have no bedrooms or bathrooms.
+      if (!propertyTypeInfo(data.property_type).rooms) { data.bedrooms = 0; data.bathrooms = 0; }
       data.featured = data.featured ? 1 : 0;
       readListingFields(data);
-      const photoFile = form.querySelector('input[type="file"][name="photo"]')?.files?.[0] || null;
+      const photoFiles = [...(form.querySelector('input[type="file"][name="photo"]')?.files || [])];
       delete data.photo;
       const saved = id
         ? await api(`/properties/${id}`, { method: "PUT", body: JSON.stringify(data) })
         : await api("/properties", { method: "POST", body: JSON.stringify(data) });
-      if (photoFile && saved?.id) {
-        // Photos are optional: a failed upload reports but never blocks the save.
-        const payload = new FormData();
-        payload.append("file", photoFile);
-        try {
-          await api(`/properties/${saved.id}/images`, { method: "POST", form: true, body: payload });
-          if (state.propertyPhotos) delete state.propertyPhotos[saved.id];
-          showToast(id ? "Property and photo updated." : "Property and photo created.");
-        } catch (photoError) {
-          showToast(photoError.message || "Photo could not be uploaded.");
+      if (photoFiles.length && saved?.id) {
+        // Photos are optional: each is uploaded on its own, and a failed one is
+        // reported without blocking the save or the others.
+        let added = 0;
+        const problems = [];
+        for (const file of photoFiles) {
+          const payload = new FormData();
+          payload.append("file", file);
+          try {
+            await api(`/properties/${saved.id}/images`, { method: "POST", form: true, body: payload });
+            added += 1;
+          } catch (photoError) {
+            problems.push(`${file.name}: ${photoError.message || "could not be uploaded"}`);
+          }
         }
+        if (state.propertyPhotos) delete state.propertyPhotos[saved.id];
+        const what = id ? "Property updated" : "Property created";
+        showToast(problems.length
+          ? `${what}; ${added} of ${photoFiles.length} photos added. ${problems[0]}`
+          : `${what} with ${added} photo${added === 1 ? "" : "s"}.`);
       } else {
         showToast(id ? "Property updated." : "Property created.");
       }
@@ -4216,12 +4918,15 @@ async function handleFormSubmit(event) {
       const contractStep = {
         project_id: data.contract_project_id ? Number(data.contract_project_id) : null,
         contract_type: data.contract_type || "new",
+        deal_type: data.deal_type || "",
         original_price: numberValue(data.original_price),
         discount_pct: numberValue(data.discount_pct),
       };
       const wantsContract = Boolean(contractStep.project_id) && contractStep.original_price > 0;
       delete data.contract_project_id;
       delete data.contract_type;
+      delete data.deal_type;
+      if (wantsContract && !contractStep.deal_type) throw new Error("Choose the contract type: Buy, Rent or Sell.");
       delete data.original_price;
       delete data.discount_pct;
 
@@ -4490,6 +5195,98 @@ async function openDocumentFile(id) {
   }
 }
 
+/* --------------------------------------------------------------------------
+   Contract viewer: the generated contract ON its template.
+   The server describes the contract's own Word file (page size and margins,
+   the template's header and footer, pictures behind the text, and the
+   agreement's paragraphs). Here the paragraphs are flowed onto A4 pages, each
+   page carrying the header, footer and page design, and "Page X of Y" is
+   filled in - what the printed contract looks like.
+   -------------------------------------------------------------------------- */
+function contractPageShell(preview, number) {
+  const { page } = preview;
+  const element = document.createElement("div");
+  element.className = "docx-page";
+  element.style.width = `${page.width}px`;
+  element.style.height = `${page.height}px`;
+  // Server-built HTML: every text is escaped and every style value validated there.
+  element.innerHTML = `${(preview.layers || []).join("")}${number === 1 ? (preview.firstPageLayers || []).join("") : ""}
+    <div class="docx-header" style="top:${page.header}px;left:${page.margin.left}px;right:${page.margin.right}px">${preview.header || ""}</div>
+    <div class="docx-body" style="top:${page.margin.top}px;left:${page.margin.left}px;right:${page.margin.right}px;bottom:${page.margin.bottom}px"></div>
+    <div class="docx-footer" style="bottom:${page.footer}px;left:${page.margin.left}px;right:${page.margin.right}px">${preview.footer || ""}</div>`;
+  return element;
+}
+
+function layoutContractPages(preview, host) {
+  host.innerHTML = "";
+  const pages = [];
+  const addPage = () => {
+    const shell = contractPageShell(preview, pages.length + 1);
+    host.appendChild(shell);
+    pages.push(shell);
+    return shell.querySelector(".docx-body");
+  };
+  let body = addPage();
+  const holder = document.createElement("div");
+  for (const html of preview.blocks || []) {
+    holder.innerHTML = html;
+    const block = holder.firstElementChild;
+    if (!block) continue;
+    if (block.classList.contains("docx-page-break") && body.childElementCount) body = addPage();
+    body.appendChild(block);
+    // Too long for this page: it starts the next one (unless it alone fills a
+    // page). A heading kept with its text ("keep with next") moves along with
+    // it, so no clause title is left alone at the foot of a page.
+    if (body.scrollHeight > body.clientHeight + 1 && body.childElementCount > 1) {
+      const moving = [block];
+      while (body.childElementCount > moving.length && moving[0].previousElementSibling?.classList.contains("docx-keep-next")) {
+        moving.unshift(moving[0].previousElementSibling);
+      }
+      if (body.childElementCount === moving.length) moving.splice(0, moving.length - 1);
+      moving.forEach((element) => element.remove());
+      body = addPage();
+      moving.forEach((element) => body.appendChild(element));
+    }
+  }
+  pages.forEach((page, index) => {
+    page.querySelectorAll('[data-field="PAGE"]').forEach((field) => { field.textContent = String(index + 1); });
+    page.querySelectorAll('[data-field="NUMPAGES"]').forEach((field) => { field.textContent = String(pages.length); });
+  });
+  return pages.length;
+}
+
+async function openContractPreview(contractId) {
+  if (!canModule("documents")) { showToast("You do not have Documents access."); return; }
+  let preview;
+  try {
+    preview = await api(`/contracts/${contractId}/preview`);
+  } catch (error) {
+    // A contract that is not a Word file (an uploaded PDF, say) opens as before.
+    if (error?.status === 415 || error?.status === 422) { openContractDocumentEditor(contractId); return; }
+    showToast(error.message || "Unable to open the contract.");
+    return;
+  }
+  modal.dataset.type = "contract-preview";
+  modal.dataset.contractId = String(contractId);
+  modal.classList.add("modal-wide", "modal-document");
+  const mayEditWording = can("edit");
+  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(preview.title || "Contract")}</h2><p class="modal-sub">${escapeHtml(preview.contract_number || "")}<span id="docx-page-count"></span></p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
+    <div class="docx-viewer"><div class="docx-pages" id="docx-pages"></div></div>
+    <div class="row-actions docx-actions"><button type="button" class="btn" data-action="close-modal">Close</button>${mayEditWording ? `<button type="button" class="btn btn-ghost" data-action="edit-contract-wording" data-id="${contractId}">Edit wording</button>` : ""}<button type="button" class="btn btn-primary" data-action="download-generated-document" data-id="${preview.document_id}" data-filename="${escapeHtml(preview.original_filename || "contract.docx")}">${icon("file")}Download Word</button></div>`;
+  modalBackdrop.hidden = false;
+  const host = document.getElementById("docx-pages");
+  const total = layoutContractPages(preview, host);
+  const count = document.getElementById("docx-page-count");
+  if (count) count.textContent = ` · ${total} page${total === 1 ? "" : "s"}`;
+  // Fit the A4 pages to the window without changing the layout.
+  const viewer = modal.querySelector(".docx-viewer");
+  const fit = () => {
+    const room = (viewer?.clientWidth || preview.page.width) - 32;
+    host.style.zoom = String(Math.min(1, room / preview.page.width));
+  };
+  fit();
+}
+
 async function openContractDocumentEditor(contractId) {
   if (!canModule("documents")) { showToast("You do not have Documents access."); return; }
   try {
@@ -4568,7 +5365,8 @@ function viewContract(contractId) {
   modal.innerHTML = `${head}
     <div class="form-grid">
       <div class="field"><span class="muted">Status</span><div>${contractStatusBadge(contract.status)}</div></div>
-      <div class="field"><span class="muted">Type</span><div>${badge(contract.contract_type)}</div></div>
+      <div class="field"><span class="muted">Contract type</span><div>${contract.deal_type ? badge(dealTypeLabel(contract.deal_type), "open") : "Not recorded"}</div></div>
+      <div class="field"><span class="muted">Agreement</span><div>${badge(contract.contract_type)}</div></div>
       <div class="field"><span class="muted">Start</span><div>${formatDate(contract.start_date)}</div></div>
       <div class="field"><span class="muted">End</span><div>${formatDate(contract.end_date)}</div></div>
       <div class="field"><span class="muted">Contract value</span><div class="amount">${money(contract.value)}</div></div>
@@ -4579,7 +5377,7 @@ function viewContract(contractId) {
     <div class="form-actions">
       <button type="button" class="btn" data-action="close-modal">Close</button>
       ${contract.generated_document_id && canModule("documents") ? `<button type="button" class="btn btn-soft" data-action="view-generated-contract" data-id="${contract.id}">View / Edit</button><button type="button" class="btn" data-action="download-generated-document" data-id="${contract.generated_document_id}" data-filename="${escapeHtml(`${contract.contract_number || "contract"}.docx`)}">Download DOCX</button>` : ""}
-      ${can("edit") ? `<button type="button" class="btn btn-primary" data-action="edit-contract-from-view" data-id="${contract.id}">Edit contract</button>` : ""}
+      ${can("edit") && canAuthorContracts() ? `<button type="button" class="btn btn-primary" data-action="edit-contract-from-view" data-id="${contract.id}">Edit contract</button>` : ""}
       ${canModule("documents") && can("create") ? `<button type="button" class="btn" data-action="upload-contract-document" data-id="${contract.id}">Upload document</button>` : ""}
       <button type="button" class="btn btn-soft" data-action="contract-history" data-id="${contract.id}">History</button>
     </div>`;
@@ -4637,8 +5435,13 @@ document.addEventListener("click", async (event) => {
   if (action === "new-property") openModal("property");
   if (action === "edit-property") openModalFor("properties", id, "property");
   if (action === "delete-property") deleteRecord("property", id);
+  if (action === "property-status") {
+    let change = {};
+    try { change = JSON.parse(target.dataset.change || "{}"); } catch { change = {}; }
+    changePropertyStatus(id, change, target.dataset.name, target.dataset.closing);
+  }
   if (action === "new-contract") await openGenerateContractModal();
-  if (action === "generate-contract") await openGenerateContractModal();
+  if (action === "generate-contract") await openGenerateContractModal(target.dataset.deal ? { deal_type: target.dataset.deal, client_id: target.dataset.clientId || "", client_name: target.dataset.clientName || "", client_phone: target.dataset.clientPhone || "", client_email: target.dataset.clientEmail || "" } : {});
   if (action === "contract-preview") {
     const form = document.getElementById("contract-generate-form");
     if (form?.reportValidity()) {
@@ -4653,7 +5456,8 @@ document.addEventListener("click", async (event) => {
     state.contractGen.step = "form";
     renderGenerateContractModal();
   }
-  if (action === "view-generated-contract") openContractDocumentEditor(id);
+  if (action === "view-generated-contract") openContractPreview(id);
+  if (action === "edit-contract-wording") openContractDocumentEditor(id);
   if (action === "save-contract-document") await saveContractDocument(id);
   if (action === "open-generated-document") openDocumentFile(id);
   if (action === "download-generated-document") downloadFile(`/documents/${id}/file?download=1`, target.dataset.filename || "contract.pdf").catch((error) => showToast(error.message || "Unable to download the contract."));
@@ -4671,7 +5475,7 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "template-starter") {
     event.preventDefault();
-    downloadFile("/contract-templates/starter", "MKUYU-contract-template.docx").catch((error) => showToast(error.message || "Download failed."));
+    downloadFile("/contract-templates/starter", "MKUYU-letterhead-template.docx").catch((error) => showToast(error.message || "Download failed."));
   }
   if (action === "template-default") {
     try { await api(`/contract-templates/${id}`, { method: "PUT", body: JSON.stringify({ is_default: true }) }); showToast("Default template updated."); state.templatesLoaded = false; state.templatesRequested = false; render(); }
@@ -4697,6 +5501,10 @@ document.addEventListener("click", async (event) => {
     openModalFor("contracts", id, "contract");
   }
   if (action === "new-payment") openModal("payment");
+  if (action === "approve-payment") {
+    try { await api(`/payments/${id}/approve`, { method: "POST", body: {} }); await refresh(); showToast("Payment approved."); }
+    catch (error) { showToast(error.message || "Unable to approve this payment."); }
+  }
   if (action === "record-payment") {
     // The installment may be on a later page of the debt register, so it is
     // fetched by id rather than assumed present in the loaded rows.
@@ -4704,7 +5512,40 @@ document.addEventListener("click", async (event) => {
       if (debt) openModal("payment", { contract_id: debt.contract_id, debt_id: debt.id, amount: debt.amount });
     });
   }
+  // Contract wizard, step 1: what is this contract for?
+  if (action === "contract-kind") {
+    const kind = target.dataset.kind;
+    const data = state.contractGen.data || {};
+    // A different kind may need a different template, so the choice is reset.
+    if (data.deal_type !== kind) data.template_choice = "";
+    state.contractGen.data = { ...data, deal_type: kind };
+    state.contractGen.step = "form";
+    renderGenerateContractModal();
+    updateGenerateContractPreview();
+  }
+  if (action === "contract-change-kind") {
+    state.contractGen.data = generateContractFormData();
+    state.contractGen.step = "type";
+    renderGenerateContractModal();
+  }
+  if (action === "arrange-appointment") openArrangeAppointment(id);
+  if (action === "answer-message") {
+    const ok = await confirmDialog({ title: "Mark message answered", message: "Record how you answered the visitor. Sales and the MD will see it under Requests.", confirmLabel: "Mark answered", tone: "primary", noteLabel: "How was the visitor answered?" });
+    if (ok) {
+      const note = String(state.transitionNotes || "").trim();
+      if (!note) { showToast("Write how the visitor was answered."); return; }
+      try {
+        await api(`/org/requests/${id}/answer`, { method: "POST", body: JSON.stringify({ note }) });
+        showToast("Message marked answered.");
+        await reloadRequests();
+        updateNavigation();
+        updateNotificationDot();
+        if (state.view === "requests") render();
+      } catch (error) { showToast(error.message || "Unable to mark the message answered."); }
+    }
+  }
   if (action === "delete-payment") deleteRecord("payment", id);
+  if (action === "edit-payment") openModalFor("payments", id, "payment");
   // Pager. `data-list` names the register, so one handler serves every table.
   if (action === "page-prev" || action === "page-next") {
     const kind = target.dataset.list;
@@ -4885,10 +5726,7 @@ document.addEventListener("click", async (event) => {
     catch (error) { showToast(error.message || "Unable to update staff access."); }
   }
   if (action === "reset-password") resetPassword(id);
-  if (action === "convert-lead") {
-    try { await api(`/org/leads/${id}/convert`, { method: "POST", body: "{}" }); await refresh(); if (state.requests) { await reloadRequests(); if (state.view === "requests") render(); } showToast("Converted to client."); }
-    catch (error) { showToast(error.message || "Unable to convert lead."); }
-  }
+  if (action === "convert-lead") openBecomeClient(id);
   if (action === "decide-approval") {
     try { await api(`/org/approvals/${id}`, { method: "PUT", body: JSON.stringify({ status: target.dataset.status }) }); await refresh(); showToast(`Approval ${target.dataset.status}.`); }
     catch (error) { showToast(error.message || "Unable to update approval."); }

@@ -8,9 +8,9 @@
 // there is exactly one implementation of the visibility rules.
 import { AsyncLocalStorage } from "node:async_hooks";
 import { query, queryOne } from "../db.js";
-import { can, canAccessModule, organizationId } from "./rbac.js";
+import { can, canAccessModule, canReadModule, isReadOnlyModule, organizationId } from "./rbac.js";
 
-export { can, canAccessModule };
+export { can, canAccessModule, canReadModule, isReadOnlyModule };
 
 const SCOPE_RANK = { own: 1, department: 2, organization: 3 };
 const VISIBILITIES = new Set(["own", "department", "organization"]);
@@ -131,8 +131,23 @@ export function ownershipValues(values, access) {
  * parameter array already in use; new bind values are appended so callers keep
  * their existing `$1..$n` numbering intact.
  */
+// Read-only holders see the WHOLE register for:
+//   * projects / properties - Finance (view_financial): the money it records
+//     belongs to deals on any project or property, whoever created them;
+//   * appointments - Legal: it follows every customer appointment Sales books.
+// They cannot write through it (the middleware refuses every write), so this
+// widens what they SEE, never what they may change. Other read-only holders
+// keep their normal record scope: a department's private project stays private.
+const CATALOGUE_READ_GRANT = {
+  project: { module: "projects", needs: "view_financial" },
+  property: { module: "properties", needs: "view_financial" },
+  appointment: { module: "appointments", needs: null },
+};
+
 export function scopeCondition(alias, entity, access, values) {
   if (!access || access.isAdmin || access.scope === "organization") return "TRUE";
+  const grant = CATALOGUE_READ_GRANT[entity];
+  if (grant && isReadOnlyModule(access, grant.module) && (!grant.needs || access.permissions.includes(grant.needs))) return "TRUE";
   const bind = (value) => {
     values.push(value);
     return `$${values.length}`;

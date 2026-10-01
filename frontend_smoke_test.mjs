@@ -106,12 +106,12 @@ const scenario = {
   director: {
     role: "staff",
     modules: ["projects", "properties", "clients", "leads", "contracts", "documents", "appointments", "debts", "payments", "reminders", "reports", "follow_ups"],
-    me: { permissions: ["view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports"], financial: true, scope: "organization", rank: 80 },
+    me: { permissions: ["view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "approve_management"], financial: true, scope: "organization", rank: 80 },
   },
   sales: {
     role: "staff",
     modules: ["leads", "clients", "properties", "projects", "contracts", "appointments", "documents", "reports", "follow_ups"],
-    me: { permissions: ["view", "create", "edit", "view_reports", "access_leads", "access_clients", "access_properties", "access_projects", "access_contracts", "access_appointments", "access_documents", "access_reports"], financial: false, scope: "own", rank: 15 },
+    me: { permissions: ["view", "create", "edit", "view_reports", "submit_contract", "access_leads", "access_clients", "access_properties", "access_projects", "access_contracts", "access_appointments", "access_documents", "access_reports"], financial: false, scope: "own", rank: 15 },
   },
   finance: {
     role: "staff",
@@ -295,10 +295,19 @@ console.log("\n=== Generate Contract overlay ===");
   ];
   sandbox.fetch = async (url) => String(url).includes("/contract-templates") ? okResponse([]) : okResponse({});
   context.fetch = sandbox.fetch;
+  // Step 1 asks what the contract is for: Buying, Renting or Company and seller.
   await app.openGenerateContractModal();
+  const typeHtml = getElement("modal").innerHTML;
+  check(app.modalOpen(), "Generate Contract opens the existing modal overlay");
+  for (const kind of ["buy", "rent", "sell"]) check(typeHtml.includes(`data-kind="${kind}"`), `the first step offers the ${kind} agreement`);
+  check(typeHtml.includes("Sale Agreement") && typeHtml.includes("Lease Agreement") && typeHtml.includes("Property Sale Mandate"), "each kind names the agreement it produces");
+  check(!typeHtml.includes('id="gc-client-name"'), "the details form waits until a kind is chosen");
+  // With a kind chosen (as the kind buttons and the Sell request do) the details follow.
+  await app.openGenerateContractModal({ deal_type: "buy" });
   const modalHtml = getElement("modal").innerHTML;
   check((rendered["sales:contracts"] || "").includes('data-action="generate-contract"'), "the Contracts register offers Generate Contract");
-  check(app.modalOpen(), "Generate Contract opens the existing modal overlay");
+  check(!(rendered["finance:contracts"] || "").includes('data-action="generate-contract"'), "Finance is not offered Generate Contract (it receives contracts once created)");
+  check(modalHtml.includes('id="gc-title-deed"'), "the details ask for the title deed number");
   for (const field of ["gc-client-name", "gc-client-phone", "gc-client-email", "gc-company", "gc-project", "gc-property", "gc-property-number", "gc-property-location", "gc-start", "gc-end", "gc-duration", "gc-duration-unit", "gc-date", "gc-original", "gc-discount", "gc-discount-amount", "gc-final-price", "gc-deposit", "gc-installments", "gc-frequency", "gc-first-due", "gc-template"]) {
     check(modalHtml.includes(`id="${field}"`), `generation form includes ${field}`);
   }

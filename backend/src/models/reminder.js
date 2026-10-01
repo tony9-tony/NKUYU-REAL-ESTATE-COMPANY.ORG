@@ -5,7 +5,7 @@ import { currentAccess, scopeCondition } from "../org/access.js";
 // Reminders have no ownership of their own: they inherit the scope of the
 // installment (debt) they belong to.
 const ENTITY = "debt";
-const select = `SELECT r.id, r.remind_at, r.sent, d.id AS debt_id, d.amount, d.due_date, d.client_name, d.status AS debt_status, d.notes, c.project_id, c.contract_type, p.name AS project_name FROM reminders r JOIN debts d ON d.id = r.debt_id JOIN contracts c ON c.id = d.contract_id JOIN projects p ON p.id = c.project_id`;
+const select = `SELECT r.id, r.remind_at, r.sent, d.id AS debt_id, d.amount, d.due_date, d.client_name, d.status AS debt_status, d.notes, c.project_id, c.contract_type, p.name AS project_name FROM reminders r JOIN debts d ON d.id = r.debt_id JOIN contracts c ON c.id = d.contract_id LEFT JOIN projects p ON p.id = c.project_id`;
 
 export const Reminder = {
   async due() {
