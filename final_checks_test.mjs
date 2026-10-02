@@ -92,8 +92,16 @@ try {
   check(edited.status === 200 && edited.body.deal_type === "rent", "editing a contract keeps its type");
 
   console.log("\n=== CHECK 05: Finance approves payments ===");
-  const pay = await call("/payments", { method: "POST", token: financeA, body: { contract_id: created.buy.id, amount: 250000, paid_at: "2026-09-30", method: "bank", reference: `FC-${tag}` } });
+  const draftPay = await call("/payments", { method: "POST", token: financeA, body: { contract_id: created.buy.id, amount: 250000, paid_at: "2026-09-30", method: "bank", reference: `FC-${tag}`, evidence_text: "bank slip" } });
+  check(draftPay.status === 409, "a contract that is not yet approved takes no payment");
+  // The approval lifecycle is covered by access_matrix_test; set it directly here.
+  await query("UPDATE contracts SET status='active' WHERE id=$1", [created.buy.id]);
+  check((await call("/payments", { method: "POST", token: financeA, body: { contract_id: created.buy.id, amount: 250000, paid_at: "2026-09-30", method: "bank", evidence_text: "bank slip" } })).status === 400, "the transaction reference is required");
+  check((await call("/payments", { method: "POST", token: financeA, body: { contract_id: created.buy.id, amount: 250000, paid_at: "2026-09-30", method: "bank", reference: `FC-${tag}` } })).status === 400, "proof (receipt or pasted message) is required");
+  const pay = await call("/payments", { method: "POST", token: financeA, body: { contract_id: created.buy.id, amount: 250000, paid_at: "2026-09-30", method: "bank", reference: `FC-${tag}`, evidence_text: `CRDB: TZS 250,000 received. Ref FC-${tag}` } });
   check(pay.status === 201 && pay.body.status === "pending", "a recorded payment starts as pending");
+  const dup = await call("/payments", { method: "POST", token: financeB, body: { contract_id: created.buy.id, amount: 250000, paid_at: "2026-09-30", method: "bank", reference: ` fc-${tag} `, evidence_text: "same slip again" } });
+  check(dup.status === 409 && /already used/.test(dup.body.error || ""), "the same transaction reference cannot be recorded twice");
   check((await call(`/payments/${pay.body.id}/approve`, { method: "POST", token: financeA, body: {} })).status === 403, "the person who recorded it cannot approve it");
   check((await call(`/payments/${pay.body.id}/approve`, { method: "POST", token: sales, body: {} })).status === 403, "Sales cannot approve payments");
   check((await call(`/payments/${pay.body.id}/approve`, { method: "POST", token: md, body: {} })).status === 403, "the MD (not Finance) cannot approve payments");
@@ -101,9 +109,51 @@ try {
   const approved = await call(`/payments/${pay.body.id}/approve`, { method: "POST", token: financeB, body: {} });
   check(approved.status === 200 && approved.body.status === "approved" && approved.body.approved_by_name === `Finance B FC ${tag}`, "another Finance officer approves it");
   check((await call(`/payments/${pay.body.id}/approve`, { method: "POST", token: financeB, body: {} })).status === 409, "an approved payment cannot be approved again");
-  const changed = await call(`/payments/${pay.body.id}`, { method: "PUT", token: financeA, body: { amount: 300000 } });
-  check(changed.status === 200 && changed.body.status === "pending", "changing an approved payment sends it back for approval");
+  check((await call(`/payments/${pay.body.id}`, { method: "PUT", token: financeA, body: { amount: 300000 } })).status === 409, "an approved payment cannot be edited");
+  check((await call(`/payments/${pay.body.id}`, { method: "DELETE", token: md })).status === 409, "an approved payment cannot be deleted");
   check(Number((await query("SELECT COUNT(*) FROM audit_logs WHERE action='payment_approved' AND record_id=$1", [String(pay.body.id)])).rows[0].count) === 1, "the approval is in the audit log");
+
+  console.log("\n=== CHECK 06: Payments settle installments only once approved; reversal keeps the record ===");
+  const debt = await call("/debts", { method: "POST", token: financeA, body: { contract_id: created.buy.id, client_name: "FC buy", amount: 400000, due_date: "2099-01-01", status: "paid" } });
+  check(debt.status === 201 && debt.body.status === "pending", "a new installment starts unpaid (a status in the request is ignored)");
+  check((await call(`/debts/${debt.body.id}`, { method: "PUT", token: financeA, body: { status: "paid" } })).body.status === "pending", "an installment cannot be set to paid by editing it");
+  check((await call(`/debts/${debt.body.id}/pay`, { method: "POST", token: financeA, body: {} })).status === 410, "there is no 'mark paid' without money");
+  const instal = await call("/payments", { method: "POST", token: financeA, body: { contract_id: created.buy.id, debt_id: debt.body.id, amount: 400000, paid_at: "2026-10-01", method: "mobile", reference: `MP-${tag}`, evidence_text: `M-Pesa ${tag} Confirmed. Tsh400,000.00` } });
+  check(instal.status === 201, "the installment payment is recorded");
+  check((await call(`/debts/${debt.body.id}`, { token: financeA })).body.status === "pending", "a pending payment does not settle the installment");
+  check((await call(`/payments/${instal.body.id}/approve`, { method: "POST", token: financeB, body: {} })).status === 200, "a second Finance officer approves it");
+  check((await call(`/debts/${debt.body.id}`, { token: financeA })).body.status === "paid", "the approved payment settles the installment");
+  check((await call(`/payments/${instal.body.id}/reverse`, { method: "POST", token: financeB, body: {} })).status === 400, "a reversal needs a reason");
+  check((await call(`/payments/${instal.body.id}/reverse`, { method: "POST", token: sales, body: { reason: "x" } })).status === 403, "Sales cannot reverse payments");
+  const reversed = await call(`/payments/${instal.body.id}/reverse`, { method: "POST", token: financeB, body: { reason: "Bounced at the bank" } });
+  check(reversed.status === 200 && reversed.body.status === "reversed" && reversed.body.reversal_reason === "Bounced at the bank", "an approved payment is reversed with its reason");
+  check((await call(`/debts/${debt.body.id}`, { token: financeA })).body.status === "pending", "after the reversal the installment is unpaid again");
+  check((await call(`/payments/${instal.body.id}`, { token: financeA })).status === 200, "the reversed payment stays in the ledger");
+  check((await call(`/payments/${instal.body.id}/reverse`, { method: "POST", token: financeB, body: { reason: "again" } })).status === 409, "a payment is reversed only once");
+  check((await call(`/payments/${instal.body.id}`, { method: "DELETE", token: md })).status === 409, "a reversed payment cannot be deleted");
+  const redo = await call("/payments", { method: "POST", token: financeA, body: { contract_id: created.buy.id, debt_id: debt.body.id, amount: 400000, paid_at: "2026-10-02", method: "mobile", reference: `MP-${tag}`, evidence_text: "re-sent after the bounce" } });
+  check(redo.status === 201, "the reference of a reversed payment may be used again");
+  check((await call(`/payments/${redo.body.id}`, { method: "DELETE", token: md })).status === 200, "a pending payment may still be deleted");
+  check((await call(`/debts/${debt.body.id}`, { method: "DELETE", token: md })).status === 409, "an installment with payments on record cannot be deleted");
+  check((await call(`/contracts/${created.buy.id}`, { method: "DELETE", token: md })).status === 409, "a contract with payments on record cannot be deleted");
+  check(Number((await query("SELECT COUNT(*) FROM audit_logs WHERE action='payment_reversed' AND record_id=$1", [String(instal.body.id)])).rows[0].count) === 1, "the reversal is in the audit log");
+
+  console.log("\n=== CHECK 07: single-Finance mode ===");
+  const meBefore = await call("/org/me", { token: financeA });
+  check(meBefore.body.sole_finance_approver === false, "with several Finance people, nobody is the sole approver");
+  const solo = await call("/payments", { method: "POST", token: financeA, body: { contract_id: created.buy.id, amount: 1000, paid_at: "2026-10-02", method: "cash", reference: `SOLO-${tag}`, evidence_text: "cash book 77" } });
+  check((await call(`/payments/${solo.body.id}/approve`, { method: "POST", token: financeA, body: {} })).status === 403, "self-approval is refused while another Finance person exists");
+  // Leave financeA as the only active Finance person (test database only), then restore.
+  const others = (await query(`SELECT DISTINCT u.id FROM users u JOIN user_roles ur ON ur.user_id=u.id JOIN role_permissions rp ON rp.role_id=ur.role_id
+      JOIN permissions p ON p.id=rp.permission_id WHERE p.permission_key='validate_finance' AND u.active=TRUE AND u.role<>'admin' AND u.email<>$1`, [`fin.a.${tag}@test.mkuyu.local`])).rows.map((row) => row.id);
+  await query("UPDATE users SET active=FALSE WHERE id = ANY($1::int[])", [others]);
+  try {
+    check((await call("/org/me", { token: financeA })).body.sole_finance_approver === true, "the only Finance person is told they are the sole approver");
+    const own = await call(`/payments/${solo.body.id}/approve`, { method: "POST", token: financeA, body: {} });
+    check(own.status === 200 && own.body.status === "approved" && own.body.self_approved === true, "the only Finance person approves their own entry, marked self-approved");
+  } finally {
+    await query("UPDATE users SET active=TRUE WHERE id = ANY($1::int[])", [others]);
+  }
   void demoPasswordFor;
 } catch (error) {
   failures += 1;

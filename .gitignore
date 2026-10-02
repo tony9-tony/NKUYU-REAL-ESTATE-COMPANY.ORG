@@ -50,3 +50,7 @@ _old-test-output/
 
 # Screenshots and other AI-tool output (may show real client data)
 Claude outputs/
+
+# Local test runner output and generated training videos (large media)
+test-results.txt
+training-videos/

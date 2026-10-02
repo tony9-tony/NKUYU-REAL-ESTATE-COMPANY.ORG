@@ -10,6 +10,9 @@ import { closeDatabase, query } from "./backend/src/db.js";
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.E2E_PORT || 3177);
+// Transaction references are unique across the ledger, and the test database
+// keeps earlier runs, so every run uses its own references.
+const RUN = Date.now().toString(36).toUpperCase();
 const BASE = `http://localhost:${PORT}/api/v1`;
 let token = "";
 let serverProcess = null;
@@ -115,6 +118,17 @@ async function main() {
   const contractId = res.payload.id;
   res = await call(`/contracts/${contractId}`);
   assert(res.payload.linked_client_name === "E2E Client", "contract join returns linked client name");
+  // Payments are refused until a contract is approved; the approval lifecycle
+  // itself is exercised by access_matrix_test, so here it is set directly.
+  res = await call("/payments", { method: "POST", body: JSON.stringify({ contract_id: contractId, amount: 1000, paid_at: "2026-10-01", method: "cash", reference: `E2E-DRAFT-${RUN}`, evidence_text: "draft" }) });
+  assert(res.status === 409, "a draft contract takes no payment");
+  await query("UPDATE contracts SET status='active' WHERE id=$1", [contractId]);
+  // Approval by a second Finance person is covered by final_checks_test; here it
+  // is simulated, then the installment is re-derived through the API.
+  const approveAsFinance = async (paymentId, debtId) => {
+    await query("UPDATE payments SET status='approved', approved_at=NOW() WHERE id=$1", [paymentId]);
+    if (debtId) await call(`/debts/${debtId}`, { method: "PUT", body: "{}" });
+  };
 
   // 2. Payment schedule generator.
   res = await call(`/contracts/${contractId}/schedule`, { method: "POST", body: JSON.stringify({ deposit: 20000, installments: 7, first_due_date: "2026-11-05" }) });
@@ -148,7 +162,7 @@ async function main() {
   paymentForm.append("amount", String(firstDebt.amount));
   paymentForm.append("paid_at", "2026-10-02");
   paymentForm.append("method", "mobile");
-  paymentForm.append("reference", "MP261001");
+  paymentForm.append("reference", `MP261001-${RUN}`);
   res = await call("/payments/upload", { method: "POST", form: true, body: paymentForm });
   assert(res.status === 201, `payment with receipt uploaded (${JSON.stringify(res.payload).slice(0, 240)})`);
   const receiptPaymentId = res.payload?.id;
@@ -158,7 +172,12 @@ async function main() {
   const receiptBytes = Buffer.from(await receiptResp.arrayBuffer());
   assert(receiptBytes.equals(PNG), "receipt bytes match uploaded PNG");
   res = await call(`/debts/${firstDebt.id}`);
-  assert(res.payload.status === "paid", "installment auto-marked paid");
+  assert(res.payload.status === "pending", "a pending payment settles nothing yet");
+  await approveAsFinance(receiptPaymentId, firstDebt.id);
+  res = await call(`/debts/${firstDebt.id}`);
+  assert(res.payload.status === "paid", "installment settles once the payment is approved");
+  res = await call(`/debts/${firstDebt.id}/pay`, { method: "POST", body: "{}" });
+  assert(res.status === 410, "an installment cannot be marked paid by hand");
 
   // 5. Integrity: a schedule with recorded payments can never be replaced.
   res = await call(`/contracts/${contractId}/schedule`, { method: "POST", body: JSON.stringify({ deposit: 0, installments: 3, first_due_date: "2026-11-05", replace: true }) });
@@ -168,24 +187,34 @@ async function main() {
   const secondDebt = debts[1];
   const thirdDebt = debts[2];
   res = await call("/payments", { method: "POST", body: JSON.stringify({ contract_id: contractId, debt_id: secondDebt.id, amount: secondDebt.amount, paid_at: "2026-10-03", method: "cash" }) });
-  assert(res.status === 201 && res.payload.has_receipt === false, "JSON payment without receipt");
+  assert(res.status === 400, "a payment without a reference is refused");
+  res = await call("/payments", { method: "POST", body: JSON.stringify({ contract_id: contractId, debt_id: secondDebt.id, amount: secondDebt.amount, paid_at: "2026-10-03", method: "cash", reference: `E2E-CASH-${RUN}` }) });
+  assert(res.status === 400, "a payment without any proof is refused");
+  res = await call("/payments", { method: "POST", body: JSON.stringify({ contract_id: contractId, debt_id: secondDebt.id, amount: secondDebt.amount, paid_at: "2026-10-03", method: "cash", reference: `mp 261001-${RUN}` }) });
+  assert(res.status === 409, "a transaction reference cannot be recorded twice (spacing and case ignored)");
+  res = await call("/payments", { method: "POST", body: JSON.stringify({ contract_id: contractId, debt_id: secondDebt.id, amount: secondDebt.amount, paid_at: "2026-10-03", method: "cash", reference: `E2E-CASH-${RUN}`, evidence_text: "Cash receipt book no. 0042" }) });
+  assert(res.status === 201 && res.payload.has_receipt === false && res.payload.status === "pending", "JSON payment with a pasted message as proof");
   const cashPaymentId = res.payload.id;
   res = await call("/payments");
   assert(Array.isArray(res.payload) && res.payload.some((p) => p.has_receipt), "payment list has receipt flags");
 
-  // 7. Updating a payment retimes BOTH installments (old link reopens, new one settles).
+  // 7. A pending payment can be corrected and moved; it settles nothing until approved.
   res = await call(`/payments/${cashPaymentId}`, { method: "PUT", body: JSON.stringify({ debt_id: thirdDebt.id }) });
   assert(res.status === 200, "update payment moves it to another installment");
   res = await call(`/debts/${secondDebt.id}`);
-  assert(res.payload.status === "pending", "old installment reopens after its payment moved away");
+  assert(res.payload.status === "pending", "old installment stays open after its payment moved away");
   res = await call(`/debts/${thirdDebt.id}`);
-  assert(res.payload.status === "paid", "new installment settles after payment moved onto it");
+  assert(res.payload.status === "pending", "a moved but unapproved payment does not settle the new installment");
 
-  // 8. Deleting the moved payment reopens that installment too (even from paid).
+  // 8. A pending payment may be deleted; an approved one may not.
+  res = await call(`/payments/${receiptPaymentId}`, { method: "DELETE" });
+  assert(res.status === 409, "an approved payment cannot be deleted (it is reversed instead)");
+  res = await call(`/payments/${receiptPaymentId}`, { method: "PUT", body: JSON.stringify({ amount: 1 }) });
+  assert(res.status === 409, "an approved payment cannot be edited");
   res = await call(`/payments/${cashPaymentId}`, { method: "DELETE" });
-  assert(res.status === 200, "delete payment");
+  assert(res.status === 200, "delete pending payment");
   res = await call(`/debts/${thirdDebt.id}`);
-  assert(res.payload.status === "pending", "installment reopens after its only payment is deleted");
+  assert(res.payload.status === "pending", "installment stays open after its only payment is deleted");
   res = await call(`/debts/${firstDebt.id}`);
   assert(res.payload.status === "paid", "untouched installment keeps its paid status");
   res = await call(`/debts/${secondDebt.id}`);

@@ -15,7 +15,7 @@ import { Reminder } from "../models/reminder.js";
 import { Report } from "../models/report.js";
 import { Appointment, Client, Document, Property } from "../models/catalog.js";
 import { REPORT_TYPES, PAYMENT_METHODS, reportTypeIsFinancial } from "../models/reportTypes.js";
-import { CONTRACT_ACTIONS, WORKFLOW_STAGES, WORKFLOW_EXCEPTIONS, availableActions, canTransition, workflowGraph, workflowStagePermissions } from "../contracts/workflow.js";
+import { CONTRACT_ACTIONS, CONTRACT_POSITIONS, WORKFLOW_STAGES, WORKFLOW_EXCEPTIONS, availableActions, canTransition, contractPosition, transitionBlockedReason, workflowGraph, workflowStagePermissions } from "../contracts/workflow.js";
 import { ROLE_DUTIES, CONTRACT_OWNERSHIP, ROLE_HOME_DEPARTMENT, DEPARTMENT_DEFAULT_ROLE, DEFAULT_STAFF_ROLE, TASK_HANDOFF, SYSTEM_PERMISSIONS, departmentDutyTree, checkRoleDuties, checkContractOwnership, checkNoSystemAdminLeak, checkDeadPermissions } from "../org/duties.js";
 import taskRoutes from "./tasks.js";
 import { EXISTING_CLIENT_SQL, findExistingClient } from "../org/clientMatch.js";
@@ -239,6 +239,10 @@ async function buildMe(req) {
     // caller is party to, not a decoration - it is 0 for a user with nothing
     // outstanding and never counts another department's private work.
     attention: await attentionCount(req.access),
+    // True while the caller is the only Finance person: they may then approve
+    // payments they recorded themselves (see POST /payments/:id/approve).
+    sole_finance_approver: can(req.access, "validate_finance") && can(req.access, "view_financial") && !req.access?.isAdmin
+      ? (await Payment.otherApprovers(req.user.id)) === 0 : false,
     user: {
       ...await publicUser(req.user),
       profile_photo_url: req.user.photo_stored_name ? `/api/v1/org/users/${req.user.id}/photo` : null,
@@ -302,7 +306,7 @@ function contractActionsFor(contract, req) {
     ? Object.keys(CONTRACT_ACTIONS)
     : availableActions(contract.status, req.access?.permissions || []).map((entry) => entry.action);
   return names
-    .filter((name) => canTransition(contract.status, name))
+    .filter((name) => canTransition(contract.status, name) && !transitionBlockedReason(contract, name))
     .map((name) => ({ action: name, label: CONTRACT_ACTIONS[name].label, to: CONTRACT_ACTIONS[name].to }));
 }
 
@@ -518,10 +522,24 @@ router.get("/workspace", async (req, res, next) => {
       const counted = await query("SELECT contract_id, COUNT(*)::int AS n FROM debts WHERE contract_id = ANY($1::int[]) GROUP BY contract_id", [ids]);
       planCounts = new Map(counted.rows.map((row) => [row.contract_id, row.n]));
     }
+    // Where every visible contract is right now (Sales, Legal, Finance, MD, ...),
+    // derived with the same contractPosition() the register uses.
+    let contractPipeline = null;
+    if (has("contracts")) {
+      const tally = new Map();
+      for (const row of await Contract.pipelineCounts()) {
+        const position = contractPosition({ status: row.status, finance_validated_at: row.finance_done ? true : null });
+        const entry = tally.get(position.key) || { key: position.key, label: position.label, desk: position.desk, step: position.step, count: 0 };
+        entry.count += row.n;
+        tally.set(position.key, entry);
+      }
+      contractPipeline = [...tally.values()].sort((a, b) => (a.step ?? 99) - (b.step ?? 99) || a.label.localeCompare(b.label));
+    }
     res.set("Cache-Control", "private, no-store");
     res.json({
       me,
       projects, reminders,
+      contract_pipeline: contractPipeline,
       // One bounded first page per list. The keys are unchanged, so the
       // frontend's `payload.X || []` contract still holds; what changed is that
       // an array is now a PAGE, not the whole table.
@@ -530,7 +548,7 @@ router.get("/workspace", async (req, res, next) => {
       // Legal desk shows review buttons a Sales officer will never see. Applied
       // to the page rather than to a separate key, so the contract register keeps
       // working exactly as it did when the array was complete.
-      contracts: contractsPage.rows.map((contract) => ({ ...contract, available_actions: contractActionsFor(contract, req), ...(planCounts ? { installments_recorded: planCounts.get(contract.id) || 0 } : {}) })),
+      contracts: contractsPage.rows.map((contract) => ({ ...contract, available_actions: contractActionsFor(contract, req), position: contractPosition(contract), ...(planCounts ? { installments_recorded: planCounts.get(contract.id) || 0 } : {}) })),
       clients: clientsPage.rows,
       properties: propertiesPage.rows,
       appointments: appointmentsPage.rows,
@@ -792,7 +810,7 @@ router.get("/duties", async (req, res, next) => {
           duties: entry.duties.map((duty) => ({ ...duty, yours: held === null || duty.permissions.every((key) => held.has(key)) })),
         })),
       })),
-      workflow: { stages, exceptions: WORKFLOW_EXCEPTIONS, graph: workflowGraph(), ownership: CONTRACT_OWNERSHIP },
+      workflow: { stages, exceptions: WORKFLOW_EXCEPTIONS, graph: workflowGraph(), ownership: CONTRACT_OWNERSHIP, positions: CONTRACT_POSITIONS },
       totals: {
         departments: Object.keys(ROLE_HOME_DEPARTMENT).length ? new Set(Object.values(ROLE_HOME_DEPARTMENT)).size : 0,
         roles: Object.keys(ROLE_HOME_DEPARTMENT).length,

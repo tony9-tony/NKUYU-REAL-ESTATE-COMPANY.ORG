@@ -16,7 +16,7 @@ export const WORKFLOW_STAGES = [
   { status: "draft", stage: 1, label: "Draft prepared", owner: "SALES, MARKETING & OPERATIONS", actor: "SALES, MARKETING & OPERATIONS", permission: "create", note: "Sales or operations opens the deal and records the commercial terms." },
   { status: "submitted", stage: 2, label: "Submitted to Legal", owner: "LEGAL", actor: "SALES, MARKETING & OPERATIONS", permission: "submit_contract", note: "Sales hands the deal to Legal. Sales cannot approve its own submission." },
   { status: "under_review", stage: 3, label: "Under legal review", owner: "LEGAL", actor: "LEGAL", permission: "review_legal", note: "Legal opens the contract, checks the clauses and verifies the parties." },
-  { status: "legal_approved", stage: 4, label: "Legal terms approved", owner: "LEGAL", actor: "LEGAL", permission: "approve_legal", note: "Legal gives legal approval. Finance then validates the money." },
+  { status: "legal_approved", stage: 4, label: "Legal terms approved", owner: "LEGAL", actor: "LEGAL", permission: "approve_legal", note: "Legal gives legal approval. Finance must then validate the money before Legal can send it to the Managing Director." },
   { status: "pending_management_approval", stage: 5, label: "Management approval", owner: "MANAGEMENT", actor: "MANAGEMENT", permission: "approve_management", note: "The Managing Director approves on behalf of management, or sends it back." },
   { status: "approved", stage: 6, label: "Approved for release", owner: "LEGAL", actor: "LEGAL", permission: "approve_legal", note: "Legal releases the approved contract to the customer." },
   { status: "customer_pending", stage: 7, label: "With the customer", owner: "LEGAL", actor: "LEGAL", permission: "approve_legal", note: "Awaiting the customer's signature." },
@@ -143,7 +143,10 @@ export const CONTRACT_ACTIONS = {
   start_review: { from: ["submitted"], to: "under_review", permission: "review_legal", label: "Start legal review" },
   request_changes: { from: ["submitted", "under_review", "legal_approved", "pending_management_approval", "approved", "customer_pending"], to: "changes_requested", permission: "request_changes", label: "Request changes" },
   legal_approve: { from: ["under_review", "submitted"], to: "legal_approved", permission: "approve_legal", label: "Legal approval" },
-  finance_validate: { from: ["legal_approved", "under_review"], to: "legal_approved", permission: "validate_finance", label: "Validate financial terms" },
+  // Finance checks the money only AFTER Legal has approved the terms, so it
+  // always validates the version Legal signed off. The status stays
+  // legal_approved; the validation is recorded in finance_validated_*.
+  finance_validate: { from: ["legal_approved"], to: "legal_approved", permission: "validate_finance", label: "Validate financial terms" },
   submit_management: { from: ["legal_approved"], to: "pending_management_approval", permission: "approve_legal", label: "Send for management approval" },
   management_approve: { from: ["pending_management_approval"], to: "approved", permission: "approve_management", label: "Management approval" },
   management_reject: { from: ["pending_management_approval"], to: "rejected", permission: "approve_management", label: "Management rejection" },
@@ -168,6 +171,67 @@ export function availableActions(status, permissions) {
 export function canTransition(status, actionName) {
   const action = CONTRACT_ACTIONS[actionName];
   return Boolean(action && action.from.includes(status));
+}
+
+/**
+ * Business preconditions that the status alone cannot express. Returns the
+ * reason an otherwise legal step is refused right now, or null when it may go
+ * ahead. Used by the transition route (to refuse) and by the action lists (to
+ * hide the button), so the two can never disagree.
+ *
+ *   Legal -> Finance -> MD: a contract only reaches the Managing Director once
+ *   Finance has validated its financial terms.
+ */
+export function transitionBlockedReason(contract, actionName) {
+  if (!contract) return null;
+  const financeDone = Boolean(contract.finance_validated_at);
+  if (actionName === "submit_management" && !financeDone) {
+    return "Finance must validate the financial terms before the contract goes to the Managing Director";
+  }
+  if (actionName === "finance_validate" && financeDone) {
+    return "Finance has already validated the financial terms of this contract";
+  }
+  return null;
+}
+
+/**
+ * Where a contract is right now, in words the whole organization (and the MD
+ * in particular) can read at a glance: which desk holds it and what it is
+ * waiting for. Derived from the status plus the finance stamp, never stored,
+ * so it cannot drift from the workflow above.
+ */
+export const CONTRACT_POSITIONS = [
+  { key: "sales", label: "Under Sales review", desk: "Sales" },
+  { key: "legal_queue", label: "Submitted to Legal", desk: "Legal" },
+  { key: "legal", label: "Under Legal review", desk: "Legal" },
+  { key: "finance", label: "Under Finance review", desk: "Finance" },
+  { key: "legal_to_md", label: "Finance validated · Legal to send to MD", desk: "Legal" },
+  { key: "md", label: "Under MD review", desk: "Managing Director" },
+  { key: "legal_release", label: "MD approved · Legal to send to customer", desk: "Legal" },
+  { key: "customer", label: "With the customer for signature", desk: "Customer" },
+  { key: "active", label: "Active", desk: "Legal" },
+  { key: "completed", label: "Completed", desk: "Legal" },
+];
+const POSITION_BY_KEY = new Map(CONTRACT_POSITIONS.map((entry, index) => [entry.key, { ...entry, step: index + 1 }]));
+
+export function contractPosition(contract) {
+  const status = contract?.status || "draft";
+  const at = (key, extra = {}) => ({ ...POSITION_BY_KEY.get(key), total: CONTRACT_POSITIONS.length, ...extra });
+  switch (status) {
+    case "draft": return at("sales");
+    case "changes_requested": return at("sales", { key: "sales_changes", label: "Under Sales review · changes requested" });
+    case "submitted": return at("legal_queue");
+    case "under_review": return at("legal");
+    case "legal_approved": return contract?.finance_validated_at ? at("legal_to_md") : at("finance");
+    case "pending_management_approval": return at("md");
+    case "approved": return at("legal_release");
+    case "customer_pending": return at("customer");
+    case "active": return at("active");
+    case "completed": return at("completed");
+    case "rejected": return { key: "rejected", label: "Rejected", desk: null, step: null, total: CONTRACT_POSITIONS.length };
+    case "cancelled": return { key: "cancelled", label: "Cancelled", desk: null, step: null, total: CONTRACT_POSITIONS.length };
+    default: return { key: status, label: String(status).replace(/_/g, " "), desk: null, step: null, total: CONTRACT_POSITIONS.length };
+  }
 }
 
 // ---------------------------------------------------------------------------

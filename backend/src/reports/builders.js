@@ -56,11 +56,14 @@ async function buildRows(type, filters) {
     const contractScope = scope("c", "contract");
     const projectScope = scope("pr", "project");
     const paymentScope = scope("p", "payment");
-    sql = `SELECT p.paid_at,p.client_name,p.amount,p.method,p.reference,pr.name AS project_name
+    // Income counts confirmed money only; the payments register shows every
+    // payment with its approval state so pending and reversed ones stay visible.
+    sql = `SELECT p.paid_at,p.client_name,p.amount,p.method,p.reference,p.status,pr.name AS project_name
       FROM payments p JOIN contracts c ON c.id=p.contract_id AND c.organization_id=$1 AND ${contractScope}
       LEFT JOIN projects pr ON pr.id=c.project_id AND pr.organization_id=$1 AND ${projectScope}
-      WHERE p.organization_id=$1 AND ${paymentScope}`;
+      WHERE p.organization_id=$1 AND ${paymentScope}${type === "income" ? " AND p.status='approved'" : ""}`;
     columns = [dateCol("paid_at", "Payment date"), text("client_name", "Client"), text("project_name", "Project"), num("amount", "Amount"), text("method", "Method"), text("reference", "Reference")];
+    if (type === "payments") columns.push(text("status", "Approval"));
     fields = { project: "c.project_id", client: "p.client_name", method: "p.method", date: "p.paid_at" }; order = "p.paid_at DESC";
   } else if (["debt", "overdue", "installments"].includes(type)) {
     const contractScope = scope("c", "contract");
@@ -68,7 +71,7 @@ async function buildRows(type, filters) {
     const paymentScope = scope("pmt", "payment");
     const debtScope = scope("d", "debt");
     sql = `SELECT d.due_date,d.client_name,d.amount,d.status,pr.name AS project_name,
-      COALESCE((SELECT SUM(pmt.amount) FROM payments pmt WHERE pmt.debt_id=d.id AND pmt.organization_id=$1 AND ${paymentScope}),0) AS paid_amount
+      COALESCE((SELECT SUM(pmt.amount) FROM payments pmt WHERE pmt.debt_id=d.id AND pmt.organization_id=$1 AND pmt.status='approved' AND ${paymentScope}),0) AS paid_amount
       FROM debts d JOIN contracts c ON c.id=d.contract_id AND c.organization_id=$1 AND ${contractScope}
       LEFT JOIN projects pr ON pr.id=c.project_id AND pr.organization_id=$1 AND ${projectScope}
       WHERE d.organization_id=$1 AND ${debtScope}`;
@@ -130,7 +133,7 @@ async function buildRows(type, filters) {
   } else {
     const paymentScope = scope("p", "payment");
     sql = `SELECT 'Income' AS metric,COUNT(p.id)::int AS count,COALESCE(SUM(p.amount),0) AS amount,'Recorded payments' AS note
-      FROM payments p WHERE p.organization_id=$1 AND ${paymentScope}`;
+      FROM payments p WHERE p.organization_id=$1 AND p.status='approved' AND ${paymentScope}`;
     columns = [text("metric", "Metric"), intCol("count", "Count"), num("amount", "Amount"), text("note", "Notes")]; fields = { date: "p.paid_at" };
   }
   const filtered = filtersSql(filters, fields, values.length);

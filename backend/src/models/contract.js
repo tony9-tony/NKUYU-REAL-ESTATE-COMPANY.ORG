@@ -18,6 +18,16 @@ const select = `SELECT c.*, c.value AS final_price, p.name AS project_name,cl.na
   LEFT JOIN users ma ON ma.id=c.management_approved_by`;
 
 export const Contract = {
+  // How many contracts sit at each point of the workflow, scoped exactly like the
+  // register, so the MD's "where contracts are" panel counts every contract the
+  // caller may see rather than only the first page.
+  async pipelineCounts() {
+    const values = [await organizationId()];
+    const access = await currentAccess();
+    const conditions = ["c.organization_id=$1", scopeCondition("c", ENTITY, access, values)];
+    return (await query(`SELECT c.status, (c.finance_validated_at IS NOT NULL) AS finance_done, COUNT(*)::int AS n
+      FROM contracts c WHERE ${conditions.join(" AND ")} GROUP BY 1, 2`, values)).rows;
+  },
   async all(projectId = null, type = null) {
     const values = [await organizationId()];
     const access = await currentAccess();

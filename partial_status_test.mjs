@@ -47,9 +47,17 @@ try {
     amount,
     due_date: due,
   });
-  const pay = (debtId, amount, paidAt = "2026-09-25 10:00:00") => Payment.create({
-    contract_id: contract.id, debt_id: debtId, client_name: `Partial Client ${suffix}`, amount, paid_at: paidAt, method: "bank",
-  });
+  // The ledger counts APPROVED money only, so each test payment is recorded and
+  // then approved (the approval rules themselves are in final_checks_test).
+  let refSeq = 0;
+  const pay = async (debtId, amount, paidAt = "2026-09-25 10:00:00") => {
+    const created = await Payment.create({
+      contract_id: contract.id, debt_id: debtId, client_name: `Partial Client ${suffix}`, amount, paid_at: paidAt, method: "bank",
+      reference: `PARTIAL-${suffix}-${refSeq += 1}`, evidence_text: "test",
+    });
+    await Payment.approve(created.id, null);
+    return created;
+  };
   const statusOf = async (debtId) => (await Debt.get(debtId)).status;
 
   // --- 0 paid, not yet due -> pending (unchanged existing behaviour) --------
@@ -93,14 +101,16 @@ try {
   await Payment.syncInstallment(overpaid.id);
   check(await statusOf(overpaid.id) === "paid", "paying more than the amount is paid");
 
-  // --- history is reversible: removing the part payment reopens it ---------
+  // --- history is reversible: reversing the part payment reopens it --------
   const reopened = await makeDebt(500, past);
   const firstPayment = await pay(reopened.id, 200);
   await Payment.syncInstallment(reopened.id);
   check(await statusOf(reopened.id) === "partial", "the reopened installment starts partial");
-  await Payment.remove(firstPayment.id);
+  // Approved money is reversed, never deleted: the row stays, it stops counting.
+  check((await Payment.remove(firstPayment.id)).rowCount === 0, "an approved payment cannot be deleted");
+  await Payment.reverse(firstPayment.id, null, "test reversal");
   await Payment.syncInstallment(reopened.id, true);
-  check(await statusOf(reopened.id) === "overdue", "removing the part payment returns it to overdue");
+  check(await statusOf(reopened.id) === "overdue", "reversing the part payment returns it to overdue");
   check(await Payment.forDebt(reopened.id) === 0, "the payment total is back to zero");
 
   // --- the vocabulary is the one the model can actually produce --------------

@@ -115,7 +115,9 @@ try {
   check(outside.status === 404, `Finance cannot record a payment on a contract outside its scope (${outside.status})`);
   check(!JSON.stringify(outside.body).includes(`Private ${tag}`), "and learns nothing about that contract's client");
   const openContract = (await dev.call("/contracts", { method: "POST", token: mdToken, body: { project_id: project.id, client_name: `Open ${tag}`, contract_type: "new", deal_type: "rent", value: 500000 } })).body;
-  const inside = await dev.call("/payments", { method: "POST", token: financeToken, body: { contract_id: openContract.id, amount: 1000, paid_at: "2026-09-01" } });
+  // Payments are taken only on an approved/active contract (lifecycle covered elsewhere).
+  await query("UPDATE contracts SET status='active' WHERE id=$1", [openContract.id]);
+  const inside = await dev.call("/payments", { method: "POST", token: financeToken, body: { contract_id: openContract.id, amount: 1000, paid_at: "2026-09-01", reference: `SEC-${tag}`, evidence_text: "test slip" } });
   check(inside.status === 201, `Finance records a payment on a contract in its scope (${inside.status})`);
 
   console.log("\n=== MK-09 contract history hides financial notes without view_financial ===");

@@ -915,6 +915,16 @@ input.filter-input { padding-right: 12px; background-image: none; }
   color: var(--muted);
   background: var(--neutral-soft);
 }
+/* Where a contract is right now (Sales -> Legal -> Finance -> MD -> customer).
+   When the server reports a position it decides the colour, so "Legal approved,
+   waiting for Finance" reads as waiting rather than done. */
+.badge.badge-position-sales { color: var(--info); background: var(--info-soft); }
+.badge.badge-position-sales_changes { color: var(--violet); background: var(--violet-soft); }
+.badge.badge-position-legal_queue, .badge.badge-position-legal, .badge.badge-position-finance,
+.badge.badge-position-legal_to_md, .badge.badge-position-md, .badge.badge-position-legal_release,
+.badge.badge-position-customer { color: var(--warning); background: var(--warning-soft); }
+.badge.badge-position-md { font-weight: 700; }
+.badge.badge-position-active, .badge.badge-position-completed { color: var(--success); background: var(--success-soft); }
 .badge-sold { color: #fff; background: var(--brand-800); }
 .badge-sold::before { background: var(--gold-strong); opacity: 1; }
 /* Descriptive (type/category) badges are quiet outlines. */

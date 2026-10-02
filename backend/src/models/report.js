@@ -91,8 +91,10 @@ export const Report = {
       addMoney("debts_pending", { table: "debts", alias: "d", entity: "debt", conditions: [eq("d.status", "pending")], sum: "d.amount" });
       addMoney("debts_overdue", { table: "debts", alias: "d", entity: "debt", conditions: [raw("d.status <> 'paid'"), raw("d.due_date < CURRENT_DATE")], sum: "d.amount" });
       addMoney("debts_paid", { table: "debts", alias: "d", entity: "debt", conditions: [eq("d.status", "paid")], sum: "d.amount" });
-      addMoney("income_all", { table: "payments", alias: "p", entity: "payment", sum: "p.amount" });
-      addMoney("income_30d", { table: "payments", alias: "p", entity: "payment", conditions: [ge("p.paid_at", new Date(Date.now() - 30 * 86400000).toISOString())], sum: "p.amount" });
+      // Income is money a second Finance person has confirmed; pending and reversed
+      // payments are claims or corrections, not income.
+      addMoney("income_all", { table: "payments", alias: "p", entity: "payment", conditions: [eq("p.status", "approved")], sum: "p.amount" });
+      addMoney("income_30d", { table: "payments", alias: "p", entity: "payment", conditions: [eq("p.status", "approved"), ge("p.paid_at", new Date(Date.now() - 30 * 86400000).toISOString())], sum: "p.amount" });
     }
 
     const row = await queryOne(`SELECT ${columns.join(", ")} FROM (SELECT 1) AS anchor`, values);

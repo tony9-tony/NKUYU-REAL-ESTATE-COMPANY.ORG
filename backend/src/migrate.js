@@ -298,7 +298,30 @@ async function migratePaymentApproval() {
   await query("ALTER TABLE payments ALTER COLUMN status SET DEFAULT 'pending'");
   await query("ALTER TABLE payments ALTER COLUMN status SET NOT NULL");
   await query("ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_status_check");
-  await query("ALTER TABLE payments ADD CONSTRAINT payments_status_check CHECK (status IN ('pending','approved'))");
+  await query("ALTER TABLE payments ADD CONSTRAINT payments_status_check CHECK (status IN ('pending','approved','reversed'))");
+  // Payment safety (phase 1): the evidence behind a payment, and a reversal that
+  // keeps the record instead of deleting it.
+  await query("ALTER TABLE payments ADD COLUMN IF NOT EXISTS evidence_text TEXT");
+  await query("ALTER TABLE payments ADD COLUMN IF NOT EXISTS reversed_by INTEGER REFERENCES users(id) ON DELETE SET NULL");
+  await query("ALTER TABLE payments ADD COLUMN IF NOT EXISTS reversed_at TIMESTAMPTZ");
+  await query("ALTER TABLE payments ADD COLUMN IF NOT EXISTS reversal_reason TEXT");
+  // Set when the only Finance person approved a payment they recorded themselves
+  // (single-Finance mode); kept on the record so the MD can review those.
+  await query("ALTER TABLE payments ADD COLUMN IF NOT EXISTS self_approved BOOLEAN NOT NULL DEFAULT FALSE");
+  // One transaction reference may back only one live payment. The index is the
+  // database's own guarantee; the API checks first so it can explain the clash.
+  // Older data may already hold duplicates: then the index is left out (and the
+  // API check still protects every new payment) rather than failing startup.
+  const duplicates = await queryOne(`SELECT COUNT(*)::int AS n FROM (
+      SELECT 1 FROM payments WHERE reference IS NOT NULL AND btrim(reference) <> '' AND status <> 'reversed'
+      GROUP BY organization_id, upper(regexp_replace(reference, '\\s', '', 'g')) HAVING COUNT(*) > 1) d`);
+  if (!duplicates?.n) {
+    await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_reference_unique
+      ON payments (organization_id, upper(regexp_replace(reference, '\\s', '', 'g')))
+      WHERE reference IS NOT NULL AND btrim(reference) <> '' AND status <> 'reversed'`);
+  } else {
+    console.warn(`payments: ${duplicates.n} transaction reference(s) are used more than once; the unique index was not created. Review them in Payments.`);
+  }
 }
 
 async function migrateContractDealType() {

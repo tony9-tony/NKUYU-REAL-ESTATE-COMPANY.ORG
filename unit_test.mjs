@@ -35,7 +35,12 @@ try {
   const secondDebt = await Debt.create({ contract_id: contract.id, client_name: `Unit Client ${suffix}`, amount: 400, due_date: "2099-02-01" });
   await Reminder.sync(firstDebt.id, new Date(Date.now() + 86400000).toISOString());
   assert.equal((await Reminder.upcoming(2)).some((row) => row.debt_id === firstDebt.id), true);
-  const payment = await Payment.create({ contract_id: contract.id, debt_id: firstDebt.id, client_name: `Unit Client ${suffix}`, amount: 600, paid_at: "2026-09-25 10:00:00", method: "bank" });
+  const payment = await Payment.create({ contract_id: contract.id, debt_id: firstDebt.id, client_name: `Unit Client ${suffix}`, amount: 600, paid_at: "2026-09-25 10:00:00", method: "bank", reference: `UNIT-${suffix}`, evidence_text: "unit test" });
+  // A recorded payment is only a claim: it settles nothing until approved.
+  await Payment.syncInstallment(firstDebt.id);
+  assert.equal((await Debt.get(firstDebt.id)).status, "pending");
+  assert.equal(await Payment.forDebt(firstDebt.id), 0);
+  await Payment.approve(payment.id, null);
   await Payment.syncInstallment(firstDebt.id);
   assert.equal((await Debt.get(firstDebt.id)).status, "paid");
   assert.equal(await Payment.forDebt(firstDebt.id), 600);

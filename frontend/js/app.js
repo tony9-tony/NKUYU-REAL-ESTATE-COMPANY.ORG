@@ -290,22 +290,36 @@ const viewMeta = {
 // backend/src/contracts/workflow.js; this is the display layer over it, and the
 // matching badge colours live in app.css.
 const CONTRACT_STATUS_LABELS = {
-  draft: "Draft",
+  draft: "Under Sales review",
   submitted: "Submitted to Legal",
-  under_review: "Under legal review",
-  changes_requested: "Changes requested",
-  legal_approved: "Legally approved",
-  pending_management_approval: "Pending management approval",
-  approved: "Approved",
-  customer_pending: "Awaiting customer",
+  under_review: "Under Legal review",
+  changes_requested: "Changes requested · back with Sales",
+  legal_approved: "Legal approved",
+  pending_management_approval: "Under MD review",
+  approved: "MD approved",
+  customer_pending: "With the customer",
   active: "Active",
   completed: "Completed",
   rejected: "Rejected",
   cancelled: "Cancelled",
 };
 
-function contractStatusBadge(status) {
-  return `<span class="badge badge-contract-${escapeHtml(String(status || "draft"))}">${escapeHtml(contractStatusLabel(status))}</span>`;
+// Accepts a contract or a bare status. Given a contract, the badge says where it
+// is right now (Under Sales / Legal / Finance / MD review ...) using the
+// server-computed `position`, which also knows whether Finance has validated.
+function contractStatusBadge(contractOrStatus) {
+  const contract = contractOrStatus && typeof contractOrStatus === "object" ? contractOrStatus : null;
+  const status = contract ? contract.status : contractOrStatus;
+  const label = contract?.position?.label || contractStatusLabel(status);
+  const desk = contract?.position?.key ? ` badge-position-${escapeHtml(contract.position.key)}` : "";
+  return `<span class="badge badge-contract-${escapeHtml(String(status || "draft"))}${desk}">${escapeHtml(label)}</span>`;
+}
+
+/** "Step 4 of 10 · With Finance" for a contract still moving through the workflow. */
+function contractPositionNote(contract) {
+  const position = contract?.position;
+  if (!position?.step || !position.desk) return "";
+  return `<span class="cell-sub stage-note" title="Where this contract is right now">Step ${position.step} of ${position.total} · With ${escapeHtml(position.desk)}</span>`;
 }
 
 function contractStatusLabel(status) {
@@ -911,6 +925,7 @@ function applyWorkspace(payload) {
   const admin = payload.admin || {};
   state.projects = payload.projects || [];
   state.contracts = payload.contracts || [];
+  state.contractPipeline = payload.contract_pipeline || null;
   state.clients = payload.clients || [];
   state.properties = payload.properties || [];
   state.appointments = payload.appointments || [];
@@ -2733,6 +2748,15 @@ function contractOptions(selected = "") {
   return state.contracts.map((contract) => `<option value="${contract.id}" ${String(contract.id) === String(selected) ? "selected" : ""}>${escapeHtml(contract.client_name)} · ${escapeHtml(contract.project_name)}</option>`).join("");
 }
 
+// Payments are taken only on approved or active contracts (the server enforces
+// the same list), so the payment form offers only those.
+const PAYABLE_CONTRACT_STATUSES = new Set(["approved", "customer_pending", "active"]);
+function payableContractOptions(selected = "") {
+  return state.contracts
+    .filter((contract) => PAYABLE_CONTRACT_STATUSES.has(contract.status) || String(contract.id) === String(selected))
+    .map((contract) => `<option value="${contract.id}" ${String(contract.id) === String(selected) ? "selected" : ""}>${escapeHtml(contract.client_name)}${contract.contract_number ? ` · ${escapeHtml(contract.contract_number)}` : ""}${contract.project_name ? ` · ${escapeHtml(contract.project_name)}` : ""}</option>`).join("");
+}
+
 function clientOptions(selected = "") {
   if (!state.clients?.length) return `<option value="">No clients available</option>`;
   return `<option value="">Select client</option>${state.clients.map((c) => `<option value="${c.id}" ${String(c.id) === String(selected) ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("")}`;
@@ -3001,7 +3025,20 @@ function renderDashboard() {
     // is the FINANCIAL aggregate set - outstanding, overdue, income, the debt
     // and payment registers - and those are gated on `financial` above.
     const hasContracts = recent.length > 0 || Number(newContracts.count || 0) + Number(terminal.count || 0) > 0;
-    const list = recent.map((contract) => `<li class="list-row" data-searchable><div class="list-main"><strong>${escapeHtml(contract.client_name)}</strong><span>${escapeHtml(contract.contract_number || contract.project_name || "")}${contract.contract_number && contract.project_name ? ` · ${escapeHtml(contract.project_name)}` : ""}</span></div><div class="list-side">${contractStatusBadge(contract.status)}<span class="amount">${money(contract.value)}</span></div></li>`).join("");
+    const list = recent.map((contract) => `<li class="list-row" data-searchable><div class="list-main"><strong>${escapeHtml(contract.client_name)}</strong><span>${escapeHtml(contract.contract_number || contract.project_name || "")}${contract.contract_number && contract.project_name ? ` · ${escapeHtml(contract.project_name)}` : ""}</span></div><div class="list-side">${contractStatusBadge(contract)}<span class="amount">${money(contract.value)}</span></div></li>`).join("");
+    // Where contracts are: one line per desk, for the Managing Director (and
+    // anyone who signs off contracts) to see at a glance who is holding what.
+    const pipeline = (state.contractPipeline || []).filter((entry) => entry.step && entry.key !== "completed" && entry.key !== "active");
+    if (pipeline.length && (can("approve_management") || can("approve_legal"))) {
+      const total = pipeline.reduce((sum, entry) => sum + Number(entry.count || 0), 0);
+      const pipelineRows = pipeline.map((entry) => `<li class="list-row" data-searchable><div class="list-main"><strong>${escapeHtml(entry.label)}</strong><span>With ${escapeHtml(entry.desk || "—")} · step ${entry.step}</span></div><div class="list-side"><span class="badge badge-position-${escapeHtml(entry.key)}">${Number(entry.count || 0)}</span></div></li>`).join("");
+      panels.push(dashPanel(
+        "Where contracts are",
+        `${total} contract${total === 1 ? "" : "s"} in progress`,
+        `<ul class="list">${pipelineRows}</ul>`,
+        `<button class="btn btn-ghost btn-small" data-action="open-alert-view" data-view="contracts">Open register${icon("arrow")}</button>`,
+      ));
+    }
     panels.push(dashPanel(
       "Recent contracts",
       hasContracts ? `${newContracts.count || 0} new · ${terminal.count || 0} terminal` : "",
@@ -3162,7 +3199,7 @@ function renderContracts() {
     ]);
     return `<tr data-searchable>
       <td><button class="cell-link" data-action="view-contract" data-id="${contract.id}"><span class="cell-main">${escapeHtml(contract.client_name)}</span></button><span class="cell-sub">${escapeHtml(contract.contract_number || "No number yet")}${contract.project_name ? ` · ${escapeHtml(contract.project_name)}` : ""}</span></td>
-      <td>${contractStatusBadge(contract.status)}${stage ? `<span class="cell-sub stage-note" title="Department currently holding the contract">Stage ${stage.number} of ${stage.total} · Held by ${escapeHtml(titleCase(stage.owner))}</span>` : ""}${needsPlan ? `<span class="cell-sub plan-missing">No payment plan yet</span>` : ""}${contract.legal_signed_by ? `<span class="cell-sub signed-note">${icon("check")}Signed by Legal</span>` : ""}</td>
+      <td>${contractStatusBadge(contract)}${contract.position ? contractPositionNote(contract) : (stage ? `<span class="cell-sub stage-note" title="Department currently holding the contract">Stage ${stage.number} of ${stage.total} · Held by ${escapeHtml(titleCase(stage.owner))}</span>` : "")}${needsPlan ? `<span class="cell-sub plan-missing">No payment plan yet</span>` : ""}${contract.legal_signed_by ? `<span class="cell-sub signed-note">${icon("check")}Signed by Legal</span>` : ""}</td>
       <td>${contract.deal_type ? badge(dealTypeLabel(contract.deal_type), "open") : `<span class="muted cell-plain">Not recorded</span>`}<span class="cell-sub">${escapeHtml(humanize(contract.contract_type || ""))}</span></td>
       <td><span class="cell-main cell-plain">${formatDate(contract.start_date)}</span><span class="cell-sub">to ${formatDate(contract.end_date)}</span></td>
       <td class="amount">${money(contract.value)}${Number(contract.discount_pct || 0) > 0 ? `<span class="cell-sub">${numberValue(contract.discount_pct)}% discount</span>` : ""}</td>
@@ -3205,11 +3242,10 @@ function renderDebts() {
     const viewContract = canSeeContract && state.contracts.some((c) => String(c.id) === String(debt.contract_id))
       ? `<button class="btn btn-small" data-action="view-contract" data-id="${debt.contract_id}" title="Open the contract this installment belongs to">View contract</button>` : "";
     const open = debt.status !== "paid";
-    const record = open && mayCreate ? `<button class="btn btn-primary btn-small" data-action="record-payment" data-id="${debt.id}" title="Record a payment with an optional receipt">Record payment</button>` : "";
-    const markPaidButton = open && mayEdit ? `<button class="btn btn-soft btn-small" data-action="pay-debt" data-id="${debt.id}">Mark paid</button>` : "";
+    const record = open && mayCreate ? `<button class="btn btn-primary btn-small" data-action="record-payment" data-id="${debt.id}" title="Record a payment with its reference and proof">Record payment</button>` : "";
     const edit = mayEdit ? `<button class="btn btn-small" data-action="edit-debt" data-id="${debt.id}">Edit</button>` : "";
     const remove = mayDelete ? `<button class="btn btn-danger-ghost btn-small" data-action="delete-debt" data-id="${debt.id}" title="Delete debt">Delete installment</button>` : "";
-    return `<tr data-searchable class="${debtStateValue === "overdue" ? "row-overdue" : ""}"><td><span class="cell-main">${escapeHtml(debt.client_name)}</span><span class="cell-sub">${escapeHtml(debt.project_name || "")}${debt.contract_number ? ` · ${escapeHtml(debt.contract_number)}` : ""}</span></td><td>${debtBadge(debt)}</td><td>${formatDate(debt.due_date)}</td><td class="amount ${debtStateValue === "overdue" ? "danger-text" : ""}">${money(debt.amount)}</td><td class="cell-note">${debt.status === "paid" ? "—" : escapeHtml(debt.notes || "")}</td><td><div class="row-actions">${record}${rowMenu([markPaidButton, viewContract, edit, remove])}</div></td></tr>`;
+    return `<tr data-searchable class="${debtStateValue === "overdue" ? "row-overdue" : ""}"><td><span class="cell-main">${escapeHtml(debt.client_name)}</span><span class="cell-sub">${escapeHtml(debt.project_name || "")}${debt.contract_number ? ` · ${escapeHtml(debt.contract_number)}` : ""}</span></td><td>${debtBadge(debt)}</td><td>${formatDate(debt.due_date)}</td><td class="amount ${debtStateValue === "overdue" ? "danger-text" : ""}">${money(debt.amount)}</td><td class="cell-note">${debt.status === "paid" ? "—" : escapeHtml(debt.notes || "")}</td><td><div class="row-actions">${record}${rowMenu([viewContract, edit, remove])}</div></td></tr>`;
   }).join("");
   const pendingSummary = summary.debts_pending || { count: 0, total: 0 };
   const overdueSummary = summary.debts_overdue || { count: 0, total: 0 };
@@ -3320,19 +3356,32 @@ function renderReminders() {
 function renderPaymentsTable(mayEdit = can("edit"), mayDelete = can("delete")) {
   const mayApprove = can("validate_finance") && canSeeFinancial();
   const payments = [...(state.payments || [])].sort((a, b) => String(b.paid_at).localeCompare(String(a.paid_at)));
-  if (!payments.length) return `<div class="panel">${emptyState("No payments recorded", "Use “Record payment” on an installment to log income with an optional receipt.", { iconName: "money", compact: true })}</div>`;
+  if (!payments.length) return `<div class="panel">${emptyState("No payments recorded", "Use “Record payment” on an installment to log money received, with its transaction reference and proof.", { iconName: "money", compact: true })}</div>`;
   const rows = payments.map((payment) => {
-    const remove = mayDelete ? `<button class="btn btn-danger-ghost btn-small" data-action="delete-payment" data-id="${payment.id}" title="Delete payment">Delete payment</button>` : "";
-    const edit = mayEdit ? `<button class="btn btn-small" data-action="edit-payment" data-id="${payment.id}" title="Correct this payment">Edit payment</button>` : "";
+    // Only a pending payment (not yet counted) is corrected or deleted; an
+    // approved one is reversed with a reason so the ledger keeps it.
+    const pending = payment.status === "pending";
+    const mayDeleteThis = mayDelete && pending;
+    const remove = mayDeleteThis ? `<button class="btn btn-danger-ghost btn-small" data-action="delete-payment" data-id="${payment.id}" title="Delete payment">Delete payment</button>` : "";
+    const edit = mayEdit && pending ? `<button class="btn btn-small" data-action="edit-payment" data-id="${payment.id}" title="Correct this payment">Edit payment</button>` : "";
+    const reverse = mayApprove && payment.status === "approved" ? `<button class="btn btn-danger-ghost btn-small" data-action="reverse-payment" data-id="${payment.id}" title="Reverse this approved payment">Reverse payment</button>` : "";
     // Finance approves a pending payment; the server re-checks authority, scope
     // and that the approver is not the person who recorded it.
-    const approve = mayApprove && payment.status === "pending" && Number(payment.created_by) !== Number(state.organization.me?.user?.id)
+    // While MKUYU has a single Finance person the server lets them approve their
+    // own entries (marked self-approved); otherwise a second person must.
+    const ownEntry = Number(payment.created_by) === Number(state.organization.me?.user?.id);
+    const approve = mayApprove && payment.status === "pending" && (!ownEntry || state.organization.me?.sole_finance_approver)
       ? `<button class="btn btn-primary btn-small" data-action="approve-payment" data-id="${payment.id}">Approve Payment</button>`
       : "";
     const receipt = payment.has_receipt
       ? `<button class="btn btn-small" data-action="open-receipt" data-id="${payment.id}">${icon("receipt")}Receipt</button>`
-      : `<span class="muted cell-plain">No receipt</span>`;
-    return `<tr data-searchable><td><span class="cell-main">${escapeHtml(payment.client_name)}</span><span class="cell-sub">${escapeHtml(payment.project_name || "")}</span></td><td>${formatDate(payment.paid_at, String(payment.paid_at).length > 10)}</td><td>${badge(humanize(payment.method), "neutral")}</td><td class="amount amount-positive">${money(payment.amount)}</td><td><span class="mono">${escapeHtml(payment.reference || "—")}</span></td><td>${payment.status === "pending" ? badge("Pending approval", "pending") : `${badge("Approved", "approved")}${payment.approved_by_name ? `<span class="cell-sub">by ${escapeHtml(payment.approved_by_name)}</span>` : ""}`}</td><td><div class="row-actions">${approve}${receipt}${rowMenu([edit, remove])}</div></td></tr>`;
+      : payment.evidence_text ? `<span class="muted cell-plain" title="${escapeHtml(payment.evidence_text)}">Message attached</span>` : `<span class="muted cell-plain">No proof</span>`;
+    const approval = payment.status === "pending"
+      ? badge("Pending approval", "pending")
+      : payment.status === "reversed"
+        ? `${badge("Reversed", "rejected")}<span class="cell-sub">${payment.reversed_by_name ? `by ${escapeHtml(payment.reversed_by_name)}` : ""}${payment.reversal_reason ? ` · ${escapeHtml(payment.reversal_reason)}` : ""}</span>`
+        : `${badge("Approved", "approved")}${payment.approved_by_name ? `<span class="cell-sub">by ${escapeHtml(payment.approved_by_name)}${payment.self_approved ? " · self-approved (single Finance)" : ""}</span>` : ""}`;
+    return `<tr data-searchable><td><span class="cell-main">${escapeHtml(payment.client_name)}</span><span class="cell-sub">${escapeHtml(payment.project_name || "")}</span></td><td>${formatDate(payment.paid_at, String(payment.paid_at).length > 10)}</td><td>${badge(humanize(payment.method), "neutral")}</td><td class="amount amount-positive">${money(payment.amount)}</td><td><span class="mono">${escapeHtml(payment.reference || "—")}</span></td><td>${approval}</td><td><div class="row-actions">${approve}${receipt}${rowMenu([edit, reverse, remove])}</div></td></tr>`;
   }).join("");
   return `<div class="table-wrap"><table class="data-table"><thead><tr><th>Client / project</th><th>Paid on</th><th>Method</th><th>Amount</th><th>Reference</th><th>Approval</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>${pager("payments")}`;
 }
@@ -4603,7 +4652,7 @@ function openModal(type, record = null) {
     // confirms it again (the server resets the approval).
     const editing = Boolean(record?.id);
     title = editing ? "Edit payment" : "Record payment";
-    subtitle = editing ? "Correct the payment details. It returns to pending approval." : "Log money received; attaching a receipt is optional.";
+    subtitle = editing ? "Correct the payment details. It returns to pending approval." : "Log money received with its transaction reference and proof. It counts once a second Finance person approves it.";
     submitLabel = editing ? "Save payment" : "Record payment";
     const methods = (state.reportPaymentMethods || []).length
       ? state.reportPaymentMethods
@@ -4611,21 +4660,22 @@ function openModal(type, record = null) {
     const prefill = record || {};
     body = `<div class="form-grid">
       ${formSection("Payment")}
-      <div class="field full"><label for="field-payment-contract">Contract</label><select id="field-payment-contract" name="contract_id" required><option value="">Select contract</option>${contractOptions(prefill.contract_id)}</select></div>
+      <div class="field full"><label for="field-payment-contract">Contract</label><select id="field-payment-contract" name="contract_id" required><option value="">Select contract</option>${payableContractOptions(prefill.contract_id)}</select><div class="field-help">Only approved or active contracts take payments.</div></div>
       <div class="field"><label for="field-payment-debt">Installment (optional)</label><select id="field-payment-debt" name="debt_id"><option value="">None — general payment</option>${(state.debts || []).filter((debt) => !prefill.contract_id || String(debt.contract_id) === String(prefill.contract_id)).map((debt) => `<option value="${debt.id}" ${String(debt.id) === String(prefill.debt_id || "") ? "selected" : ""}>${escapeHtml(debt.client_name)} · ${money(debt.amount)} · ${formatDate(debt.due_date)}</option>`).join("")}</select></div>
       <div class="field"><label for="field-payment-amount">Amount</label><input id="field-payment-amount" name="amount" type="number" min="0" step="0.01" required value="${escapeHtml(prefill.amount ?? "")}" placeholder="0"></div>
       <div class="field"><label for="field-payment-date">Paid at</label><input id="field-payment-date" name="paid_at" type="date" required value="${escapeHtml(String(prefill.paid_at || today()).slice(0, 10))}"></div>
       <div class="field"><label for="field-payment-method">Method</label><select id="field-payment-method" name="method">${methods.map((m) => `<option value="${escapeHtml(m.value)}"${prefill.method === m.value ? " selected" : ""}>${escapeHtml(m.label)}</option>`).join("")}</select></div>
-      <div class="field"><label for="field-payment-reference">Reference</label><input id="field-payment-reference" name="reference" maxlength="120" value="${escapeHtml(prefill.reference || "")}" placeholder="Receipt no. / transaction ID"></div>
-      ${formSection("Receipt & notes")}
-      <div class="field full"><label for="field-payment-receipt">${editing && prefill.has_receipt ? "Replace receipt (optional)" : "Receipt (optional)"}</label><input id="field-payment-receipt" name="file" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.png,.jpg,.jpeg,.gif,.webp,.bmp"><div class="field-help">PDF or image of the receipt. You can attach it later too.</div></div>
+      <div class="field"><label for="field-payment-reference">Transaction reference</label><input id="field-payment-reference" name="reference" maxlength="120" required value="${escapeHtml(prefill.reference || "")}" placeholder="e.g. QJ47XK2P9A or bank ref."><div class="field-help">Required. A reference can be used only once.</div></div>
+      ${formSection("Proof", "Attach the receipt or paste the message. At least one is required.")}
+      <div class="field full"><label for="field-payment-receipt">${editing && prefill.has_receipt ? "Replace receipt file" : "Receipt file"}</label><input id="field-payment-receipt" name="file" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.png,.jpg,.jpeg,.gif,.webp,.bmp"><div class="field-help">Screenshot, photo or PDF of the receipt or bank slip.</div></div>
+      <div class="field full"><label for="field-payment-evidence">Or paste the message</label><textarea id="field-payment-evidence" name="evidence_text" maxlength="4000" rows="3" placeholder="Paste the M-Pesa, Mixx, Airtel or bank SMS here">${escapeHtml(prefill.evidence_text || "")}</textarea></div>
       <div class="field full"><label for="field-payment-notes">Notes</label><textarea id="field-payment-notes" name="notes" maxlength="2000" placeholder="Purpose or follow-up note">${escapeHtml(prefill.notes || "")}</textarea></div>
     </div>`;
   }
   if (type === "debt") {
     title = record ? "Edit debt" : "New debt";
     subtitle = record ? "Update this client balance." : "Record an amount due from a contract.";
-    body = `<div class="form-grid"><div class="field full"><label for="field-contract">Contract</label><select id="field-contract" name="contract_id" required><option value="">Select contract</option>${contractOptions(record?.contract_id)}</select></div><div class="field"><label for="field-debt-client">Client name</label><input id="field-debt-client" name="client_name" required maxlength="120" value="${escapeHtml(record?.client_name || "")}" placeholder="Client full name"></div><div class="field"><label for="field-amount">Amount due</label><input id="field-amount" name="amount" type="number" min="0" step="0.01" required value="${escapeHtml(record?.amount ?? "")}" placeholder="0"></div><div class="field"><label for="field-due">Due date</label><input id="field-due" name="due_date" type="date" value="${escapeHtml(record?.due_date || "")}"></div><div class="field"><label for="field-debt-status">Status</label><select id="field-debt-status" name="status"><option value="pending" ${record?.status === "pending" ? "selected" : ""}>Pending</option><option value="overdue" ${record?.status === "overdue" ? "selected" : ""}>Overdue</option><option value="paid" ${record?.status === "paid" ? "selected" : ""}>Paid</option></select></div><div class="field full"><label for="field-debt-notes">Notes</label><textarea id="field-debt-notes" name="notes" placeholder="Installment or follow-up note">${escapeHtml(record?.notes || "")}</textarea></div></div>`;
+    body = `<div class="form-grid"><div class="field full"><label for="field-contract">Contract</label><select id="field-contract" name="contract_id" required><option value="">Select contract</option>${contractOptions(record?.contract_id)}</select></div><div class="field"><label for="field-debt-client">Client name</label><input id="field-debt-client" name="client_name" required maxlength="120" value="${escapeHtml(record?.client_name || "")}" placeholder="Client full name"></div><div class="field"><label for="field-amount">Amount due</label><input id="field-amount" name="amount" type="number" min="0" step="0.01" required value="${escapeHtml(record?.amount ?? "")}" placeholder="0"></div><div class="field"><label for="field-due">Due date</label><input id="field-due" name="due_date" type="date" value="${escapeHtml(record?.due_date || "")}"></div><div class="field"><span class="muted">Status</span><div>${record ? debtBadge(record) : badge("Pending", "pending")}</div><div class="field-help">Set by approved payments, never by hand.</div></div><div class="field full"><label for="field-debt-notes">Notes</label><textarea id="field-debt-notes" name="notes" placeholder="Installment or follow-up note">${escapeHtml(record?.notes || "")}</textarea></div></div>`;
   }
   if (type === "property") {
     title = record ? "Edit property" : "New property";
@@ -4980,6 +5030,12 @@ async function handleFormSubmit(event) {
       data.amount = numberValue(data.amount);
       const receiptFile = form.querySelector('input[type="file"][name="file"]')?.files?.[0] || null;
       delete data.file;
+      data.reference = String(data.reference || "").trim();
+      data.evidence_text = String(data.evidence_text || "").trim();
+      if (!data.reference) { showToast("Enter the transaction reference from the receipt or message."); return; }
+      const existing = id ? (state.payments || []).find((entry) => String(entry.id) === String(id)) : null;
+      if (!receiptFile && !data.evidence_text && !existing?.has_receipt) { showToast("Attach the receipt or paste the payment message as proof."); return; }
+      if (!data.evidence_text) delete data.evidence_text;
       if (id) {
         // Correcting a recorded payment; a new receipt replaces the old one.
         await api(`/payments/${id}`, { method: "PUT", body: JSON.stringify(data) });
@@ -4994,14 +5050,14 @@ async function handleFormSubmit(event) {
         // Multipart path stores the receipt alongside the payment record.
         const payload = new FormData();
         payload.append("file", receiptFile);
-        ["contract_id", "debt_id", "amount", "paid_at", "method", "reference", "notes"].forEach((key) => {
+        ["contract_id", "debt_id", "amount", "paid_at", "method", "reference", "notes", "evidence_text"].forEach((key) => {
           if (data[key] !== undefined && data[key] !== null && data[key] !== "") payload.append(key, data[key]);
         });
         await api("/payments/upload", { method: "POST", form: true, body: payload });
-        showToast("Payment recorded with receipt.");
+        showToast("Payment recorded. It counts once another Finance person approves it.");
       } else {
         await api("/payments", { method: "POST", body: JSON.stringify(data) });
-        showToast("Payment recorded.");
+        showToast("Payment recorded. It counts once another Finance person approves it.");
       }
     } else if (type === "debt") {
       data.contract_id = Number(data.contract_id);
@@ -5174,12 +5230,24 @@ async function deleteRecord(type, id) {
   } catch (error) { showToast(error.message || "Unable to delete record."); }
 }
 
-async function markPaid(id) {
+async function reversePayment(id) {
+  state.transitionNotes = "";
+  const confirmed = await confirmDialog({
+    title: "Reverse payment",
+    message: "The payment stays in the ledger marked Reversed and stops counting towards the installment, the balance and income.",
+    confirmLabel: "Reverse payment",
+    tone: "danger",
+    noteLabel: "Reason (required)",
+  });
+  if (!confirmed) return;
+  const reason = String(state.transitionNotes || "").trim();
+  if (!reason) { showToast("A reason is required to reverse a payment."); return; }
   try {
-    await api(`/debts/${id}/pay`, { method: "POST", body: "{}" });
-    showToast("Debt marked as paid.");
+    await api(`/payments/${id}/reverse`, { method: "POST", body: JSON.stringify({ reason }) });
+    state.transitionNotes = "";
+    showToast("Payment reversed.");
     await refresh();
-  } catch (error) { showToast(error.message || "Unable to update debt."); }
+  } catch (error) { showToast(error.message || "Unable to reverse this payment."); }
 }
 
 async function dismissReminder(id) {
@@ -5514,7 +5582,7 @@ function viewContract(contractId) {
   const head = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(contract.contract_number || `Contract #${contract.id}`)}</h2><p class="modal-sub">${escapeHtml(contract.client_name || "")}${contract.project_name ? ` · ${escapeHtml(contract.project_name)}` : ""}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>`;
   modal.innerHTML = `${head}
     <div class="form-grid">
-      <div class="field"><span class="muted">Status</span><div>${contractStatusBadge(contract.status)}</div></div>
+      <div class="field"><span class="muted">Status</span><div>${contractStatusBadge(contract)}${contractPositionNote(contract)}</div></div>
       <div class="field"><span class="muted">Contract type</span><div>${contract.deal_type ? badge(dealTypeLabel(contract.deal_type), "open") : "Not recorded"}</div></div>
       <div class="field"><span class="muted">Agreement</span><div>${badge(contract.contract_type)}</div></div>
       <div class="field"><span class="muted">Start</span><div>${formatDate(contract.start_date)}</div></div>
@@ -5616,7 +5684,7 @@ document.addEventListener("click", async (event) => {
   if (action === "new-debt") openModal("debt");
   if (action === "edit-debt") openModalFor("debts", id, "debt");
   if (action === "delete-debt") deleteRecord("debt", id);
-  if (action === "pay-debt") markPaid(id);
+  if (action === "reverse-payment") reversePayment(id);
   if (action === "generate-schedule") openModalFor("contracts", id, "schedule");
   if (action === "contract-transition") runContractTransition(id, target.dataset.transition);
   if (action === "contract-history") showContractHistory(id);

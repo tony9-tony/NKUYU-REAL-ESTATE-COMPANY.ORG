@@ -63,6 +63,8 @@ import {
   CREATABLE_CONTRACT_STATUSES,
   availableActions,
   canTransition,
+  contractPosition,
+  transitionBlockedReason,
 } from "../contracts/workflow.js";
 import {
   DEFAULT_CONTRACT_TEMPLATE,
@@ -362,7 +364,10 @@ async function validateDebt(body, current = {}) {
     client_name: requiredText(body.client_name ?? current.client_name, "client_name"),
     amount: nonNegativeNumber(body.amount ?? current.amount, "amount"),
     due_date: optionalDate(body.due_date ?? current.due_date, "due_date"),
-    status: enumValue(body.status ?? current.status, debtStatuses, "pending", "status"),
+    // An installment's status is never typed in: it follows the approved
+    // payments against it (see Payment.syncInstallment). A `status` in the body
+    // is ignored, so nobody can mark money as received without recording it.
+    status: current.id ? current.status : "pending",
     notes: optionalText(body.notes ?? current.notes, "notes"),
   };
 }
@@ -545,12 +550,29 @@ function paymentDate(value) {
   return optionalDateTime(value, "paid_at");
 }
 
+// Money is received only on a contract that has been approved: from the MD's
+// approval (deposit at signing) through the active life of the contract. A
+// draft, a contract under review, or a rejected/cancelled one takes no money.
+export const PAYABLE_CONTRACT_STATUSES = new Set(["approved", "customer_pending", "active"]);
+
 async function validatePayment(body, current = {}) {
   const contractId = parseId(body.contract_id ?? current.contract_id, "contract_id");
   // The contract and installment are read through the caller's own scope
   // (organization + role/department visibility), so a payment can never be
   // written against - or reveal the client of - a contract they cannot see.
   const contract = requireRecord(await Contract.get(contractId), "Contract");
+  if (!PAYABLE_CONTRACT_STATUSES.has(contract.status)) {
+    throw new HttpError(409, `payments can only be recorded on an approved or active contract (this one is ${String(contract.status).replace(/_/g, " ")})`);
+  }
+  // The transaction reference (bank, M-Pesa, Mixx, Airtel...) is what ties the
+  // money to one real transfer. It is required, and one reference may back only
+  // one live payment, so the same SMS or screenshot cannot be recorded twice.
+  const reference = optionalText(body.reference ?? current.reference, "reference", 160)?.trim() || null;
+  if (!reference) throw new HttpError(400, "reference is required: enter the transaction or receipt number from the bank or mobile-money message");
+  const clash = await Payment.findByReference(reference, current.id || null);
+  if (clash) {
+    throw new HttpError(409, `reference ${reference} is already used by payment #${clash.id} (${clash.client_name}, ${clash.status}); the same transaction cannot be recorded twice`);
+  }
   const debtId = parseId(body.debt_id ?? current.debt_id, "debt_id", true);
   if (debtId) {
     const debt = requireRecord(await Debt.get(debtId), "Installment");
@@ -565,9 +587,18 @@ async function validatePayment(body, current = {}) {
     amount: positiveNumber(body.amount ?? current.amount, "amount"),
     paid_at: paidAt,
     method: enumValue(body.method ?? current.method, paymentMethods, "cash", "method"),
-    reference: optionalText(body.reference ?? current.reference, "reference", 160),
+    reference,
     notes: optionalText(body.notes ?? current.notes, "notes"),
+    // The proof as text: a pasted SMS or a short description of the slip. A
+    // receipt file is the other kind of proof; one of the two is required
+    // before the payment can be approved.
+    evidence_text: optionalText(body.evidence_text ?? current.evidence_text, "evidence_text", 4000),
   };
+}
+
+/** A payment has proof when it carries a receipt file or the pasted message. */
+function paymentHasEvidence(payment) {
+  return Boolean(payment?.receipt_document_id || payment?.receipt_stored_name || String(payment?.evidence_text || "").trim());
 }
 
 function reportTypeId(value) {
@@ -617,8 +648,9 @@ function contractResponse(contract, req) {
   return {
     ...contract,
     available_actions: names
-      .filter((name) => canTransition(contract.status, name))
+      .filter((name) => canTransition(contract.status, name) && !transitionBlockedReason(contract, name))
       .map((name) => ({ action: name, label: CONTRACT_ACTIONS[name].label, to: CONTRACT_ACTIONS[name].to })),
+    position: contractPosition(contract),
   };
 }
 
@@ -937,6 +969,11 @@ router.put("/projects/:id", route(async (req, res) => {
 router.delete("/projects/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   requireRecord(await Project.get(id), "Project");
+  // A project's contracts (and their installments and payments) would be
+  // deleted with it, so a project with recorded money is never deleted.
+  if (await queryOne("SELECT 1 AS ok FROM payments p JOIN contracts c ON c.id=p.contract_id WHERE c.project_id=$1 LIMIT 1", [id])) {
+    throw new HttpError(409, "this project has contracts with recorded payments and cannot be deleted");
+  }
   await Project.remove(id);
   res.json({ ok: true });
 }));
@@ -946,13 +983,16 @@ router.get("/contracts", route(async (req, res) => {
   const projectId = req.query.project_id === undefined ? null : parseId(req.query.project_id, "project_id");
   const type = req.query.type || null;
   if (type && !contractTypes.has(type)) throw new HttpError(400, "type is invalid");
-  if (!paginationRequested(req.query)) return res.json(await Contract.all(projectId, type));
+  // Every row says where the contract is right now (Under Sales / Legal /
+  // Finance / MD review ...), in the bare list and in a page alike.
+  const withPosition = (rows) => rows.map((contract) => ({ ...contract, position: contractPosition(contract) }));
+  if (!paginationRequested(req.query)) return res.json(withPosition(await Contract.all(projectId, type)));
   const paged = await paginatedList({ build: () => Contract.paged(projectId, type, searchTerm(req.query.search)), ...parsePagination(req.query) });
   // The rows are returned exactly as `Contract.all` returns them - no
   // `contractResponse` enrichment. The default list has never applied it (only
   // the single-record route does), so a page must not quietly grow an extra
   // `available_actions` field the unpaged caller does not receive.
-  res.json({ data: paged.rows, pagination: paged.pagination });
+  res.json({ data: withPosition(paged.rows), pagination: paged.pagination });
 }));
 router.get("/contracts/:id", route(async (req, res) => res.json(contractResponse(requireRecord(await Contract.get(parseId(req.params.id)), "Contract"), req))));
 
@@ -984,6 +1024,9 @@ router.post("/contracts/:id/transition", route(async (req, res) => {
   if (!canTransition(contract.status, name)) {
     throw new HttpError(409, `a ${contract.status.replace(/_/g, " ")} contract cannot be moved to ${action.to.replace(/_/g, " ")}`);
   }
+  // Legal -> Finance -> MD: the business preconditions the status cannot express.
+  const blocked = transitionBlockedReason(contract, name);
+  if (blocked) throw new HttpError(409, blocked);
   // Legal must sign off before the customer is ever asked to.
   if (name === "send_to_customer" && contract.requires_management_approval && contract.status !== "approved") {
     throw new HttpError(409, "this contract needs management approval before it goes to the customer");
@@ -1500,6 +1543,12 @@ router.delete("/contracts/:id", route(async (req, res) => {
   const contract = requireRecord(await Contract.get(id), "Contract");
   const refusal = contractDeleteRefusal(req.access, contract);
   if (refusal) throw new HttpError(403, refusal);
+  // Deleting a contract would cascade to its installments and payments. Once
+  // money has been recorded against it, the financial history must survive:
+  // such a contract is cancelled, never deleted.
+  if (await queryOne("SELECT 1 AS ok FROM payments WHERE contract_id=$1 LIMIT 1", [id])) {
+    throw new HttpError(409, "this contract has recorded payments and cannot be deleted; cancel it instead so its financial history is kept");
+  }
   await Contract.remove(id);
   await audit(req, "deleted", "contract", id, { contract_number: contract.contract_number });
   res.json({ ok: true });
@@ -1562,7 +1611,8 @@ router.post("/debts", route(async (req, res) => {
   const data = await validateDebt(req.body || {});
   const result = await Debt.create(data);
   const id = result.id;
-  await syncDebtReminder(id, data.due_date, data.status || "pending");
+  await Payment.syncInstallment(id);
+  await syncDebtReminderFromDb(id);
   res.status(201).json(await Debt.get(id));
 }));
 router.put("/debts/:id", route(async (req, res) => {
@@ -1570,19 +1620,22 @@ router.put("/debts/:id", route(async (req, res) => {
   const current = requireRecord(await Debt.get(id), "Debt");
   const data = await validateDebt(req.body || {}, current);
   await Debt.update(id, data);
-  await syncDebtReminder(id, data.due_date, data.status || "pending");
+  // A changed amount or due date can change the derived status.
+  await Payment.syncInstallment(id);
+  await syncDebtReminderFromDb(id);
   res.json(await Debt.get(id));
 }));
-router.post("/debts/:id/pay", route(async (req, res) => {
-  const id = parseId(req.params.id);
-  const current = requireRecord(await Debt.get(id), "Debt");
-  await Debt.markPaid(id);
-  await syncDebtReminder(id, current.due_date, "paid");
-  res.json(await Debt.get(id));
+// "Mark paid" without money is gone: an installment is paid only by approved
+// payments. The route answers with a clear instruction instead of a 404.
+router.post("/debts/:id/pay", route(async () => {
+  throw new HttpError(410, "an installment cannot be marked paid by hand; record the payment with its reference and proof, and it is settled once Finance approves it");
 }));
 router.delete("/debts/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   requireRecord(await Debt.get(id), "Debt");
+  if (await queryOne("SELECT 1 AS ok FROM payments WHERE debt_id=$1 LIMIT 1", [id])) {
+    throw new HttpError(409, "this installment has recorded payments and cannot be deleted");
+  }
   await Debt.remove(id);
   res.json({ ok: true });
 }));
@@ -1602,6 +1655,9 @@ router.get("/payments", route(async (req, res) => {
 router.get("/payments/:id", route(async (req, res) => res.json(paymentResponse(requireRecord(await Payment.get(parseId(req.params.id)), "Payment")))));
 router.post("/payments", route(async (req, res) => {
   const data = await validatePayment(req.body || {});
+  if (!data.evidence_text) {
+    throw new HttpError(400, "proof is required: paste the bank or mobile-money message, or record the payment with its receipt file");
+  }
   if (data.debt_id) requireRecord(await Debt.get(data.debt_id), "Debt");
   const result = await Payment.create(data);
   await Payment.syncInstallment(data.debt_id);
@@ -1614,6 +1670,9 @@ router.post("/payments/upload", uploadDocumentFile, route(async (req, res) => {
   try {
     const data = await validatePayment(req.body || {});
     if (data.debt_id) requireRecord(await Debt.get(data.debt_id), "Debt");
+    if (!req.file && !data.evidence_text) {
+      throw new HttpError(400, "proof is required: attach the receipt or paste the bank or mobile-money message");
+    }
     const fileInfo = req.file ? validateUploadedFile(req.file, documentExtensions) : null;
     const contract = fileInfo ? requireRecord(await Contract.get(data.contract_id), "Contract") : null;
     const orgId = await organizationId();
@@ -1621,8 +1680,8 @@ router.post("/payments/upload", uploadDocumentFile, route(async (req, res) => {
       const payment = await client.query(
         // Ownership is recorded like any other payment (who recorded it matters
         // for approval: nobody approves their own payment).
-        "INSERT INTO payments (organization_id,contract_id,debt_id,client_name,amount,paid_at,method,reference,notes,owner_id,created_by,department_id,visibility) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id",
-        [orgId, data.contract_id, data.debt_id || null, data.client_name, data.amount, data.paid_at, data.method || "cash", data.reference || null, data.notes || null, ...Object.values((({ owner_id, created_by, department_id, visibility }) => ({ owner_id, created_by, department_id, visibility }))(ownershipFields(req.access)))],
+        "INSERT INTO payments (organization_id,contract_id,debt_id,client_name,amount,paid_at,method,reference,notes,evidence_text,owner_id,created_by,department_id,visibility) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id",
+        [orgId, data.contract_id, data.debt_id || null, data.client_name, data.amount, data.paid_at, data.method || "cash", data.reference || null, data.notes || null, data.evidence_text || null, ...Object.values((({ owner_id, created_by, department_id, visibility }) => ({ owner_id, created_by, department_id, visibility }))(ownershipFields(req.access)))],
       );
       paymentId = payment.rows[0].id;
       if (fileInfo) {
@@ -1644,6 +1703,11 @@ router.post("/payments/upload", uploadDocumentFile, route(async (req, res) => {
 router.put("/payments/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   const current = requireRecord(await Payment.get(id), "Payment");
+  if (current.status !== "pending") {
+    throw new HttpError(409, current.status === "approved"
+      ? "an approved payment cannot be edited; reverse it with a reason and record the correct payment"
+      : "a reversed payment cannot be edited");
+  }
   const data = await validatePayment(req.body || {}, current);
   if (data.debt_id && data.debt_id !== current.debt_id) requireRecord(await Debt.get(data.debt_id), "Debt");
   await Payment.update(id, data);
@@ -1661,10 +1725,42 @@ router.post("/payments/:id/approve", route(async (req, res) => {
   const id = parseId(req.params.id);
   const payment = requireRecord(await Payment.get(id), "Payment");
   if (payment.status === "approved") throw new HttpError(409, "this payment is already approved");
-  if (Number(payment.created_by) === Number(req.user.id)) throw new HttpError(403, "a payment must be approved by someone other than the person who recorded it");
-  const result = await Payment.approve(id, req.user.id);
+  if (payment.status === "reversed") throw new HttpError(409, "a reversed payment cannot be approved");
+  // Two-person rule: a second Finance person confirms the money. While MKUYU has
+  // only ONE Finance person, that person may approve their own entry; the
+  // payment is marked self-approved for the MD to review. The moment a second
+  // Finance person exists, the two-person rule applies again by itself.
+  const selfApproved = Number(payment.created_by) === Number(req.user.id);
+  if (selfApproved && await Payment.otherApprovers(req.user.id) > 0) {
+    throw new HttpError(403, "a payment must be approved by someone other than the person who recorded it");
+  }
+  if (!paymentHasEvidence(payment)) throw new HttpError(409, "attach the receipt or paste the bank / mobile-money message before approving this payment");
+  const result = await Payment.approve(id, req.user.id, { selfApproved });
   if (!result.rowCount) throw new HttpError(409, "this payment could not be approved");
-  await audit(req, "payment_approved", "payment", id, { amount: payment.amount, contract_id: payment.contract_id });
+  // Approval is the moment the money counts: the installment settles now.
+  await resyncInstallmentState([payment.debt_id]);
+  await audit(req, "payment_approved", "payment", id, { amount: payment.amount, contract_id: payment.contract_id, reference: payment.reference, self_approved: selfApproved });
+  res.json(paymentResponse(await Payment.get(id)));
+}));
+
+// Reversal: the correction for an approved payment that was wrong (bounced,
+// recorded on the wrong contract, wrong amount). The payment stays in the
+// ledger with who reversed it and why; it simply stops counting.
+router.post("/payments/:id/reverse", route(async (req, res) => {
+  if (!canPermission(req.access, "validate_finance") || !canPermission(req.access, "view_financial")) {
+    throw new HttpError(403, "only Finance can reverse payments");
+  }
+  const id = parseId(req.params.id);
+  const payment = requireRecord(await Payment.get(id), "Payment");
+  if (payment.status !== "approved") {
+    throw new HttpError(409, payment.status === "reversed" ? "this payment is already reversed" : "only an approved payment is reversed; a pending one can be corrected or deleted");
+  }
+  const reason = optionalText(req.body?.reason, "reason", 500);
+  if (!reason) throw new HttpError(400, "reason is required to reverse a payment");
+  const result = await Payment.reverse(id, req.user.id, reason);
+  if (!result.rowCount) throw new HttpError(409, "this payment could not be reversed");
+  await resyncInstallmentState([payment.debt_id]);
+  await audit(req, "payment_reversed", "payment", id, { amount: payment.amount, contract_id: payment.contract_id, reference: payment.reference, reason });
   res.json(paymentResponse(await Payment.get(id)));
 }));
 
@@ -1706,9 +1802,16 @@ router.get("/payments/:id/receipt", route(async (req, res) => {
 router.delete("/payments/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   const payment = requireRecord(await Payment.get(id), "Payment");
+  // Only a pending payment (never counted) may be deleted. Approved money is
+  // reversed instead, so the ledger keeps every transaction that was confirmed.
+  if (payment.status !== "pending") {
+    throw new HttpError(409, payment.status === "approved"
+      ? "an approved payment cannot be deleted; reverse it with a reason instead"
+      : "a reversed payment stays in the ledger and cannot be deleted");
+  }
   let document = null;
   await withTransaction(async (client) => {
-    await client.query("DELETE FROM payments WHERE id=$1", [id]);
+    await client.query("DELETE FROM payments WHERE id=$1 AND status='pending'", [id]);
     if (payment.receipt_document_id) {
       const result = await client.query("DELETE FROM documents WHERE id=$1 RETURNING *", [payment.receipt_document_id]);
       document = result.rows[0] || null;
