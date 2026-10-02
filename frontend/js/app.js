@@ -5415,10 +5415,9 @@ async function resetPassword(userId) {
     if (state.organization.users) user.password_reset_pending = true;
     render();
     infoDialog("Password reset", `Tell ${user.display_name} to do this within ${result.hours || 24} hours:`, [
-      "Open the MKUYU sign-in page.",
+      "Open the MKUYU sign-in page and click \"Forgot password?\".",
       `Type the work email ${result.email || user.email}.`,
-      "Click \"Forgot password?\".",
-      "Enter the new password twice and save it.",
+      "Type a new password, type it again, and press \"Save new password\".",
       "Sign in with the new password.",
     ]);
   } catch (error) {
@@ -6461,11 +6460,12 @@ function showResetForm(email) {
   document.querySelector(".auth-switch")?.setAttribute("hidden", "");
   resetForm.hidden = false;
   resetForm.reset();
-  document.getElementById("reset-email").value = email;
+  const emailInput = document.getElementById("reset-email");
+  emailInput.value = email || "";
   resetMessage.hidden = true;
-  authTitle.textContent = "Set a new password";
-  authSubtitle.textContent = "Your administrator reset your password. Choose a new one.";
-  document.getElementById("reset-password").focus();
+  authTitle.textContent = "Forgot your password?";
+  authSubtitle.textContent = "Type your email and choose a new password. This works after your administrator has reset your password.";
+  (email ? document.getElementById("reset-password") : emailInput).focus();
 }
 
 function closeResetForm(message = "") {
@@ -6476,36 +6476,24 @@ function closeResetForm(message = "") {
   if (message) showAuthMessage(message, "info");
 }
 
+// One form: email, new password and confirm, then Save. The server checks that
+// the administrator has reset this account; if not, it says to contact them.
 if (authForgot) {
-  authForgot.addEventListener("click", async () => {
+  authForgot.addEventListener("click", () => {
     if (authPortal === "admin") {
       showAuthMessage("The administrator account changes its password from Staff → Change my password.", "info");
       return;
     }
-    const emailInput = document.getElementById("auth-email");
-    const email = String(emailInput.value || "").trim();
-    if (!email || !emailInput.checkValidity()) {
-      showAuthMessage("Type your work email above first, then click \"Forgot password?\".", "info");
-      emailInput.focus();
-      return;
-    }
-    authForgot.disabled = true;
-    try {
-      const answer = await api("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) });
-      if (answer.reset_ready) showResetForm(email);
-      else showAuthMessage("Contact your administrator to reset your password. When they have done it, come back and click \"Forgot password?\" again.", "info");
-    } catch (error) {
-      showAuthMessage(error.message || "Unable to check right now. Try again.");
-    } finally {
-      authForgot.disabled = false;
-    }
+    showResetForm(String(document.getElementById("auth-email").value || "").trim());
   });
 }
 
 resetForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
   const body = Object.fromEntries(new FormData(resetForm));
-  const show = (text) => { resetMessage.textContent = text; resetMessage.classList.remove("info"); resetMessage.hidden = false; };
+  const show = (text, tone = "error") => { resetMessage.textContent = text; resetMessage.classList.toggle("info", tone === "info"); resetMessage.hidden = false; };
+  body.email = String(body.email || "").trim();
+  if (!body.email || !document.getElementById("reset-email").checkValidity()) { show("Type your work email."); return; }
   if (String(body.new_password || "").length < 8) { show("The new password must have at least 8 characters."); return; }
   if (body.new_password !== body.confirm_password) { show("The two passwords do not match. Type them again."); return; }
   const submit = document.getElementById("reset-submit");
@@ -6518,12 +6506,15 @@ resetForm?.addEventListener("submit", async (event) => {
     document.getElementById("auth-password").value = "";
     document.getElementById("auth-password").focus();
   } catch (error) {
-    show(error.message || "Unable to save the new password.");
+    if (error.status === 403 || /no password reset/i.test(error.message || "")) show("Your administrator has not reset your password yet. Contact your administrator, then try again.", "info");
+    else show(error.message || "Unable to save the new password.");
   } finally {
     submit.disabled = false;
   }
 });
 document.getElementById("reset-back")?.addEventListener("click", () => closeResetForm());
+// A new attempt clears the previous answer, so an old message never sits under new input.
+resetForm?.addEventListener("input", () => { resetMessage.hidden = true; });
 
 document.querySelector('[data-action="logout"]')?.addEventListener("click", async () => {
   try {

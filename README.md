@@ -153,10 +153,10 @@ There is no bank/mobile-money API: Finance records every payment by hand, with p
 Staff do not reset their own password by e-mail. They contact the administrator:
 
 1. The administrator presses **Reset password** on the person's row (Staff page). The old password stops working at once and every session ends. The row shows "Password reset: waiting for them to choose a new one".
-2. The person opens the sign-in page, types their email and clicks **Forgot password?**. A form opens: *Enter your new password* and *Confirm your new password*.
+2. The person opens the sign-in page and clicks **Forgot password?**. One form opens: *Work email*, *Enter your new password* and *Confirm your new password*.
 3. They save it and sign in with the new password.
 
-Without a reset from the administrator, **Forgot password?** only says "Contact your administrator". A reset is open for 24 hours, works once, and both steps are written to the audit log (`password_reset_opened`, `password_set_after_reset`). Endpoints: `POST /org/users/:id/reset-password`, `POST /auth/forgot-password`, `POST /auth/reset-password`.
+Without a reset from the administrator, saving the form only says "Contact your administrator". A reset is open for 24 hours, works once, and both steps are written to the audit log (`password_reset_opened`, `password_set_after_reset`). Endpoints: `POST /org/users/:id/reset-password`, `POST /auth/forgot-password`, `POST /auth/reset-password`.
 
 ## Your work today
 
