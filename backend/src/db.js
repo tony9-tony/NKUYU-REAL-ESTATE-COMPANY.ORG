@@ -21,6 +21,8 @@ export const pool = new Pool({
   idleTimeoutMillis: 0,
   connectionTimeoutMillis: 10000,
   keepAlive: true,
+  // Load: one runaway query must not hold a connection (and the pool) forever.
+  statement_timeout: Number(process.env.DATABASE_STATEMENT_TIMEOUT_MS || 60000),
 });
 
 export function query(text, values = []) {

@@ -88,6 +88,29 @@ export function canTransitionTask(from, to) {
 }
 
 /**
+ * "Mark as done": the person who ASSIGNED the task closes it once the assignee
+ * has handed the work in. It approves (when not yet approved) and completes in
+ * one step, so the assigner is the approver of record. Guards:
+ *   - only the assigner, and only while they still hold assign_tasks;
+ *   - only after the assignee submitted (submitted / under_review / approved);
+ *   - a NAMED reviewer other than the assigner keeps the decision until approval;
+ *   - nobody approves their own submission;
+ *   - a customer request must go through Approve (it books the appointment and
+ *     registers the client), so its shortcut is available only once approved.
+ */
+export function markDoneAllowed(task, userId, canAssign) {
+  const me = Number(userId);
+  const status = normalizeTaskStatus(task?.status);
+  if (!canAssign || Number(task?.assigned_by) !== me) return false;
+  if (status === "approved") return true;
+  if (!["submitted", "under_review"].includes(status)) return false;
+  if (task?.request_id) return false;
+  const reviewer = task?.reviewer_id === null || task?.reviewer_id === undefined ? null : Number(task.reviewer_id);
+  if (reviewer !== null && reviewer !== me) return false;
+  return Number(task?.submitted_by) !== me;
+}
+
+/**
  * Backend-authorized actions for one task row and one caller.
  *
  * Returns plain action keys the UI may render as buttons. This is a display
@@ -107,6 +130,7 @@ export function taskActionsFor(task, userId, { canAssign, canReview } = {}) {
   if (iReview && status === "submitted") actions.push("begin_review");
   if (iReview && status === "under_review") actions.push("approve", "request_changes");
   if (mine && status === "approved") actions.push("complete");
+  if (markDoneAllowed(task, me, canAssign) && !actions.includes("complete")) actions.push("mark_done");
   if (canAssign && !["completed", "cancelled"].includes(status)) actions.push("cancel");
   return actions;
 }

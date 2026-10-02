@@ -207,6 +207,36 @@ function enterWorkspace(user) {
   bootstrap();
   // Changes made by anyone appear here without a refresh.
   startLive();
+  if (!isAdmin) showAppointmentReminders();
+}
+
+/**
+ * Morning appointment reminder (MD and Sales). The server decides who gets it
+ * and hands it out once per person per day, so a second login shows nothing.
+ * Its own overlay, so it never disturbs the shared modal.
+ */
+async function showAppointmentReminders() {
+  let reminders = [];
+  try { ({ reminders = [] } = await api("/org/appointment-reminders")); } catch (_) { return; }
+  if (!reminders.length) return;
+  const when = (days) => (days === 1 ? "Appointment is tomorrow" : `Appointment is in ${days} days`);
+  const items = reminders.map((apt) => `<li class="apt-reminder-item">
+      <strong>${escapeHtml(when(Number(apt.days_left)))}</strong>
+      <span>${escapeHtml(apt.title)}</span>
+      <span class="muted">${escapeHtml(apt.client_name || "")}${apt.property_name ? ` · ${escapeHtml(apt.property_name)}` : ""} · ${formatDateTime(apt.starts_at, true)}</span>
+    </li>`).join("");
+  document.getElementById("apt-reminder")?.remove();
+  const box = document.createElement("div");
+  box.id = "apt-reminder";
+  box.className = "apt-reminder-backdrop";
+  box.innerHTML = `<div class="apt-reminder" role="dialog" aria-modal="true" aria-labelledby="apt-reminder-title">
+      <div class="apt-reminder-head"><h2 id="apt-reminder-title">${icon("calendar")}Upcoming appointments</h2>
+        <button type="button" class="close-btn" data-close-reminder aria-label="Close">${closeIcon()}</button></div>
+      <ul class="apt-reminder-list">${items}</ul>
+      <div class="form-actions"><button type="button" class="btn btn-primary" data-close-reminder>Close</button></div>
+    </div>`;
+  box.addEventListener("click", (event) => { if (event.target === box || event.target.closest("[data-close-reminder]")) box.remove(); });
+  document.body.appendChild(box);
 }
 
 function setUserAvatar() {
@@ -1329,7 +1359,7 @@ const TASK_BOXES = [
 ];
 const TASK_ACTION_LABELS = {
   start: "Start work", submit: "Submit", begin_review: "Begin review",
-  approve: "Approve", request_changes: "Request changes", complete: "Mark complete", cancel: "Cancel",
+  approve: "Approve", request_changes: "Request changes", complete: "Mark complete", mark_done: "Mark as done", cancel: "Cancel",
 };
 
 function priorityBadge(value) {
@@ -3836,6 +3866,23 @@ function renderRequests() {
       : `<div class="panel">${emptyState(stage ? "No requests at this stage" : "No requests yet", stage ? "Try another stage." : "When a visitor asks to buy, rent or sell on the website, or writes on the Contact page, it arrives here.", { iconName: "inbox" })}</div>`}`;
 }
 
+/** The MD (management approval) and Sales (contract submission) close held meetings. */
+function mayCompleteAppointments() {
+  return canChange("appointments", "edit") && (can("approve_management") || can("submit_contract"));
+}
+
+function openCompleteAppointment(aptId) {
+  const apt = (state.appointments || []).find((row) => String(row.id) === String(aptId));
+  if (!apt) return;
+  openSmallForm(`Mark as done · ${apt.title}`, "Confirms this meeting took place. It moves to Completed with your name on it.",
+    `<div class="field full"><label for="apt-outcome">Outcome (optional)</label><textarea id="apt-outcome" name="note" rows="3" maxlength="2000" placeholder="e.g. Client viewed the plot and will pay the deposit on Friday"></textarea></div>`,
+    "Mark as done",
+    async (data) => {
+      await api(`/appointments/${apt.id}/complete`, { method: "PUT", body: JSON.stringify({ note: data.note || "" }) });
+      return "Appointment marked as done.";
+    });
+}
+
 function renderAppointments() {
   const filters = state.filters;
   const rows = (state.appointments || []).filter((apt) =>
@@ -3851,8 +3898,13 @@ function renderAppointments() {
   const list = rows.map((apt) => {
     const start = timeOf(apt.starts_at);
     const end = timeOf(apt.ends_at);
-    const edit = canChange("appointments", "edit") ? `<button class="btn btn-small" data-action="edit-appointment" data-id="${apt.id}">Edit</button>` : "";
-    const remove = canChange("appointments", "delete") ? `<button class="btn btn-small btn-danger-ghost" data-action="delete-appointment" data-id="${apt.id}" title="Delete appointment">Delete appointment</button>` : "";
+    // Everyone sees the whole calendar; the server marks which rows this person may change.
+    const mine = apt.can_edit !== false;
+    const edit = mine && canChange("appointments", "edit") ? `<button class="btn btn-small" data-action="edit-appointment" data-id="${apt.id}">Edit</button>` : "";
+    const remove = mine && canChange("appointments", "delete") ? `<button class="btn btn-small btn-danger-ghost" data-action="delete-appointment" data-id="${apt.id}" title="Delete appointment">Delete appointment</button>` : "";
+    // The MD and Sales confirm a meeting took place (server re-checks both).
+    const done = mine && apt.status === "scheduled" && mayCompleteAppointments() ? `<button class="btn btn-small btn-primary" data-action="complete-appointment" data-id="${apt.id}" title="Confirm this meeting took place">${icon("check")}Mark as done</button>` : "";
+    const doneBy = apt.status === "completed" && apt.completed_by_name ? `<span>${icon("check")}Done · ${escapeHtml(apt.completed_by_name)}${apt.completed_at ? ` · ${formatDateTime(apt.completed_at, true)}` : ""}</span>` : "";
     return `<article class="apt-row${apt.status === "cancelled" ? " is-muted" : ""}" data-searchable>
       <div class="date-chip date-chip-lg">${appointmentDateChip(apt.starts_at)}</div>
       <div class="apt-body">
@@ -3863,10 +3915,11 @@ function renderAppointments() {
           ${apt.property_name ? `<span>${icon("home")}${escapeHtml(apt.property_name)}</span>` : ""}
           ${apt.project_name ? `<span>${icon("building")}${escapeHtml(apt.project_name)}</span>` : ""}
           <span class="apt-type">${badge(apt.appointment_type, "neutral")}</span>
+          ${doneBy}
         </div>
         ${apt.notes ? `<p class="apt-notes">${escapeHtml(apt.notes)}</p>` : ""}
       </div>
-      <div class="apt-actions">${edit}${rowMenu([remove])}</div>
+      <div class="apt-actions">${done || edit || remove ? `${done}${edit}${rowMenu([remove])}` : `<span class="muted" title="You can see this appointment but not change it">View only</span>`}</div>
     </article>`;
   }).join("");
   const mayCreate = canChange("appointments", "create");
@@ -5778,6 +5831,7 @@ document.addEventListener("click", async (event) => {
   if (action === "rename-department") openRenameDepartment(id);
   if (action === "add-department-staff") openAddDepartmentStaff(id);
   if (action === "change-my-password") openChangeMyPassword();
+  if (action === "complete-appointment") openCompleteAppointment(id);
   if (action === "change-staff-department") openStaffDepartment(id);
   if (action === "change-staff-role") openStaffRole(id);
   if (action === "toggle-dept-staff") {

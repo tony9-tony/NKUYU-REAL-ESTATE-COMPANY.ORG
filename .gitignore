@@ -41,8 +41,12 @@ desktop.ini
 .vscode/
 .idea/
 
-# AI tooling worktrees
+# AI tooling worktrees (old snapshots are kept together in worktrees/)
 .kilo/
+worktrees/
 
 # Leftover output from earlier test runs
 _old-test-output/
+
+# Screenshots and other AI-tool output (may show real client data)
+Claude outputs/

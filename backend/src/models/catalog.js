@@ -1,7 +1,7 @@
 import { query, queryOne } from "../db.js";
 import { UNPAGED_LIMIT } from "../pagination.js";
 import { organizationId } from "../org/rbac.js";
-import { clearRecordShares, currentAccess, OWNERSHIP_COLUMNS, ownershipValues, scopeCondition } from "../org/access.js";
+import { clearRecordShares, currentAccess, isReadOnlyModule, OWNERSHIP_COLUMNS, ownershipValues, scopeCondition } from "../org/access.js";
 import { propertyUploadsDir, storedFileExists } from "../uploads.js";
 
 // A gallery row is not proof that its file exists: the row and the artefact are
@@ -41,13 +41,13 @@ async function withAvailableImages(propertyRows) {
 
 const propertySelect = `SELECT p.*,pr.name AS project_name,(SELECT COUNT(*)::int FROM property_images pi WHERE pi.property_id=p.id) AS image_count,(SELECT id FROM property_images pi WHERE pi.property_id=p.id ORDER BY pi.id LIMIT 1) AS cover_image_id FROM properties p LEFT JOIN projects pr ON pr.id=p.project_id`;
 const clientSelect = "SELECT c.*,pr.name AS project_name FROM clients c LEFT JOIN projects pr ON pr.id=c.project_id";
-const appointmentSelect = "SELECT a.*,c.name AS client_name,c.phone AS client_phone,p.name AS property_name,pr.name AS project_name FROM appointments a JOIN clients c ON c.id=a.client_id LEFT JOIN properties p ON p.id=a.property_id LEFT JOIN projects pr ON pr.id=a.project_id";
+const appointmentSelect = "SELECT a.*,c.name AS client_name,c.phone AS client_phone,p.name AS property_name,pr.name AS project_name,cb.display_name AS completed_by_name FROM appointments a JOIN clients c ON c.id=a.client_id LEFT JOIN properties p ON p.id=a.property_id LEFT JOIN projects pr ON pr.id=a.project_id LEFT JOIN users cb ON cb.id=a.completed_by";
 const documentSelect = "SELECT d.*,c.name AS client_name,co.client_name AS contract_client,pr.name AS project_name,ub.display_name AS uploaded_by_name FROM documents d LEFT JOIN clients c ON c.id=d.client_id LEFT JOIN contracts co ON co.id=d.contract_id LEFT JOIN projects pr ON pr.id=d.project_id LEFT JOIN users ub ON ub.id=COALESCE(d.created_by,d.owner_id)";
 
 async function list(sql, alias, entity, values, conditions, order = "") {
   const access = await currentAccess();
   const all = [await organizationId(), ...values];
-  const where = [`${alias}.organization_id=$1`, ...conditions, scopeCondition(alias, entity, access, all)];
+  const where = [`${alias}.organization_id=$1`, ...conditions, scopeCondition(alias, entity, access, all, { read: true })];
   return query(`${sql} WHERE ${where.join(" AND ")}${order} LIMIT ${UNPAGED_LIMIT}`, all).then((x) => x.rows);
 }
 
@@ -70,7 +70,7 @@ async function list(sql, alias, entity, values, conditions, order = "") {
 async function buildPaged(sql, table, alias, entity, values, conditions, order, search = null, searchColumns = []) {
   const access = await currentAccess();
   const all = [await organizationId(), ...values];
-  const where = [`${alias}.organization_id=$1`, ...conditions, scopeCondition(alias, entity, access, all)];
+  const where = [`${alias}.organization_id=$1`, ...conditions, scopeCondition(alias, entity, access, all, { read: true })];
   // Server-side search, applied INSIDE the same scoped statement. The term is
   // bound as a parameter, never interpolated, and it is ANDed with the scope
   // predicate - so search can only ever narrow what the caller may already see,
@@ -89,10 +89,32 @@ async function buildPaged(sql, table, alias, entity, values, conditions, order, 
   };
 }
 
-async function get(sql, alias, entity, id) {
+async function get(sql, alias, entity, id, { read = true } = {}) {
   const values = [id, await organizationId()];
   const access = await currentAccess();
-  return queryOne(`${sql} WHERE ${alias}.id=$1 AND ${alias}.organization_id=$2 AND ${scopeCondition(alias, entity, access, values)}`, values);
+  return queryOne(`${sql} WHERE ${alias}.id=$1 AND ${alias}.organization_id=$2 AND ${scopeCondition(alias, entity, access, values, { read })}`, values);
+}
+
+/**
+ * Sets `can_edit` on appointment rows: true only where the caller's normal
+ * record scope reaches (the shared calendar is wider for reading than for
+ * writing) and they hold Appointments in full, not the read-only grant.
+ */
+async function markWritableAppointments(rows) {
+  const list = (Array.isArray(rows) ? rows : [rows]).filter(Boolean);
+  if (!list.length) return rows;
+  const access = await currentAccess();
+  let writable = new Set(list.map((row) => row.id));
+  if (access && !access.isAdmin && access.scope !== "organization") {
+    if (isReadOnlyModule(access, "appointments")) writable = new Set();
+    else {
+      const values = [list.map((row) => row.id), await organizationId()];
+      const scope = scopeCondition("a", "appointment", access, values);
+      writable = new Set((await query(`SELECT a.id FROM appointments a WHERE a.id = ANY($1::int[]) AND a.organization_id=$2 AND ${scope}`, values)).rows.map((row) => row.id));
+    }
+  }
+  for (const row of list) row.can_edit = writable.has(row.id);
+  return rows;
 }
 
 async function create(sql, values) {
@@ -191,17 +213,22 @@ export const Client = {
 
 
 export const Appointment = {
-  all(status = null, projectId = null) { const v = [], c = []; if (status) { v.push(status); c.push(`a.status=$${v.length + 1}`); } if (projectId) { v.push(projectId); c.push(`a.project_id=$${v.length + 1}`); } return list(appointmentSelect, "a", "appointment", v, c, " ORDER BY a.starts_at ASC"); },
-  paged(status = null, projectId = null, search = null) {
+  all(status = null, projectId = null) { const v = [], c = []; if (status) { v.push(status); c.push(`a.status=$${v.length + 1}`); } if (projectId) { v.push(projectId); c.push(`a.project_id=$${v.length + 1}`); } return list(appointmentSelect, "a", "appointment", v, c, " ORDER BY a.starts_at ASC").then(markWritableAppointments); },
+  async paged(status = null, projectId = null, search = null) {
     const v = [], c = [];
     if (status) { v.push(status); c.push(`a.status=$${v.length + 1}`); }
     if (projectId) { v.push(projectId); c.push(`a.project_id=$${v.length + 1}`); }
-    return buildPaged(appointmentSelect, "appointments", "a", "appointment", v, c, " ORDER BY a.starts_at ASC, a.id DESC", search, ["a.title", "a.notes"]);
+    const built = await buildPaged(appointmentSelect, "appointments", "a", "appointment", v, c, " ORDER BY a.starts_at ASC, a.id DESC", search, ["a.title", "a.notes"]);
+    return { ...built, resolve: markWritableAppointments };
   },
-  get(id) { return get(appointmentSelect, "a", "appointment", id); },
+  get(id) { return get(appointmentSelect, "a", "appointment", id).then(markWritableAppointments); },
+  /** The appointment only if the caller may change it (their normal record scope). */
+  writable(id) { return get(appointmentSelect, "a", "appointment", id, { read: false }); },
   create(data) { return create(`INSERT INTO appointments(organization_id,client_id,property_id,project_id,title,appointment_type,starts_at,ends_at,status,notes,${OWNERSHIP_COLUMNS}) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`, [data.client_id, data.property_id || null, data.project_id || null, data.title, data.appointment_type, data.starts_at, data.ends_at || null, data.status, data.notes || null]); },
   update(id, data) { return update("appointment", "appointments", id, "UPDATE appointments SET client_id=$1,property_id=$2,project_id=$3,title=$4,appointment_type=$5,starts_at=$6,ends_at=$7,status=$8,notes=$9", [data.client_id, data.property_id || null, data.project_id || null, data.title, data.appointment_type, data.starts_at, data.ends_at || null, data.status, data.notes || null]); },
   remove(id) { return remove("appointment", "appointments", id); },
+  /** Marks a held meeting done; an optional outcome note is added to the notes. */
+  complete(id, userId, note = null) { return update("appointment", "appointments", id, "UPDATE appointments SET status='completed',completed_by=$1,completed_at=NOW(),notes=CASE WHEN $2::text IS NULL THEN notes ELSE CONCAT_WS(E'\\n', notes, $2::text) END", [userId, note]); },
 };
 
 export const Document = {

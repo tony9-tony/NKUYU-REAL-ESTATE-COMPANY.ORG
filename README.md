@@ -6,9 +6,10 @@ Internal MKUYU real estate workspace with projects, properties, clients, contrac
 
 ```powershell
 npm install
-npm run seed
 npm start
 ```
+
+Do not run `npm run seed` on the real database: it resets every demo and legacy account (the administrator included) to the published `MkuDemo#` passwords. It refuses unless `MKUYU_ALLOW_DEMO_RESEED=1` is set.
 
 The application runs at `http://localhost:3003`.
 

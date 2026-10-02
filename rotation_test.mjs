@@ -8,6 +8,7 @@
 import { legacyPasswordFor } from "./backend/src/org/demoCredentials.js";
 import { startIsolatedServer, prepareTestDatabase, reapOrphanServers } from "./test_support/harness.mjs";
 import { closeDatabase, query } from "./backend/src/db.js";
+import { hashPassword } from "./backend/src/auth.js";
 
 // PRIVATE server on the throwaway test database. This suite rotates passwords,
 // so running it against :3003 would rewrite real credentials.
@@ -139,9 +140,12 @@ const resetActor = (await query(
 )).rows[0];
 check(resetActor?.role === "admin", `reset: the event is attributed to the acting administrator (${resetActor?.email})`);
 
-// Restore the deterministic demo credential so the seed and this test agree.
-const restore = await call(`/org/users/${beforeReset.id}`, resetToken, "PUT", { password: legacyPasswordFor(target) });
-check(restore.status === 200 && (await signIn(target, legacyPasswordFor(target))).status === 200, "restored the documented demo credential after the reset test");
+// The API refuses the published MkuDemo# scheme, so the deterministic demo
+// credential is put back straight in the throwaway database.
+check((await call(`/org/users/${beforeReset.id}`, resetToken, "PUT", { password: legacyPasswordFor(target) })).status === 400, "reset: the published MkuDemo# scheme is refused");
+const restoreDemo = () => query("UPDATE users SET password_hash=$1 WHERE id=$2", [hashPassword(legacyPasswordFor(target)), beforeReset.id]);
+await restoreDemo();
+check((await signIn(target, legacyPasswordFor(target))).status === 200, "restored the documented demo credential after the reset test");
 
 // The MD has no staff administration, so cannot reset a password.
 const mdToken = (await signIn("md@mkuyu.local", legacyPasswordFor("md@mkuyu.local"))).body.token;
@@ -150,8 +154,8 @@ check((await call(`/org/users/${beforeReset.id}`, mdToken, "PUT", { password: "S
 // rank, but never for the MD or the administrator account.
 const ictoToken = (await signIn("icto@demo.mkuyu.local", legacyPasswordFor("icto@demo.mkuyu.local"))).body.token;
 check((await call(`/org/users/${beforeReset.id}`, ictoToken, "PUT", { password: "IctoReset#amina2026" })).status === 200, "the ICTO can reset a sales officer's password");
-check((await call(`/org/users/${beforeReset.id}`, ictoToken, "PUT", { password: legacyPasswordFor(target) })).status === 200
-  && (await signIn(target, legacyPasswordFor(target))).status === 200, "restored the demo credential after the ICTO reset");
+await restoreDemo();
+check((await signIn(target, legacyPasswordFor(target))).status === 200, "restored the demo credential after the ICTO reset");
 const mdId = (await snapshot("md@mkuyu.local")).id;
 const adminId = (await snapshot("admin@mkuyu.local")).id;
 check((await call(`/org/users/${mdId}`, ictoToken, "PUT", { password: "SneakyPassword123" })).status === 403, "the ICTO cannot reset the MD's password");

@@ -9,8 +9,9 @@
 // holds its business records, so pointing it at an empty throwaway database would
 // make it report "DATA LOST" for every resource and prove nothing.
 //
-// It is read-only. It signs in (which writes one session row) and then only
-// SELECTs, so it cannot damage the data it is checking. Do not add writes here.
+// It is read-only: SELECTs only, no sign-in, so it cannot damage the data it is
+// checking and keeps working after the administrator's password changes.
+// Do not add writes here.
 const targets = [
   "./backend/src/org/duties.js",
   "./backend/src/contracts/workflow.js",
@@ -32,30 +33,21 @@ for (const target of targets) {
 }
 if (failures) { console.log(`\n${failures} MODULE(S) FAILED TO LOAD`); process.exit(1); }
 
-const base = "http://localhost:3003/api/v1";
-import { legacyPasswordFor } from "./backend/src/org/demoCredentials.js";
+const { query, closeDatabase } = await import("./backend/src/db.js");
 
-const login = await fetch(`${base}/auth/login`, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ email: "admin@mkuyu.local", password: legacyPasswordFor("admin@mkuyu.local") }),
-});
-const session = await login.json();
-if (!session.token) { console.log("FAIL  admin login"); process.exit(1); }
-const auth = { Authorization: `Bearer ${session.token}` };
-
-// Baseline recorded before the duties migration and demo seeding.
-const BASELINE = { contracts: 27, clients: 52, projects: 29, properties: 47, payments: 26, debts: 122, documents: 19 };
+// Baseline re-recorded on 2026-10-02, after the workspace was cleared on
+// 2026-09-29 (safety backup in data/backups) and staff removed some of their own
+// records through the app (audit log). Counted in the database itself: the
+// administrator account is refused business endpoints by design, so counting
+// through the API would always read as missing. Raise these as data grows.
+const BASELINE = { contracts: 1, clients: 1, projects: 8, properties: 1, payments: 0, debts: 0, documents: 3 };
 console.log("\nresource      baseline   now   status");
 for (const [resource, before] of Object.entries(BASELINE)) {
-  const rows = await (await fetch(`${base}/${resource}`, { headers: auth })).json();
-  const now = Array.isArray(rows) ? rows.length : -1;
+  const now = (await query(`SELECT COUNT(*)::int AS n FROM ${resource}`)).rows[0].n;
   const ok = now >= before;
   if (!ok) failures += 1;
   console.log(`${resource.padEnd(13)} ${String(before).padStart(9)} ${String(now).padStart(5)}   ${ok ? "ok" : "DATA LOST"}`);
 }
-
-const { query, closeDatabase } = await import("./backend/src/db.js");
 const ORPHANS = {
   "user_roles -> users": "SELECT COUNT(*)::int AS n FROM user_roles ur LEFT JOIN users u ON u.id=ur.user_id WHERE u.id IS NULL",
   "user_roles -> roles": "SELECT COUNT(*)::int AS n FROM user_roles ur LEFT JOIN roles r ON r.id=ur.role_id WHERE r.id IS NULL",

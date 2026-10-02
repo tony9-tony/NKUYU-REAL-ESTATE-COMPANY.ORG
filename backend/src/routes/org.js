@@ -5,7 +5,6 @@ import { addRecordShare, can, canAccessModule, canReadModule, isReadOnlyModule, 
 import { audit } from "../org/audit.js";
 import { attentionCount } from "../tasks/tasks.js";
 import { hashPassword, hashToken, publicUser, revokeUserSessions, verifyPassword } from "../auth.js";
-import { isProduction } from "../security.js";
 import { demoPasswordFor } from "../org/demoCredentials.js";
 import { UNPAGED_LIMIT, paginatedList, paginationRequested, parsePagination, searchTerm } from "../pagination.js";
 import { Project } from "../models/project.js";
@@ -402,7 +401,7 @@ async function scopedCounts({ financial, has }) {
       return;
     }
     const values = [org];
-    const scope = scopeCondition(alias, entity, access, values);
+    const scope = scopeCondition(alias, entity, access, values, { read: true });
     // The subquery's own placeholders start at $2 ($1 is the organization id).
     // Shifting them past everything already collected lets the whole rollup be
     // one statement with one parameter list, in column order.
@@ -662,6 +661,30 @@ router.put("/me/password", requireAdmin(), async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// Morning appointment reminder. Scheduled appointments 1, 2 or 3 calendar days
+// away: the Managing Director gets every one, Sales staff the ones they booked
+// or own. Delivered at most once per person per day: the first call of the day
+// records the day and returns the list; every later call that day (another
+// login, another device) returns nothing. Read-only for appointments.
+router.get("/appointment-reminders", async (req, res, next) => {
+  try {
+    const md = can(req.access, "approve_management");
+    const sales = can(req.access, "submit_contract");
+    if (req.user.role === "admin" || (!md && !sales) || !canAccessModule(req.access, "appointments")) return res.json({ reminders: [] });
+    const first = await queryOne("INSERT INTO appointment_reminder_days (user_id, shown_on) VALUES ($1, CURRENT_DATE) ON CONFLICT DO NOTHING RETURNING shown_on", [req.user.id]);
+    if (!first) return res.json({ reminders: [] });
+    const reminders = await rows(`SELECT a.id, a.title, a.appointment_type, a.starts_at, c.name AS client_name, p.name AS property_name,
+        (a.starts_at::date - CURRENT_DATE)::int AS days_left
+      FROM appointments a JOIN clients c ON c.id=a.client_id LEFT JOIN properties p ON p.id=a.property_id
+      WHERE a.organization_id=$1 AND a.status='scheduled' AND (a.starts_at::date - CURRENT_DATE) BETWEEN 1 AND 3
+        AND ($2::boolean OR a.owner_id=$3 OR a.created_by=$3)
+      ORDER BY a.starts_at`, [await organizationId(), md, req.user.id]);
+    // Nothing due: give the day back, so a reminder booked later today still shows.
+    if (!reminders.length) await query("DELETE FROM appointment_reminder_days WHERE user_id=$1 AND shown_on=CURRENT_DATE", [req.user.id]);
+    res.json({ reminders });
+  } catch (error) { next(error); }
+});
+
 router.get("/me", async (req, res, next) => {
   try { res.json(await buildMe(req)); } catch (error) { next(error); }
 });
@@ -848,7 +871,7 @@ async function createStaffAccount(req, org, { email, password, displayName, role
   password = String(password || "");
   if (password.length < 8 || password.length > 128) refuse("password must be between 8 and 128 characters", 400);
   const newEmail = text(email, "email").toLowerCase();
-  if (isProduction() && password === demoPasswordFor(newEmail)) refuse("that password follows the published demo scheme; choose another", 400);
+  if (password === demoPasswordFor(newEmail)) refuse("that password follows the published demo scheme; choose another", 400);
   if (!roleIds.length) refuse("select at least one role for the staff member", 400);
   if (roleIds.some((roleId) => !Number.isInteger(roleId) || roleId < 1)) refuse("one or more selected roles are invalid", 400);
   await assignableRoles(req, roleIds, org);
@@ -903,7 +926,7 @@ router.put("/users/:id", requirePermission("manage_users"), async (req,res,next)
     // A password reset changes the credential and nothing else: the user id, role,
     // department, permissions and every owned record are untouched. Live sessions
     // are dropped so a token minted against the old password cannot outlive it.
-    if(req.body?.password){if(String(req.body.password).length<8||String(req.body.password).length>128)return res.status(400).json({error:"password must be between 8 and 128 characters"});if(isProduction()&&String(req.body.password)===demoPasswordFor(target.email))return res.status(400).json({error:"that password follows the published demo scheme; choose another"});await query("UPDATE users SET password_hash=$1 WHERE id=$2",[hashPassword(req.body.password),userId]);await query("DELETE FROM sessions WHERE user_id=$1",[userId]);clearAccessCache();await audit(req,"password_reset","user",userId,{email:target.email,sessions_invalidated:true});}
+    if(req.body?.password){if(String(req.body.password).length<8||String(req.body.password).length>128)return res.status(400).json({error:"password must be between 8 and 128 characters"});if(String(req.body.password)===demoPasswordFor(target.email))return res.status(400).json({error:"that password follows the published demo scheme; choose another"});await query("UPDATE users SET password_hash=$1 WHERE id=$2",[hashPassword(req.body.password),userId]);await query("DELETE FROM sessions WHERE user_id=$1",[userId]);clearAccessCache();await audit(req,"password_reset","user",userId,{email:target.email,sessions_invalidated:true});}
     if(!r)return res.status(404).json({error:"user not found"});clearAccessCache();if(req.body?.active===false||req.body?.active===0||req.body?.active==="false")await revokeUserSessions(userId);await audit(req,"updated","user",userId);res.json(r);}catch(e){next(e);}});
 router.put("/users/:id/roles", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");const org=await organizationId();await guardTargetUser(req,userId,org,{allowSelf:true});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map((roleId)=>id(roleId,"role_id")))];if(roleIds.length)await assignableRoles(req,roleIds,org);
     // An administrator may move THEMSELVES only between system-administration

@@ -10,7 +10,7 @@ import { currentAccess, ownershipFields } from "../org/access.js";
 import { findExistingClient } from "../org/clientMatch.js";
 import { arrangeRequestAppointment } from "../org/requestAppointment.js";
 import { audit } from "../org/audit.js";
-import { TASK_PRIORITIES, TASK_STATUSES, TASK_LINK_ENTITIES, canTransitionTask, normalizeTaskPriority, normalizeTaskStatus, taskActionsFor } from "../tasks/workflow.js";
+import { TASK_PRIORITIES, TASK_STATUSES, TASK_LINK_ENTITIES, canTransitionTask, markDoneAllowed, normalizeTaskPriority, normalizeTaskStatus, taskActionsFor } from "../tasks/workflow.js";
 import { attentionCount, linkedRecordExists, listComments, listHistory, listTasks, taskVisible } from "../tasks/tasks.js";
 import { assignableDepartmentIds, canAssignTo, canReviewTask, mayAssign, mayAssignReviewer, mayReview } from "../tasks/authority.js";
 
@@ -315,6 +315,20 @@ router.post("/:id/actions", route(async (req, res) => {
     }
     return applyTransition(req, res, task, from, access, "completed", { completed_by: req.user.id, completed_at: stamp }, "task_completed", comment);
   }
+  if (action === "mark_done") {
+    if (!markDoneAllowed(task, req.user.id, await mayAssign(req))) return res.status(403).json({ error: "only the person who assigned this task can mark it done, after the work is submitted" });
+    // Approval is recorded only if the task was not already approved by its reviewer.
+    const patch = { completed_by: req.user.id, completed_at: stamp };
+    if (from !== "approved") Object.assign(patch, { approved_by: req.user.id, approved_at: stamp });
+    const keys = Object.keys(patch);
+    const updated = await queryOne(`UPDATE tasks SET status='completed', updated_at=NOW(), ${keys.map((key, i) => `${key}=$${i + 1}`).join(", ")} WHERE id=$${keys.length + 1} AND status=$${keys.length + 2} RETURNING id`, [...keys.map((key) => patch[key]), task.id, from]);
+    if (!updated) return res.status(409).json({ error: "this task changed meanwhile; reload and try again" });
+    const next = await taskVisible(task.id, access);
+    if (from !== "approved") await writeAudit(req, "task_approved", { ...next, status: "approved" }, from);
+    await writeAudit(req, "task_completed", next, from === "approved" ? from : "approved", comment);
+    if (comment) await query("INSERT INTO task_comments (task_id, author_id, body) VALUES ($1,$2,$3)", [task.id, req.user.id, comment]);
+    return res.json(await decorate(next, req));
+  }
   if (action === "cancel") {
     if (!await mayAssign(req)) return res.status(403).json({ error: "cancelling requires the assign_tasks permission" });
     // A website request handed to Customer Service is Sales's: only whoever
@@ -324,7 +338,7 @@ router.post("/:id/actions", route(async (req, res) => {
     if (!(Number(task.assigned_by) === Number(req.user.id) || req.user?.role === "admin" || access?.scope === "organization")) return res.status(403).json({ error: "only the assigner may cancel this task" });
     return applyTransition(req, res, task, from, access, "cancelled", {}, "task_cancelled", comment);
   }
-  return res.status(400).json({ error: "action must be start, submit, begin_review, approve, request_changes, complete or cancel" });
+  return res.status(400).json({ error: "action must be start, submit, begin_review, approve, request_changes, complete, mark_done or cancel" });
 }));
 
 router.put("/reassign", route(async (req, res) => {

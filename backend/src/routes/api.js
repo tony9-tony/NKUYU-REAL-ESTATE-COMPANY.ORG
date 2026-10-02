@@ -2037,16 +2037,35 @@ router.post("/appointments", route(async (req, res) => {
   const result = await Appointment.create(data);
   res.status(201).json(await Appointment.get(result.id));
 }));
+// Everyone with Appointments reads the whole calendar, but changes only what
+// their normal record scope reaches: a visible-but-not-theirs appointment is 403.
+async function writableAppointment(id) {
+  const current = requireRecord(await Appointment.get(id), "Appointment");
+  if (!await Appointment.writable(id)) throw new HttpError(403, "this appointment is read only for you");
+  return current;
+}
 router.put("/appointments/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
-  const current = requireRecord(await Appointment.get(id), "Appointment");
+  const current = await writableAppointment(id);
   const data = await validateAppointment(req.body || {}, current);
   await Appointment.update(id, data);
   res.json(await Appointment.get(id));
 }));
+// "Mark as done": the MD or Sales confirms a scheduled meeting took place. The
+// usual module + edit check runs first (PUT), and the record must be one the
+// caller can see; an optional outcome note is kept with the appointment.
+router.put("/appointments/:id/complete", route(async (req, res) => {
+  if (!can(req.access, "approve_management") && !can(req.access, "submit_contract")) throw new HttpError(403, "only the Managing Director or Sales can mark an appointment done");
+  const id = parseId(req.params.id);
+  const current = await writableAppointment(id);
+  if (current.status !== "scheduled") throw new HttpError(409, `this appointment is already ${current.status}`);
+  const note = optionalText(req.body?.note, "note");
+  await Appointment.complete(id, req.user.id, note ? `Outcome: ${note}` : null);
+  res.json(await Appointment.get(id));
+}));
 router.delete("/appointments/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
-  requireRecord(await Appointment.get(id), "Appointment");
+  await writableAppointment(id);
   // A website request booked on this appointment goes back to Sales to arrange
   // again, rather than still reading "appointment booked".
   const requests = (await query("SELECT id FROM leads WHERE appointment_id = $1", [id])).rows.map((row) => row.id);

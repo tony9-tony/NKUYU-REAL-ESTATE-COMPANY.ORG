@@ -14,7 +14,7 @@ const raw = (sql) => () => sql;
 async function scopedRows(sql, alias, entity, { values = [], conditions = [], suffix = "" } = {}) {
   const access = await currentAccess();
   const all = [await organizationId(), ...values];
-  const scope = scopeCondition(alias, entity, access, all);
+  const scope = scopeCondition(alias, entity, access, all, { read: true });
   const where = [`${alias}.organization_id = $1`, scope, ...conditions.map((condition) => condition(all))];
   return (await query(`${sql} WHERE ${where.join(" AND ")}${suffix}`, all)).rows;
 }
@@ -31,7 +31,7 @@ const byNewest = (rows) => [...rows].sort((a, b) => String(b.created_at).localeC
 // Builds one scoped scalar subquery. The dashboard assembles a dozen of these
 // into a single statement, so it costs one round trip instead of a dozen.
 function scopedScalar({ table, alias, entity, access, values, conditions = [], extraFrom = "", aggregate = "COUNT(*)::int" }) {
-  const scope = scopeCondition(alias, entity, access, values);
+  const scope = scopeCondition(alias, entity, access, values, { read: true });
   const filters = conditions.map((condition) => condition(values));
   return `(SELECT ${aggregate} FROM ${table} ${alias} ${extraFrom} WHERE ${alias}.organization_id = $1 AND ${scope}${filters.length ? ` AND ${filters.join(" AND ")}` : ""})`;
 }

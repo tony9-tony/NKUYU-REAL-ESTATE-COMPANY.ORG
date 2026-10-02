@@ -301,6 +301,97 @@ try {
   await act(sessions.sales, created.payload.id, { action: "submit", comment: "Done." });
   check((await call("/org/tasks/attention", { token: sessions.md })).payload.review === 1, "once submitted, the reviewer's attention badge counts it");
 
+  console.log("\n=== Mark as done: the assigner closes finished work ===");
+  const newTask = async (title, extra = {}) => (await call("/org/tasks", { token: sessions.md, method: "POST", body: { title, assigned_to: ids.sales, ...extra } })).payload;
+  const actionsOf = async (token, id) => (await call(`/org/tasks/${id}`, { token })).payload.available_actions || [];
+  const t1 = await newTask("Mark-done: no reviewer");
+  check(!(await actionsOf(sessions.md, t1.id)).includes("mark_done"), "no Mark as done before the work is submitted");
+  check((await act(sessions.md, t1.id, { action: "mark_done" })).status === 403, "the server refuses Mark as done before submission");
+  await act(sessions.sales, t1.id, { action: "start" });
+  await act(sessions.sales, t1.id, { action: "submit", comment: "Finished." });
+  check((await actionsOf(sessions.md, t1.id)).includes("mark_done"), "the assigner sees Mark as done once the work is submitted");
+  check(!(await actionsOf(sessions.sales, t1.id)).includes("mark_done"), "the assignee does not get Mark as done");
+  check((await act(sessions.sales, t1.id, { action: "mark_done" })).status === 403, "the assignee cannot mark it done through the API");
+  const done1 = await act(sessions.md, t1.id, { action: "mark_done" });
+  check(done1.status === 200 && done1.payload.status === "completed", `the assigner marks it done in one click (${done1.status} ${done1.payload.status || done1.payload.error})`);
+  const row1 = await queryOne("SELECT approved_by, completed_by FROM tasks WHERE id=$1", [t1.id]);
+  check(Number(row1.approved_by) === Number(ids.md) && Number(row1.completed_by) === Number(ids.md), "the assigner is recorded as approver and completer");
+  check((await act(sessions.md, t1.id, { action: "mark_done" })).status === 403, "a completed task cannot be marked done again");
+
+  const t2 = await newTask("Mark-done: named reviewer", { reviewer_id: ids.salesManager });
+  await act(sessions.sales, t2.id, { action: "start" });
+  await act(sessions.sales, t2.id, { action: "submit", comment: "Finished." });
+  check(!(await actionsOf(sessions.md, t2.id)).includes("mark_done"), "with another named reviewer, the assigner waits for their approval");
+  await act(sessions.salesManager, t2.id, { action: "begin_review" });
+  await act(sessions.salesManager, t2.id, { action: "approve" });
+  check((await actionsOf(sessions.md, t2.id)).includes("mark_done"), "after the reviewer approves, the assigner can mark it done");
+  const done2 = await act(sessions.md, t2.id, { action: "mark_done" });
+  check(done2.status === 200 && done2.payload.status === "completed", "the assigner closes the approved task");
+  const row2 = await queryOne("SELECT approved_by FROM tasks WHERE id=$1", [t2.id]);
+  check(Number(row2.approved_by) === Number(ids.salesManager), "the reviewer stays the approver of record");
+
+  console.log("\n=== Appointments: Mark as done for the MD and Sales ===");
+  const client = await call("/clients", { token: sessions.sales, method: "POST", body: { name: `Apt Client ${Date.now()}`, phone: "0700000000" } });
+  check(client.status === 201, `Sales registers a client for the meeting (${client.status} ${client.payload.error || ""})`);
+  const newApt = async (title) => {
+    const res = await call("/appointments", { token: sessions.sales, method: "POST", body: { client_id: client.payload.id, title, appointment_type: "meeting", starts_at: new Date(Date.now() + 86400000).toISOString().slice(0, 16).replace("T", " ") } });
+    if (res.status !== 201) console.log(`     (create appointment: ${res.status} ${JSON.stringify(res.payload)})`);
+    return res.payload;
+  };
+  const a1 = await newApt("Mark-done: sales");
+  check(a1.status === "scheduled", "the appointment starts as scheduled");
+  check((await call(`/appointments/${a1.id}/complete`, { token: sessions.cs, method: "PUT", body: {} })).status === 403, "Customer Service cannot mark it done");
+  const salesDone = await call(`/appointments/${a1.id}/complete`, { token: sessions.sales, method: "PUT", body: { note: "Client will pay the deposit Friday" } });
+  check(salesDone.status === 200 && salesDone.payload.status === "completed", `Sales marks it done (${salesDone.status} ${salesDone.payload.status || salesDone.payload.error})`);
+  check(Number(salesDone.payload.completed_by) === Number(ids.sales) && salesDone.payload.completed_by_name && salesDone.payload.completed_at, "it records who marked it done, and when");
+  check(String(salesDone.payload.notes || "").includes("Outcome: Client will pay the deposit Friday"), "the outcome note is kept with the appointment");
+  check((await call(`/appointments/${a1.id}/complete`, { token: sessions.sales, method: "PUT", body: {} })).status === 409, "a completed appointment cannot be marked done twice");
+  const a2 = await newApt("Mark-done: md");
+  const mdDone = await call(`/appointments/${a2.id}/complete`, { token: sessions.md, method: "PUT", body: {} });
+  check(mdDone.status === 200 && Number(mdDone.payload.completed_by) === Number(ids.md), "the MD marks a meeting done");
+  check((await call(`/appointments/${a2.id}/complete`, { token: sessions.admin, method: "PUT", body: {} })).status === 403, "the System Administrator cannot (no business access)");
+  const a3 = await newApt("Mark-done: other officer");
+  check((await call(`/appointments/${a3.id}/complete`, { token: sessions.legalManager, method: "PUT", body: {} })).status === 403, "Legal cannot mark it done");
+  console.log("\n=== Appointments: every staff member sees the calendar, read only ===");
+  const listFor = async (token) => call("/appointments", { token });
+  const rowIn = (res, id) => (Array.isArray(res.payload) ? res.payload : []).find((row) => Number(row.id) === Number(id));
+  for (const [who, token] of [["Finance", sessions.finance], ["Customer Service", sessions.cs], ["Legal", sessions.legalManager]]) {
+    const res = await listFor(token);
+    const seen = rowIn(res, a3.id);
+    check(res.status === 200 && seen, `${who} sees Sales's appointment (${res.status})`);
+    check(seen && seen.can_edit === false, `${who} sees it as view only`);
+    check(seen && rowIn(res, a1.id)?.status === "completed" && seen.status === "scheduled", `${who} sees which are completed and which are still scheduled`);
+    check((await call(`/appointments/${a3.id}`, { token, method: "PUT", body: { title: "changed" } })).status === 403, `${who} cannot edit it`);
+    check((await call(`/appointments/${a3.id}`, { token, method: "DELETE" })).status === 403, `${who} cannot delete it`);
+  }
+  check((await call(`/appointments/${a3.id}`, { token: sessions.finance })).status === 200, "Finance can open one appointment");
+  check(rowIn(await listFor(sessions.sales), a3.id)?.can_edit === true, "Sales still edits its own appointment");
+  const salesEdit = await call(`/appointments/${a3.id}`, { token: sessions.sales, method: "PUT", body: { title: "Mark-done: other officer (moved)", starts_at: new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 16).replace("T", " ") } });
+  check(salesEdit.status === 200, `...and the edit goes through (${salesEdit.status} ${salesEdit.payload.error || ""})`);
+  const ictoToken = await signIn("icto@demo.mkuyu.local");
+  check((await listFor(ictoToken)).status === 403, "ICT (system administration) does not see business appointments");
+  check((await listFor(sessions.admin)).status === 403, "the administrator account does not see them either");
+  const dashFinance = await me(sessions.finance);
+  check((dashFinance.modules || []).includes("appointments") && (dashFinance.readonly_modules || []).includes("appointments"), "Finance gets Appointments as a read-only module");
+
+  console.log("\n=== Morning appointment reminder ===");
+  await query("DELETE FROM appointment_reminder_days WHERE user_id = ANY($1::int[])", [[ids.sales, ids.md, ids.cs]]);
+  const dayAhead = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} 10:00`; };
+  const r2 = (await call("/appointments", { token: sessions.sales, method: "POST", body: { client_id: client.payload.id, title: "Reminder: in 2 days", appointment_type: "viewing", starts_at: dayAhead(2) } })).payload;
+  const r5 = (await call("/appointments", { token: sessions.sales, method: "POST", body: { client_id: client.payload.id, title: "Reminder: in 5 days", appointment_type: "viewing", starts_at: dayAhead(5) } })).payload;
+  const salesRem = (await call("/org/appointment-reminders", { token: sessions.sales })).payload.reminders || [];
+  const hit = salesRem.find((row) => row.id === r2.id);
+  check(hit && hit.days_left === 2, `Sales gets "in 2 days" for its appointment (${hit?.days_left})`);
+  check(!salesRem.some((row) => row.id === r5.id), "an appointment 5 days away is not in the reminder");
+  check(((await call("/org/appointment-reminders", { token: sessions.sales })).payload.reminders || []).length === 0, "the reminder does not come back the same day (second login)");
+  check(((await call("/org/appointment-reminders", { token: sessions.md })).payload.reminders || []).some((row) => row.id === r2.id), "the MD gets the reminder too");
+  check(((await call("/org/appointment-reminders", { token: sessions.cs })).payload.reminders || []).length === 0, "Customer Service gets no reminder");
+  await query("DELETE FROM appointment_reminder_days WHERE user_id = ANY($1::int[])", [[ids.sales, ids.md, ids.cs]]);
+  await query("DELETE FROM appointments WHERE id = ANY($1::int[])", [[r2.id, r5.id]]);
+
+  await query("DELETE FROM appointments WHERE id = ANY($1::int[])", [[a1.id, a2.id, a3.id]]);
+  await query("DELETE FROM clients WHERE id=$1", [client.payload.id]);
+
   console.log(`\nconnected database: ${testDb}`);
   if (failures) throw new Error(`${failures} task check(s) failed`);
   console.log("\nTASK_ASSIGNMENT_ALL_PASSED");

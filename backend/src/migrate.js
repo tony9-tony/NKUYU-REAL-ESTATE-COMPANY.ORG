@@ -215,8 +215,8 @@ export const defaultRoles = [
   ["Administration & IT Support Officer", "Staff support, staff records and technical support. No business authority.", 20, "department", ["manage_users", "view", "view_reports", "export"]],
 
   // FINANCE & ACCOUNTS. Owns money and validates the financial terms.
-  ["Finance Manager", "Runs finance operations and validates contract financial terms", 30, "department", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "access_follow_ups", "view_projects", "view_properties", "view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "validate_finance", "request_changes", ...taskWorkflow]],
-  ["Finance Officer", "Payments, installments, receipts and financial term validation", 15, "own", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "view_projects", "view_properties", "view", "create", "edit", "view_financial", "view_reports", "validate_finance", "request_changes"]],
+  ["Finance Manager", "Runs finance operations and validates contract financial terms", 30, "department", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "access_follow_ups", "view_projects", "view_properties", "view_appointments", "view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "validate_finance", "request_changes", ...taskWorkflow]],
+  ["Finance Officer", "Payments, installments, receipts and financial term validation", 15, "own", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "view_projects", "view_properties", "view_appointments", "view", "create", "edit", "view_financial", "view_reports", "validate_finance", "request_changes"]],
 
   // SALES, MARKETING & OPERATIONS. Initiates deals, never approves them.
   ["Department Manager", "Department-wide operational management and team supervision", 40, "department", ["access_projects", "access_properties", "access_clients", "access_leads", "access_appointments", "access_documents", "access_follow_ups", "access_reports", "access_contracts", "view", "create", "edit", "delete", "approve", "export", "view_reports", "submit_contract", "request_changes", ...taskWorkflow]],
@@ -239,7 +239,7 @@ export const defaultRoles = [
   ["Sales & Marketing Officer", "Leads, clients, properties, listings and viewings for the whole sales desk. Creates and submits contracts; never approves them.", 25, "department", ["access_leads", "access_clients", "access_properties", "access_projects", "access_contracts", "access_appointments", "access_documents", "access_follow_ups", "access_reports", "view", "create", "edit", "delete", "export", "view_reports", "submit_contract", "request_changes", "upload_contract_templates", ...taskWorkflow]],
   // Organization scope on purpose: installments belong to the SALES department
   // that made the deal, so a department-scoped accountant would not see them.
-  ["Accountant", "Deposits, installments, payments and overdue follow-up for the whole finance desk. Checks the money on every contract.", 25, "organization", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "access_follow_ups", "view_projects", "view_properties", "view", "create", "edit", "delete", "export", "view_financial", "view_reports", "validate_finance", "request_changes"]],
+  ["Accountant", "Deposits, installments, payments and overdue follow-up for the whole finance desk. Checks the money on every contract.", 25, "organization", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "access_follow_ups", "view_projects", "view_properties", "view_appointments", "view", "create", "edit", "delete", "export", "view_financial", "view_reports", "validate_finance", "request_changes"]],
   ["ICT Officer", "Staff accounts, settings, security, backups and technical support. No business authority.", 35, "organization", [...systemAccess, "upload_contract_templates"]],
 ];
 
@@ -468,6 +468,42 @@ export async function runMigrations({ seedDemo = process.env.NODE_ENV !== "produ
   await migrateSessionSecurity();
   await migrateContractDealType();
   await migratePaymentApproval();
+  // "Mark as done" on an appointment records who confirmed the meeting happened.
+  await query("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS completed_by INTEGER REFERENCES users(id) ON DELETE SET NULL");
+  await query("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ");
+  // Load: indexes on the columns every list, join and permission check uses, so
+  // screens stay fast as the office's data grows. IF NOT EXISTS: safe to rerun.
+  for (const [name, definition] of [
+    ["idx_appointments_client", "appointments (client_id)"],
+    ["idx_appointments_org_start", "appointments (organization_id, starts_at)"],
+    ["idx_appointments_status", "appointments (status)"],
+    ["idx_audit_logs_org_created", "audit_logs (organization_id, created_at DESC)"],
+    ["idx_audit_logs_user", "audit_logs (user_id)"],
+    ["idx_contracts_client", "contracts (client_id)"],
+    ["idx_contracts_org_created", "contracts (organization_id, created_at DESC)"],
+    ["idx_documents_contract", "documents (contract_id)"],
+    ["idx_documents_client", "documents (client_id)"],
+    ["idx_payments_debt", "payments (debt_id)"],
+    ["idx_reminders_debt", "reminders (debt_id)"],
+    ["idx_leads_org_created", "leads (organization_id, created_at DESC)"],
+    ["idx_leads_task", "leads (task_id)"],
+    ["idx_leads_appointment", "leads (appointment_id)"],
+    ["idx_leads_client", "leads (client_id)"],
+    ["idx_follow_ups_lead", "follow_ups (lead_id)"],
+    ["idx_follow_ups_client", "follow_ups (client_id)"],
+    ["idx_property_images_property", "property_images (property_id)"],
+    ["idx_property_history_property", "property_history (property_id)"],
+    ["idx_record_shares_entity_record", "record_shares (entity, record_id)"],
+    ["idx_tasks_status", "tasks (status)"],
+    ["idx_tasks_department", "tasks (department_id)"],
+    ["idx_user_roles_role", "user_roles (role_id)"],
+    ["idx_user_departments_department", "user_departments (department_id)"],
+    ["idx_role_permissions_permission", "role_permissions (permission_id)"],
+    ["idx_duty_permissions_permission", "duty_permissions (permission_id)"],
+    ["idx_users_org", "users (organization_id)"],
+  ]) await query(`CREATE INDEX IF NOT EXISTS ${name} ON ${definition}`);
+  // The morning appointment reminder pops up once per person per day.
+  await query("CREATE TABLE IF NOT EXISTS appointment_reminder_days (user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, shown_on DATE NOT NULL, shown_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (user_id, shown_on))");
   await migrateSellLeads();
   for (const table of scopedTables) {
     await query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL`);
@@ -773,6 +809,12 @@ async function seedDemoAccounts() {
 if (process.argv.includes("--seed-only")) {
   if (String(process.env.NODE_ENV || "").toLowerCase() === "production") {
     throw new Error("demo seeding is disabled in production");
+  }
+  // Seeding resets every demo and legacy account (admin included) to the
+  // published MkuDemo# passwords. On the real database that would undo every
+  // password change, so it needs an explicit opt-in there.
+  if (process.env.MKUYU_IS_TEST_DATABASE !== "1" && process.env.MKUYU_ALLOW_DEMO_RESEED !== "1") {
+    throw new Error("npm run seed would reset every account's password to the demo scheme on this database. If you really want that, set MKUYU_ALLOW_DEMO_RESEED=1 and run it again.");
   }
   await runMigrations({ seedDemo: true });
   console.log("PostgreSQL schema ready");

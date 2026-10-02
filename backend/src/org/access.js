@@ -144,8 +144,15 @@ const CATALOGUE_READ_GRANT = {
   appointment: { module: "appointments", needs: null },
 };
 
-export function scopeCondition(alias, entity, access, values) {
+// Appointments are the office's shared calendar: on a READ, every staff member
+// who may open Appointments sees every appointment and its status (scheduled,
+// completed, cancelled). Writes keep the normal record scope below, so an
+// officer still changes only the appointments that are theirs.
+const SHARED_READ_ENTITIES = { appointment: "appointments" };
+
+export function scopeCondition(alias, entity, access, values, { read = false } = {}) {
   if (!access || access.isAdmin || access.scope === "organization") return "TRUE";
+  if (read && SHARED_READ_ENTITIES[entity] && canReadModule(access, SHARED_READ_ENTITIES[entity])) return "TRUE";
   const grant = CATALOGUE_READ_GRANT[entity];
   if (grant && isReadOnlyModule(access, grant.module) && (!grant.needs || access.permissions.includes(grant.needs))) return "TRUE";
   const bind = (value) => {

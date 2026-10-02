@@ -188,6 +188,9 @@ check((quickUser.departments || []).map((d) => d.name).join() === "SALES, MARKET
 check((quickUser.roles || []).map((r) => r.name ?? r).join() === "Sales, Marketing & Operations Officer", "they hold Sales' default role");
 check((await call(`/org/departments/${sales.id}/staff`, adminToken, "POST", { email: quickEmail, password: "TempPass#2026" })).status === 409, "the same email cannot be added twice");
 check((await call(`/org/departments/${sales.id}/staff`, adminToken, "POST", { email: `short.${tag}@test.mkuyu.local`, password: "short" })).status === 400, "a password under 8 characters is refused");
+check((await call(`/org/departments/${sales.id}/staff`, adminToken, "POST", { email: `demo.${tag}@test.mkuyu.local`, password: `MkuDemo#demo${tag}2026` })).status === 400, "a password on the published MkuDemo# scheme is refused");
+const quickId = (await call("/org/users", adminToken)).body.find((u) => u.email === quickEmail)?.id;
+check((await call(`/org/users/${quickId}`, adminToken, "PUT", { password: `MkuDemo#quick${tag}2026` })).status === 400, "Reset password refuses the MkuDemo# scheme too");
 check((await call(`/org/departments/${deptByName("MANAGEMENT").id}/staff`, adminToken, "POST", { email: `mgmt.${tag}@test.mkuyu.local`, password: "TempPass#2026" })).status === 400, "nobody is added to Management by default (no Managing Director by accident)");
 check((await call(`/org/departments/${sales.id}/staff`, quickLogin.body.token, "POST", { email: `self.${tag}@test.mkuyu.local`, password: "TempPass#2026" })).status === 403, "a sales officer cannot add staff");
 const extraDept = await call("/org/departments", adminToken, "POST", { name: `Field Team ${tag}` });

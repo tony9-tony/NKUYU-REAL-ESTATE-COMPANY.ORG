@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import compression from "compression";
 import dotenv from "dotenv";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -19,6 +20,23 @@ const trustedProxies = String(process.env.TRUST_PROXY || "").split(",").map((val
 app.set("trust proxy", trustedProxies.length ? trustedProxies : false);
 app.disable("x-powered-by");
 app.use(securityHeaders());
+// Load: gzip every text response (app.js 440 KB -> ~100 KB, JSON lists shrink
+// the same way). The live update stream is excluded: it must not be buffered.
+app.use(compression({
+  threshold: 1024,
+  filter: (req, res) => !String(res.getHeader("Content-Type") || "").includes("text/event-stream") && compression.filter(req, res),
+}));
+// Load: a request slower than this is written to the server log, so a
+// struggling screen or query shows up before people complain.
+const SLOW_REQUEST_MS = Number(process.env.SLOW_REQUEST_MS || 1500);
+app.use("/api", (req, res, next) => {
+  const started = process.hrtime.bigint();
+  res.on("finish", () => {
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    if (ms >= SLOW_REQUEST_MS && !req.originalUrl.includes("/live")) console.warn(`[slow] ${req.method} ${req.originalUrl.split("?")[0]} ${Math.round(ms)} ms (status ${res.statusCode})`);
+  });
+  next();
+});
 
 // MK-08: the public website's origins. Only these may call the public API
 // from a browser. PUBLIC_SITE_ORIGINS in .env lists the real site (comma
@@ -76,10 +94,18 @@ app.use(cors((request, callback) => {
 // Abuse protection for the public API as a whole (per client address); the
 // request/enquiry/sell routes add their own tighter per-phone limits.
 app.use("/api/v1/public", rateLimit({ name: "public", limit: 300, windowMs: 60 * 1000 }));
+// Load: a ceiling for the staff API per client address, far above normal use
+// (a busy screen makes a few requests a second) but enough to stop a runaway
+// script or a stuck browser tab from flooding the server.
+app.use("/api/v1", rateLimit({ name: "api", limit: Number(process.env.API_RATE_LIMIT_PER_MIN || 3000), windowMs: 60 * 1000 }));
 app.use(express.json({ limit: "1mb" }));
 
 // Serve static frontend
 const frontendDir = path.resolve(__dirname, "..", "..", "frontend");
+// Load: images and brand files never change in place, so browsers keep them
+// for a week. app.js / app.css stay revalidated (ETag) so a new release shows
+// at once.
+app.use("/assets", express.static(path.join(frontendDir, "assets"), { maxAge: "7d" }));
 app.use(express.static(frontendDir));
 
 // API

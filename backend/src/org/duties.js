@@ -156,6 +156,7 @@ export const ROLE_DUTIES = {
     { key: "finance_team_leadership", label: "Supervise the finance desk", description: "Reviews and approves finance work within the department.", permissions: ["approve", "view", "edit", "access_reports"] },
     { key: "deal_context", label: "See the deal behind the money", description: "Looks up the project and property a contract or payment belongs to. Read only: never creates, edits or deletes them, and never generates contracts.", permissions: ["view_projects", "view_properties", "view"] },
     { key: "work_assignment", label: "Assign work within the finance desk", description: "Hands work to finance staff and reviews what they submit. Cannot assign outside the department.", permissions: ["assign_tasks", "review_tasks"] },
+    { key: "appointment_awareness", label: "Follow customer appointments", description: "Sees every customer appointment and whether it is still scheduled or done, so payments can be expected. Read only: never books, edits or closes one.", permissions: ["view_appointments", "view"] },
   ],
   "Finance Officer": [
     { key: "payment_recording", label: "Record payments and receipts", description: "Logs money received and attaches receipts.", permissions: ["access_payments", "access_debts", "view", "create", "edit", "view_financial"] },
@@ -164,6 +165,7 @@ export const ROLE_DUTIES = {
     { key: "client_balance_service", label: "Answer client balance questions", description: "Responds to customers on what they owe and when.", permissions: ["access_clients", "view", "view_financial"] },
     { key: "deal_context", label: "See the deal behind the money", description: "Looks up the project and property a contract or payment belongs to. Read only: never creates, edits or deletes them, and never generates contracts.", permissions: ["view_projects", "view_properties", "view"] },
     { key: "finance_reporting", label: "Report on collections", description: "Reports income and outstanding balances for the finance desk.", permissions: ["access_reports", "view_reports"] },
+    { key: "appointment_awareness", label: "Follow customer appointments", description: "Sees every customer appointment and whether it is still scheduled or done, so payments can be expected. Read only: never books, edits or closes one.", permissions: ["view_appointments", "view"] },
   ],
   "Department Manager": [
     { key: "department_operations", label: "Run departmental operations", description: "Creates, edits and reviews records across the department's modules.", permissions: ["access_projects", "access_properties", "access_clients", "access_leads", "access_appointments", "access_documents", "access_follow_ups", "view", "create", "edit", "approve", "view_reports"] },
@@ -242,6 +244,7 @@ export const ROLE_DUTIES = {
     { key: "overdue_follow_up", label: "Follow up overdue balances", description: "Chases arrears and records what the customer promised.", permissions: ["access_debts", "access_follow_ups", "view", "create", "edit", "view_financial"] },
     { key: "deal_context", label: "See the deal behind the money", description: "Looks up the project and property a contract or payment belongs to. Read only: never creates, edits or deletes them, and never generates contracts.", permissions: ["view_projects", "view_properties", "view"] },
     { key: "finance_reporting", label: "Report on income and balances", description: "Reports income, debt and collections for the MD.", permissions: ["access_reports", "view_reports", "export", "view_financial"] },
+    { key: "appointment_awareness", label: "Follow customer appointments", description: "Sees every customer appointment and whether it is still scheduled or done, so payments can be expected. Read only: never books, edits or closes one.", permissions: ["view_appointments", "view"] },
   ],
   "ICT Officer": [
     { key: "account_administration", label: "Manage staff accounts", description: "Creates, activates and deactivates staff accounts and handles access requests.", permissions: ["manage_users", "view"] },
