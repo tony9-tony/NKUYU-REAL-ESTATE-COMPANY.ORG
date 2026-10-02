@@ -94,9 +94,9 @@ Run `npm run test:tasks` for the focused suite (it uses the isolated
 
 ## Frontend design
 
-The interface follows the Banani design language: a solid deep-green navigation rail with a gold active state, white cards on a light neutral canvas, and DM Sans throughout. A pre-redesign copy of `index.html`, `app.css` and `app.js` is kept in `data/backups/ui-before-banani/`.
+The interface uses a dark sidebar with bronze accents on a warm light canvas. Body text is **Manrope** and headings use **Cormorant Garamond** (both from Google Fonts, with system fallbacks). All colours and fonts are CSS variables at the top of `frontend/css/app.css`.
 
-Two dev utilities support the stylesheet:
+Dev utilities:
 
 - `node tools/list_css_classes.mjs --check` — reports any class the JS can emit that the stylesheet never defines. Run it after any render change.
 - `node tools/check_css_balance.mjs` — reports unmatched braces and declarations that escaped their rule. Run it after any stylesheet edit.
@@ -126,10 +126,39 @@ The caller's own permissions are echoed back so the UI can mark which steps are 
 
 The failure mode is specific: the sheet had a *net-zero* brace imbalance, so counting `{` against `}` reported a clean balance while the page was broken. `tools/check_css_balance.mjs` and the equivalent inline check in `ui_audit_regression.mjs` track nesting position instead of totals, and also flag any line sitting at depth 0 that is not a selector, at-rule or comment.
 
-## Known issue: the ngrok tunnel points at the wrong port
+## Contract workflow
 
-`https://error-unnamable-borrower.ngrok-free.dev` forwards to **port 3001**, not to this application's 3003. Port 3001 is a separate Node process (`node backend/src/server.js`, PID 12060) running from a *different* project copy — `C:\Users\nic\Desktop\RealEstate-System`, last edited 24 Sep — so the tunnel serves that project's older build.
+Sales prepares → Legal reviews and approves → Finance validates the money terms → Legal sends it to the MD (when needed) → MD approves → Legal releases it to the customer → the customer signs → active → completed.
 
-This predates the UI work and was left running as found. To point the tunnel at this application, repoint or restart ngrok against port 3003. Use `node tools/check_tunnel.mjs` to confirm the current mapping and `node tools/check_port.mjs <port>` to identify what a given port is serving.
+Every contract carries a **position** (`GET /contracts` returns it): *Under Sales review*, *Under Legal review*, *Legal approved · Finance review*, *With the MD*, *With the customer*, … The MD dashboard shows how many contracts sit at each step.
 
-"# NKUYU-REAL-ESTATE-COMPANY.ORG" 
+- One live Buy (or Rent) contract per property. The property becomes **Reserved** when the contract goes to the customer, **Sold/Rented** when it is active, and available again if that contract is cancelled, rejected or sent back.
+- A contract always belongs to a client in the register: typing a new name registers the client (matched by phone or e-mail first).
+- **Cash or installments** is chosen when the contract is prepared. Rent price = monthly rent × months.
+- When Finance validates, the payment plan (deposit + installments) is created from the contract terms. The customer signature can only be recorded after the deposit is paid and approved.
+
+## Payments
+
+There is no bank/mobile-money API: Finance records every payment by hand, with proof.
+
+- A payment needs a **transaction reference** (unique — the same reference cannot be entered twice) and **proof** (receipt file or the pasted SMS).
+- A payment starts **pending**; only **approved** money counts anywhere (installments, balances, reports). A second Finance person approves it. While MKUYU has only one Finance person, they may approve their own entries — these are marked *self-approved*.
+- Approved money is spread over the installments: the chosen installment first, then the oldest unpaid; an overpayment rolls on to the next one.
+- Each approved payment gets an MKUYU receipt number (`RCT-YYYY-NNNNNN`) and a PDF receipt (`GET /payments/:id/mkuyu-receipt`).
+- Mistakes are **reversed** with a reason (never deleted or edited once approved). Refunds are recorded with proof and need approval too.
+- `GET /contracts/:id/account` gives one contract's money picture: price, received, balance, next due, overdue, payments and refunds. The contract view shows it to Finance and the MD.
+
+## Tests
+
+Tests never touch the live database: `test_support/guard.mjs` derives a separate test database from `.env` (override with `MKUYU_TEST_DB`).
+
+```powershell
+npm run test          # unit, access matrix, frontend smoke, end-to-end
+npm run test:final    # payments, refunds, property/contract rules
+```
+
+On Windows, double-click `run-tests.bat`; the results are written to `test-results.txt`.
+
+## ngrok
+
+If the system is exposed through ngrok, the tunnel must point at port **3003** (`ngrok http 3003`). A tunnel left on another port serves a different, older copy of the project. Use `node tools/check_tunnel.mjs` to confirm the current mapping and `node tools/check_port.mjs <port>` to identify what a given port is serving.

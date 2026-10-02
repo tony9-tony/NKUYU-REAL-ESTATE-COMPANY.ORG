@@ -16,7 +16,7 @@ export const WORKFLOW_STAGES = [
   { status: "draft", stage: 1, label: "Draft prepared", owner: "SALES, MARKETING & OPERATIONS", actor: "SALES, MARKETING & OPERATIONS", permission: "create", note: "Sales or operations opens the deal and records the commercial terms." },
   { status: "submitted", stage: 2, label: "Submitted to Legal", owner: "LEGAL", actor: "SALES, MARKETING & OPERATIONS", permission: "submit_contract", note: "Sales hands the deal to Legal. Sales cannot approve its own submission." },
   { status: "under_review", stage: 3, label: "Under legal review", owner: "LEGAL", actor: "LEGAL", permission: "review_legal", note: "Legal opens the contract, checks the clauses and verifies the parties." },
-  { status: "legal_approved", stage: 4, label: "Legal terms approved", owner: "LEGAL", actor: "LEGAL", permission: "approve_legal", note: "Legal gives legal approval. Finance must then validate the money before Legal can send it to the Managing Director." },
+  { status: "legal_approved", stage: 4, label: "Legal approved · Finance review", owner: "FINANCE & ACCOUNTS", actor: "LEGAL", permission: "approve_legal", note: "Legal gives legal approval. Finance must then validate the money before Legal can send it to the Managing Director." },
   { status: "pending_management_approval", stage: 5, label: "Management approval", owner: "MANAGEMENT", actor: "MANAGEMENT", permission: "approve_management", note: "The Managing Director approves on behalf of management, or sends it back." },
   { status: "approved", stage: 6, label: "Approved for release", owner: "LEGAL", actor: "LEGAL", permission: "approve_legal", note: "Legal releases the approved contract to the customer." },
   { status: "customer_pending", stage: 7, label: "With the customer", owner: "LEGAL", actor: "LEGAL", permission: "approve_legal", note: "Awaiting the customer's signature." },
@@ -142,7 +142,7 @@ export const CONTRACT_ACTIONS = {
   submit: { from: ["draft", "changes_requested"], to: "submitted", permission: "submit_contract", label: "Submit to Legal" },
   start_review: { from: ["submitted"], to: "under_review", permission: "review_legal", label: "Start legal review" },
   request_changes: { from: ["submitted", "under_review", "legal_approved", "pending_management_approval", "approved", "customer_pending"], to: "changes_requested", permission: "request_changes", label: "Request changes" },
-  legal_approve: { from: ["under_review", "submitted"], to: "legal_approved", permission: "approve_legal", label: "Legal approval" },
+  legal_approve: { from: ["under_review"], to: "legal_approved", permission: "approve_legal", label: "Legal approval" },
   // Finance checks the money only AFTER Legal has approved the terms, so it
   // always validates the version Legal signed off. The status stays
   // legal_approved; the validation is recorded in finance_validated_*.
@@ -667,6 +667,8 @@ const GENERATION_COLUMNS = [
   ["deposit_amount", "NUMERIC(14,2)"],
   ["installment_count", "INTEGER"],
   ["first_due_date", "DATE"],
+  // How the customer pays: "cash" (everything at signing) or "installments".
+  ["payment_mode", "TEXT"],
   ["template_document_id", "INTEGER REFERENCES documents(id) ON DELETE SET NULL"],
   ["generated_document_id", "INTEGER REFERENCES documents(id) ON DELETE SET NULL"],
 ];

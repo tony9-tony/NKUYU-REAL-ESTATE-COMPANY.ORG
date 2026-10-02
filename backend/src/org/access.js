@@ -150,8 +150,19 @@ const CATALOGUE_READ_GRANT = {
 // officer still changes only the appointments that are theirs.
 const SHARED_READ_ENTITIES = { appointment: "appointments" };
 
+// The Finance desk works the whole money ledger: whoever holds Finance
+// authority (validate_finance) together with financial access sees and works
+// every installment and payment, whichever department raised the contract.
+// Without this a department-scoped Finance Manager missed the installments of
+// contracts Sales had created, while the Accountant below them saw them all.
+const FINANCE_LEDGER_ENTITIES = new Set(["debt", "payment"]);
+export function financeDesk(access) {
+  return Boolean(access && !access.isAdmin && access.permissions?.includes("validate_finance") && access.permissions?.includes("view_financial"));
+}
+
 export function scopeCondition(alias, entity, access, values, { read = false } = {}) {
   if (!access || access.isAdmin || access.scope === "organization") return "TRUE";
+  if (FINANCE_LEDGER_ENTITIES.has(entity) && financeDesk(access)) return "TRUE";
   if (read && SHARED_READ_ENTITIES[entity] && canReadModule(access, SHARED_READ_ENTITIES[entity])) return "TRUE";
   const grant = CATALOGUE_READ_GRANT[entity];
   if (grant && isReadOnlyModule(access, grant.module) && (!grant.needs || access.permissions.includes(grant.needs))) return "TRUE";

@@ -1901,6 +1901,7 @@ function generateContractFormData() {
     deal_type: value("gc-deal", "deal_type", ""),
     original_price: value("gc-original", "original_price"),
     discount_pct: value("gc-discount", "discount_pct", "0") || "0",
+    payment_mode: value("gc-payment-mode", "payment_mode", "installments") || "installments",
     deposit: value("gc-deposit", "deposit"),
     installments: value("gc-installments", "installments"),
     frequency: value("gc-frequency", "frequency", "monthly"),
@@ -1953,7 +1954,23 @@ function updateGenerateContractPreview() {
   // The property's own list price is offered as a starting point only, and
   // never overwrites something the operator has already typed.
   const original = document.getElementById("gc-original");
-  if (original && property && !original.dataset.touched && data.original_price === "") original.value = property.price ?? "";
+  if (original && property && !original.dataset.touched && (data.original_price === "" || original.dataset.auto === "1")) {
+    // A lease is priced from the rent: rent per month x the months agreed.
+    if (data.deal_type === "rent" && Number(property.rent_price) > 0) {
+      const unit = data.agreement_duration_unit || "months";
+      const duration = Number(data.agreement_duration) || 0;
+      const months = unit === "years" ? duration * 12 : unit === "weeks" ? Math.max(1, Math.ceil((duration * 7) / 30)) : unit === "days" ? Math.max(1, Math.ceil(duration / 30)) : duration;
+      const monthly = property.rent_period === "year" ? Number(property.rent_price) / 12 : Number(property.rent_price);
+      if (months > 0) { original.value = Math.round(monthly * months); original.dataset.auto = "1"; }
+    } else if (data.deal_type !== "rent") {
+      original.value = property.price ?? ""; original.dataset.auto = "1";
+    }
+  }
+  // Cash pays everything at signing: the installment fields are not needed.
+  const planFields = document.querySelector(".gen-plan-fields");
+  if (planFields) planFields.hidden = data.payment_mode === "cash";
+  const cashNote = document.getElementById("gc-cash-note");
+  if (cashNote) cashNote.hidden = data.payment_mode !== "cash";
 
   // Duration -> end date, using the same month arithmetic as the server.
   const end = document.getElementById("gc-end");
@@ -2016,11 +2033,14 @@ function generateContractFormBody() {
     </fieldset>
 
     <fieldset class="gen-section"><legend>Payment plan</legend>
+      <div class="field full"><label for="gc-payment-mode">How will the customer pay?</label><select id="gc-payment-mode" name="payment_mode"><option value="installments" ${data.payment_mode !== "cash" ? "selected" : ""}>Installments: a deposit at signing, then equal installments</option><option value="cash" ${data.payment_mode === "cash" ? "selected" : ""}>Cash: the whole ${data.deal_type === "rent" ? "lease" : "price"} at signing</option></select><div class="field-help" id="gc-cash-note"${data.payment_mode === "cash" ? "" : " hidden"}>The whole final price is due on the start date. The contract becomes active once Finance confirms the payment.</div></div>
+      <div class="gen-plan-fields" style="display:contents"${data.payment_mode === "cash" ? " hidden" : ""}>
       ${number("gc-deposit", "Deposit", data.deposit, 'placeholder="0"')}
       ${number("gc-installments", "Number of installments", data.installments, 'step="1" min="1" max="120" placeholder="6"')}
       <div class="field"><label for="gc-frequency">Payment frequency</label><select id="gc-frequency" name="frequency">${frequencies}</select></div>
       ${text("gc-first-due", "First due date", data.first_due_date, 'type="date"')}
-      <div class="field full"><div class="field-help">Leave the plan blank to skip it. If you enter any plan details, provide the deposit, installment count and first due date. Installments split the FINAL PRICE above. ${canSeeFinancial() ? "Your account can create the payment plan." : "The plan is recorded on the contract; Finance creates its installments."}</div></div>
+      <div class="field full"><div class="field-help">Provide the deposit, the number of installments and the first due date. Installments split the FINAL PRICE above. The plan is printed in the agreement, and Finance turns it into the installment schedule when they validate the contract.</div></div>
+      </div>
     </fieldset>
 
     <fieldset class="gen-section"><legend>Contract</legend>
@@ -2190,7 +2210,7 @@ async function openGenerateContractModal(prefill = {}) {
  */
 async function submitGenerateContract() {
   const data = generateContractFormData();
-  const hasPaymentPlan = Boolean(data.deposit || data.installments || data.first_due_date);
+  const hasPaymentPlan = data.payment_mode === "cash" || Boolean(data.deposit || data.installments || data.first_due_date);
   const payload = {
     client_id: data.client_id,
     client_name: data.client_name,
@@ -2212,6 +2232,7 @@ async function submitGenerateContract() {
     notes: data.notes,
   };
   if (hasPaymentPlan) {
+    payload.payment_mode = data.payment_mode;
     payload.deposit = data.deposit;
     payload.installments = data.installments;
     payload.frequency = data.frequency;
@@ -3381,7 +3402,10 @@ function renderPaymentsTable(mayEdit = can("edit"), mayDelete = can("delete")) {
       : payment.status === "reversed"
         ? `${badge("Reversed", "rejected")}<span class="cell-sub">${payment.reversed_by_name ? `by ${escapeHtml(payment.reversed_by_name)}` : ""}${payment.reversal_reason ? ` · ${escapeHtml(payment.reversal_reason)}` : ""}</span>`
         : `${badge("Approved", "approved")}${payment.approved_by_name ? `<span class="cell-sub">by ${escapeHtml(payment.approved_by_name)}${payment.self_approved ? " · self-approved (single Finance)" : ""}</span>` : ""}`;
-    return `<tr data-searchable><td><span class="cell-main">${escapeHtml(payment.client_name)}</span><span class="cell-sub">${escapeHtml(payment.project_name || "")}</span></td><td>${formatDate(payment.paid_at, String(payment.paid_at).length > 10)}</td><td>${badge(humanize(payment.method), "neutral")}</td><td class="amount amount-positive">${money(payment.amount)}</td><td><span class="mono">${escapeHtml(payment.reference || "—")}</span></td><td>${approval}</td><td><div class="row-actions">${approve}${receipt}${rowMenu([edit, reverse, remove])}</div></td></tr>`;
+    const mkuyuReceipt = payment.status === "approved" && payment.receipt_number
+      ? `<button class="btn btn-small" data-action="mkuyu-receipt" data-id="${payment.id}" data-filename="${escapeHtml(payment.receipt_number)}.pdf" title="Download the MKUYU receipt for the customer">${icon("receipt")}${escapeHtml(payment.receipt_number)}</button>`
+      : "";
+    return `<tr data-searchable><td><span class="cell-main">${escapeHtml(payment.client_name)}</span><span class="cell-sub">${escapeHtml(payment.project_name || "")}</span></td><td>${formatDate(payment.paid_at, String(payment.paid_at).length > 10)}</td><td>${badge(humanize(payment.method), "neutral")}</td><td class="amount amount-positive">${money(payment.amount)}</td><td><span class="mono">${escapeHtml(payment.reference || "—")}</span></td><td>${approval}</td><td><div class="row-actions">${approve}${mkuyuReceipt}${receipt}${rowMenu([edit, reverse, remove])}</div></td></tr>`;
   }).join("");
   return `<div class="table-wrap"><table class="data-table"><thead><tr><th>Client / project</th><th>Paid on</th><th>Method</th><th>Amount</th><th>Reference</th><th>Approval</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>${pager("payments")}`;
 }
@@ -4638,12 +4662,20 @@ function openModal(type, record = null) {
     subtitle = record ? `Deposit + installments for ${escapeHtml(record.client_name)} · ${money(record.value)}` : "Deposit + equal monthly installments.";
     submitLabel = "Generate schedule";
     const hasDebts = (state.debts || []).some((debt) => String(debt.contract_id) === String(record?.id));
+    const cashMode = record?.payment_mode === "cash";
+    const plan = {
+      deposit: Number(record?.deposit_amount ?? 0),
+      installments: cashMode ? 1 : (record?.installment_count || 6),
+      firstDue: String(record?.first_due_date || record?.start_date || today()).slice(0, 10),
+      frequency: CONTRACT_FREQUENCIES.includes(record?.payment_frequency) ? record.payment_frequency : "monthly",
+    };
     body = `<div class="form-grid">
-      <div class="field"><label for="field-deposit">Deposit now</label><input id="field-deposit" name="deposit" type="number" min="0" step="0.01" value="0" placeholder="0"></div>
-      <div class="field"><label for="field-installments">Installments</label><input id="field-installments" name="installments" type="number" min="1" max="120" required value="6"></div>
-      <div class="field full"><label for="field-first-due">First installment due</label><input id="field-first-due" name="first_due_date" type="date" required value="${today()}"></div>
+      <div class="field"><label for="field-deposit">Deposit (first payment)</label><input id="field-deposit" name="deposit" type="number" min="0" step="0.01" value="${escapeHtml(plan.deposit)}" placeholder="0"></div>
+      <div class="field"><label for="field-installments">Installments</label><input id="field-installments" name="installments" type="number" min="1" max="120" required value="${escapeHtml(plan.installments)}"></div>
+      <div class="field"><label for="field-first-due">First installment due</label><input id="field-first-due" name="first_due_date" type="date" required value="${escapeHtml(plan.firstDue)}"></div>
+      <div class="field"><label for="field-frequency">Frequency</label><select id="field-frequency" name="frequency">${CONTRACT_FREQUENCIES.map((value) => `<option value="${value}" ${plan.frequency === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}</select></div>
       ${hasDebts ? `<div class="field full"><label class="checkbox-field"><input type="checkbox" name="replace" value="yes"><span>This contract already has installments — replace them</span></label></div>` : ""}
-      <div class="field full"><div class="field-help">Installments split the remaining value (${money(Math.max(0, numberValue(record?.value) - 0))}) equally, due monthly from the first date. The final installment absorbs rounding. Reminders are created automatically.</div></div>
+      <div class="field full"><div class="field-help">Prefilled from the terms in the contract. The deposit is due first; the rest (${money(Math.max(0, numberValue(record?.value) - numberValue(plan.deposit, 0)))}) is split equally across the installments. The final installment absorbs rounding. Reminders are created automatically.</div></div>
     </div>`;
   }
   if (type === "payment") {
@@ -5020,6 +5052,7 @@ async function handleFormSubmit(event) {
         deposit: numberValue(data.deposit, 0),
         installments: Number(data.installments),
         first_due_date: data.first_due_date,
+        frequency: data.frequency || "monthly",
         replace: data.replace === "yes",
       };
       const result = await api(`/contracts/${id}/schedule`, { method: "POST", body: JSON.stringify(payload) });
@@ -5572,9 +5605,11 @@ function viewContract(contractId) {
   const installments = state.debts
     .filter((debt) => String(debt.contract_id) === String(contract.id))
     .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)));
+  // Only approved money counts as collected.
   const paidTotal = (state.payments || [])
-    .filter((payment) => installments.some((debt) => String(debt.id) === String(payment.debt_id)))
+    .filter((payment) => String(payment.contract_id) === String(contract.id) && payment.status === "approved")
     .reduce((sum, payment) => sum + numberValue(payment.amount), 0);
+  const financial = canSeeFinancial();
   const installmentRows = installments.map((debt) => {
     const stateValue = debtState(debt);
     return `<tr><td><span class="cell-main">${escapeHtml(debt.notes || `Installment`)}</span></td><td>${formatDate(debt.due_date)}</td><td>${badgeVariant(debtStateLabel(stateValue), stateValue)}</td><td class="amount">${money(debt.amount)}</td></tr>`;
@@ -5589,9 +5624,10 @@ function viewContract(contractId) {
       <div class="field"><span class="muted">End</span><div>${formatDate(contract.end_date)}</div></div>
       <div class="field"><span class="muted">Contract value</span><div class="amount">${money(contract.value)}</div></div>
       ${Number(contract.discount_pct || 0) > 0 ? `<div class="field"><span class="muted">Original price</span><div class="amount">${money(contract.original_price)}</div></div><div class="field"><span class="muted">Discount</span><div class="amount">${escapeHtml(String(contract.discount_pct))}% (− ${money(contract.discount_amount)})</div></div><div class="field"><span class="muted">Final price</span><div class="amount">${money(contract.final_price ?? contract.value)}</div></div>` : ""}
-      <div class="field"><span class="muted">Collected</span><div class="amount">${money(paidTotal)}</div></div>
+      ${financial ? "" : `<div class="field"><span class="muted">Collected</span><div class="amount">${money(paidTotal)}</div></div>`}
     </div>
-    ${installmentRows ? `<div class="section"><div class="section-head"><div><h2 class="section-title">Installments</h2><div class="section-note">Payment plan attached to this contract</div></div></div><div class="table-wrap"><table><thead><tr><th>Installment</th><th>Due</th><th>State</th><th class="align-right">Amount</th></tr></thead><tbody>${installmentRows}</tbody></table></div></div>` : ""}
+    ${financial ? `<div id="contract-account" class="section"><p class="muted">Loading the contract account…</p></div>` : ""}
+    ${!financial && installmentRows ? `<div class="section"><div class="section-head"><div><h2 class="section-title">Installments</h2><div class="section-note">Payment plan attached to this contract</div></div></div><div class="table-wrap"><table><thead><tr><th>Installment</th><th>Due</th><th>State</th><th class="align-right">Amount</th></tr></thead><tbody>${installmentRows}</tbody></table></div></div>` : ""}
     <div class="form-actions">
       <button type="button" class="btn" data-action="close-modal">Close</button>
       ${contract.generated_document_id && canModule("documents") ? `<button type="button" class="btn btn-soft" data-action="view-generated-contract" data-id="${contract.id}">View / Edit</button><button type="button" class="btn" data-action="download-generated-document" data-id="${contract.generated_document_id}" data-filename="${escapeHtml(`${contract.contract_number || "contract"}.docx`)}">Download DOCX</button>` : ""}
@@ -5600,6 +5636,107 @@ function viewContract(contractId) {
       <button type="button" class="btn btn-soft" data-action="contract-history" data-id="${contract.id}">History</button>
     </div>`;
   modalBackdrop.hidden = false;
+  if (financial) loadContractAccount(contract.id);
+}
+
+/** Payment methods offered on money forms (report config, or a safe default). */
+function paymentMethodChoices() {
+  return (state.reportPaymentMethods || []).length
+    ? state.reportPaymentMethods
+    : [{ value: "cash", label: "Cash" }, { value: "bank", label: "Bank transfer" }, { value: "mobile", label: "Mobile money" }, { value: "card", label: "Card" }, { value: "other", label: "Other" }];
+}
+
+/**
+ * Fills the "Account" part of the contract view for Finance and the MD: price,
+ * money received and confirmed, balance, next due and overdue installments,
+ * every payment with its MKUYU receipt, and refunds (with a form to record one).
+ */
+async function loadContractAccount(contractId) {
+  const host = document.getElementById("contract-account");
+  if (!host) return;
+  let account;
+  try {
+    account = await api(`/contracts/${contractId}/account`);
+  } catch (error) {
+    host.innerHTML = `<p class="muted">${escapeHtml(error.message || "Unable to load the contract account.")}</p>`;
+    return;
+  }
+  if (!document.getElementById("contract-account")) return;
+  const t = account.totals || {};
+  const me = state.organization.me || {};
+  const deskUser = can("validate_finance") && me.financial === true;
+  const stat = (label, value, extra = "") => `<div class="field"><span class="muted">${escapeHtml(label)}</span><div class="amount ${extra}">${value}</div></div>`;
+  const totals = `<div class="form-grid">
+    ${stat("Contract price", money(t.price))}
+    ${stat("Received (approved)", money(t.received), "amount-positive")}
+    ${t.pending_approval > 0 ? stat("Waiting for approval", money(t.pending_approval)) : ""}
+    ${t.refunded > 0 ? stat("Refunded", money(t.refunded)) : ""}
+    ${t.unapplied_credit > 0 ? stat("Credit not yet on an installment", money(t.unapplied_credit)) : ""}
+    ${stat("Balance", money(t.balance))}
+    ${stat("Next due", account.next_due ? `${money(account.next_due.amount)} · ${formatDate(account.next_due.due_date)}` : "Nothing due")}
+    ${t.overdue_count > 0 ? stat("Overdue", `${money(t.overdue_amount)} · ${t.overdue_count} installment${t.overdue_count === 1 ? "" : "s"}`) : ""}
+  </div>`;
+  const installmentRows = (account.installments || []).map((row) => {
+    const paid = row.balance <= 0;
+    const late = !paid && row.due_date && String(row.due_date).slice(0, 10) < today();
+    const stateBadge = paid ? badge("Paid", "approved") : row.paid > 0 ? badge("Part paid", "pending") : late ? badge("Overdue", "rejected") : badge("Open", "neutral");
+    return `<tr><td><span class="cell-main">${escapeHtml(row.label || "Installment")}</span></td><td>${formatDate(row.due_date)}</td><td>${stateBadge}</td><td class="amount">${money(row.amount)}</td><td class="amount">${money(row.paid)}</td><td class="amount">${money(row.balance)}</td></tr>`;
+  }).join("");
+  const paymentRows = (account.payments || []).map((row) => {
+    const status = row.status === "approved" ? badge("Approved", "approved") : row.status === "reversed" ? badge("Reversed", "rejected") : badge("Pending approval", "pending");
+    const receipt = row.status === "approved" && row.receipt_number
+      ? `<button class="btn btn-small" data-action="mkuyu-receipt" data-id="${row.id}" data-filename="${escapeHtml(row.receipt_number)}.pdf">${icon("receipt")}${escapeHtml(row.receipt_number)}</button>`
+      : `<span class="muted cell-plain">—</span>`;
+    return `<tr><td>${formatDate(row.paid_at)}</td><td class="amount">${money(row.amount)}</td><td><span class="mono">${escapeHtml(row.reference || "—")}</span></td><td>${status}</td><td>${receipt}</td></tr>`;
+  }).join("");
+  const refundRows = (account.refunds || []).map((row) => {
+    const approveBtn = row.status === "pending" && deskUser
+      ? `<button class="btn btn-primary btn-small" data-action="approve-refund" data-id="${row.id}" data-contract="${contractId}">Approve refund</button>`
+      : "";
+    return `<tr><td>${formatDate(row.paid_at)}</td><td class="amount">${money(row.amount)}</td><td><span class="mono">${escapeHtml(row.reference || "—")}</span></td><td>${escapeHtml(row.reason || "")}</td><td>${row.status === "approved" ? `${badge("Approved", "approved")}${row.self_approved ? `<span class="cell-sub">self-approved (single Finance)</span>` : ""}` : badge("Pending approval", "pending")}</td><td>${approveBtn}</td></tr>`;
+  }).join("");
+  const table = (head, rows) => `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>`;
+  const refundForm = deskUser && t.received - t.refunded > 0 ? `
+    <div class="form-actions"><button type="button" class="btn btn-soft" data-action="show-refund-form">Record refund</button></div>
+    <div id="refund-form" class="form-grid" hidden>
+      <div class="field"><label for="refund-amount">Amount refunded</label><input id="refund-amount" type="number" min="0" step="0.01" max="${escapeHtml(String(Math.max(0, t.received - t.refunded)))}"></div>
+      <div class="field"><label for="refund-date">Paid on</label><input id="refund-date" type="date" value="${today()}"></div>
+      <div class="field"><label for="refund-method">Method</label><select id="refund-method">${paymentMethodChoices().map((m) => `<option value="${escapeHtml(m.value)}"${m.value === "bank" ? " selected" : ""}>${escapeHtml(m.label)}</option>`).join("")}</select></div>
+      <div class="field"><label for="refund-reference">Transfer reference</label><input id="refund-reference" maxlength="160"></div>
+      <div class="field full"><label for="refund-reason">Reason</label><input id="refund-reason" maxlength="500" placeholder="e.g. Security deposit returned at the end of the lease"></div>
+      <div class="field full"><label for="refund-evidence">Proof</label><textarea id="refund-evidence" maxlength="4000" rows="2" placeholder="Paste the transfer message or describe the slip"></textarea></div>
+      <div class="form-actions full"><button type="button" class="btn btn-primary" data-action="submit-refund" data-id="${contractId}">Save refund</button></div>
+    </div>` : "";
+  host.innerHTML = `<div class="section-head"><div><h2 class="section-title">Account</h2><div class="section-note">Only money approved by Finance counts. Each approved payment has an MKUYU receipt for the customer.</div></div></div>
+    ${totals}
+    ${installmentRows ? `<h3 class="section-title" style="margin-top:18px">Installments</h3>${table(`<th>Installment</th><th>Due</th><th>State</th><th class="align-right">Amount</th><th class="align-right">Paid</th><th class="align-right">Balance</th>`, installmentRows)}` : `<p class="muted">No payment plan yet.</p>`}
+    ${paymentRows ? `<h3 class="section-title" style="margin-top:18px">Payments</h3>${table(`<th>Paid on</th><th class="align-right">Amount</th><th>Reference</th><th>Status</th><th>MKUYU receipt</th>`, paymentRows)}` : ""}
+    ${refundRows ? `<h3 class="section-title" style="margin-top:18px">Refunds</h3>${table(`<th>Paid on</th><th class="align-right">Amount</th><th>Reference</th><th>Reason</th><th>Status</th><th></th>`, refundRows)}` : ""}
+    ${refundForm}`;
+}
+
+async function submitRefund(contractId) {
+  const value = (id) => String(document.getElementById(id)?.value || "").trim();
+  const payload = { contract_id: Number(contractId), amount: numberValue(value("refund-amount")), paid_at: value("refund-date"), method: value("refund-method"), reference: value("refund-reference"), reason: value("refund-reason"), evidence_text: value("refund-evidence") };
+  if (!(payload.amount > 0)) { showToast("Enter the amount refunded."); return; }
+  if (!payload.reference || !payload.reason || !payload.evidence_text) { showToast("Reference, reason and proof are all required for a refund."); return; }
+  try {
+    await api("/payments/refunds", { method: "POST", body: JSON.stringify(payload) });
+    showToast("Refund recorded. It needs Finance approval.");
+    await loadContractAccount(contractId);
+  } catch (error) {
+    showToast(error.message || "Unable to record the refund.");
+  }
+}
+
+async function approveRefund(refundId, contractId) {
+  try {
+    await api(`/payments/refunds/${refundId}/approve`, { method: "POST", body: "{}" });
+    showToast("Refund approved.");
+    await loadContractAccount(contractId);
+  } catch (error) {
+    showToast(error.message || "Unable to approve the refund.");
+  }
 }
 
 /** Opens or closes the small-screen navigation drawer. */
@@ -5685,6 +5822,10 @@ document.addEventListener("click", async (event) => {
   if (action === "edit-debt") openModalFor("debts", id, "debt");
   if (action === "delete-debt") deleteRecord("debt", id);
   if (action === "reverse-payment") reversePayment(id);
+  if (action === "mkuyu-receipt") downloadFile(`/payments/${id}/mkuyu-receipt`, target.dataset.filename || "receipt.pdf").catch((error) => showToast(error.message || "Unable to download the receipt."));
+  if (action === "show-refund-form") { const form = document.getElementById("refund-form"); if (form) form.hidden = !form.hidden; }
+  if (action === "submit-refund") await submitRefund(id);
+  if (action === "approve-refund") await approveRefund(id, target.dataset.contract);
   if (action === "generate-schedule") openModalFor("contracts", id, "schedule");
   if (action === "contract-transition") runContractTransition(id, target.dataset.transition);
   if (action === "contract-history") showContractHistory(id);

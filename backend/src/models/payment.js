@@ -68,7 +68,49 @@ export const Payment = {
     const access = await currentAccess();
     const values = [userId, id, await organizationId(), Boolean(selfApproved)];
     const scope = scopeCondition("p", ENTITY, access, values);
-    return query(`UPDATE payments p SET status='approved', approved_by=$1, approved_at=NOW(), self_approved=$4 WHERE p.id=$2 AND p.organization_id=$3 AND p.status='pending' AND ${scope}`, values);
+    const result = await query(`UPDATE payments p SET status='approved', approved_by=$1, approved_at=NOW(), self_approved=$4,
+        receipt_number = COALESCE(p.receipt_number, 'RCT-' || to_char(NOW(), 'YYYY') || '-' || lpad(nextval('payment_receipt_seq')::text, 6, '0'))
+      WHERE p.id=$2 AND p.organization_id=$3 AND p.status='pending' AND ${scope}`, values);
+    // Approval is when money counts, so it is spread over the installments now.
+    if (result.rowCount) result.touchedDebts = await Payment.allocate(id);
+    return result;
+  },
+  /**
+   * Spreads an approved payment over its contract's installments: the
+   * installment it was recorded against first (if it still has a balance), then
+   * the oldest unpaid ones. Whatever is left over stays as an unapplied credit
+   * on the contract. Returns the installment ids that received money.
+   */
+  async allocate(paymentId) {
+    const orgId = await organizationId();
+    const payment = await queryOne("SELECT id, contract_id, debt_id, amount, status FROM payments WHERE id=$1 AND organization_id=$2", [paymentId, orgId]);
+    if (!payment || payment.status !== "approved") return [];
+    await query("DELETE FROM payment_allocations WHERE payment_id=$1", [paymentId]);
+    const debts = (await query(
+      `SELECT d.id, d.amount, COALESCE((SELECT SUM(pa.amount) FROM payment_allocations pa JOIN payments p ON p.id = pa.payment_id AND p.status = 'approved' WHERE pa.debt_id = d.id), 0) AS allocated
+         FROM debts d WHERE d.contract_id=$1 AND d.organization_id=$2
+        ORDER BY (d.id = $3) DESC, d.due_date NULLS LAST, d.id`,
+      [payment.contract_id, orgId, payment.debt_id || 0],
+    )).rows;
+    let left = Math.round(Number(payment.amount) * 100);
+    const touched = [];
+    for (const debt of debts) {
+      if (left <= 0) break;
+      const open = Math.round(Number(debt.amount) * 100) - Math.round(Number(debt.allocated) * 100);
+      if (open <= 0) continue;
+      const take = Math.min(open, left);
+      await query("INSERT INTO payment_allocations (organization_id, payment_id, debt_id, amount) VALUES ($1,$2,$3,$4)", [orgId, paymentId, debt.id, (take / 100).toFixed(2)]);
+      left -= take; touched.push(debt.id);
+    }
+    // A payment recorded against an installment that was already settled still
+    // resyncs it, so its status is right.
+    if (payment.debt_id && !touched.includes(payment.debt_id)) touched.push(payment.debt_id);
+    return touched;
+  },
+  /** Removes a payment's allocations; returns the installments that lose money. */
+  async deallocate(paymentId) {
+    const rows = (await query("DELETE FROM payment_allocations WHERE payment_id=$1 RETURNING debt_id", [paymentId])).rows;
+    return [...new Set(rows.map((row) => row.debt_id))];
   },
   /**
    * How many OTHER active staff could approve payments (Finance authority plus
@@ -94,7 +136,9 @@ export const Payment = {
     const access = await currentAccess();
     const values = [userId, reason, id, await organizationId()];
     const scope = scopeCondition("p", ENTITY, access, values);
-    return query(`UPDATE payments p SET status='reversed', reversed_by=$1, reversed_at=NOW(), reversal_reason=$2 WHERE p.id=$3 AND p.organization_id=$4 AND p.status='approved' AND ${scope}`, values);
+    const result = await query(`UPDATE payments p SET status='reversed', reversed_by=$1, reversed_at=NOW(), reversal_reason=$2 WHERE p.id=$3 AND p.organization_id=$4 AND p.status='approved' AND ${scope}`, values);
+    if (result.rowCount) result.touchedDebts = await Payment.deallocate(id);
+    return result;
   },
   /** Finds a live (not reversed) payment already using this transaction reference. */
   async findByReference(reference, exceptId = null) {
@@ -128,7 +172,7 @@ export const Payment = {
     const orgId = await organizationId();
     const debt = await queryOne("SELECT id,amount,due_date,status FROM debts WHERE id=$1 AND organization_id=$2", [debtId, orgId]);
     if (!debt) return;
-    const paid = Number((await queryOne("SELECT COALESCE(SUM(amount),0) AS total FROM payments WHERE debt_id=$1 AND organization_id=$2 AND status='approved'", [debtId, orgId])).total);
+    const paid = await Payment.forDebt(debtId);
     if (!force && paid === 0 && debt.status === "paid") return;
     // `partial` is derived here too, so a part-paid installment is a first-class
     // state rather than something the ledger implies but the record cannot show.
@@ -137,7 +181,7 @@ export const Payment = {
   },
   async forDebt(debtId) {
     const orgId = await organizationId();
-    return Number((await queryOne("SELECT COALESCE(SUM(amount),0) AS total FROM payments WHERE debt_id=$1 AND organization_id=$2 AND status='approved'", [debtId, orgId])).total);
+    return Number((await queryOne("SELECT COALESCE(SUM(pa.amount),0) AS total FROM payment_allocations pa JOIN payments p ON p.id=pa.payment_id AND p.status='approved' WHERE pa.debt_id=$1 AND p.organization_id=$2", [debtId, orgId])).total);
   },
 };
 

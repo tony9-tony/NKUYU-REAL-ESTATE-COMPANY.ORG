@@ -98,6 +98,8 @@ try {
 
   const approvedDeal = await newContract(sales, "Approved deal");
   check((await call(`/contracts/${approvedDeal.id}/transition`, { method: "POST", token: sales, body: { action: "submit" } })).status === 200, "Sales submits a contract to Legal");
+  check((await call(`/contracts/${approvedDeal.id}/transition`, { method: "POST", token: legal, body: { action: "legal_approve" } })).status === 409, "Legal cannot approve without starting the review");
+  check((await call(`/contracts/${approvedDeal.id}/transition`, { method: "POST", token: legal, body: { action: "start_review" } })).status === 200, "Legal starts the review");
   check((await call(`/contracts/${approvedDeal.id}/transition`, { method: "POST", token: legal, body: { action: "legal_approve" } })).status === 200, "Legal approves it");
   const refused = await call(`/contracts/${approvedDeal.id}`, { method: "DELETE", token: sales });
   check(refused.status === 403 && /before it is approved/.test(refused.body.error || ""), `Sales may no longer delete it once approved (${refused.status})`);
@@ -120,7 +122,11 @@ try {
   check(answered.status === 200 && answered.body.outcome === "answered", "Customer Service marks it answered");
 
   console.log("\n=== CHECK 05: the type decides the agreement, placed on the template ===");
-  const generate = (type, extra = {}) => call("/contracts/generate", { method: "POST", token: sales, body: { project_id: project.id, property_id: property.body.id, client_name: `Client ${type} ${tag}`, deal_type: type, original_price: 120000000, discount_pct: 5, start_date: "2026-10-01", agreement_duration: 12, title_deed_number: "CT-45821", ...extra } });
+  // One live deal per property and type, so every generated contract gets its own villa.
+  let villaSeq = 0;
+  // The first contract uses the main villa (later checks rely on it being on a contract).
+  const freshVilla = async () => villaSeq++ === 0 ? property.body.id : (await call("/properties", { method: "POST", token: sales, body: { project_id: project.id, name: `HW Villa ${tag} ${villaSeq}`, property_type: "villa", price: 250000000, location: "Mbezi Beach", area: 640 } })).body.id;
+  const generate = async (type, extra = {}) => call("/contracts/generate", { method: "POST", token: sales, body: { project_id: project.id, property_id: await freshVilla(), client_name: `Client ${type} ${tag}`, deal_type: type, original_price: 120000000, discount_pct: 5, start_date: "2026-10-01", agreement_duration: 12, title_deed_number: "CT-45821", ...extra } });
   const expected = { buy: "Sale Agreement", rent: "Lease Agreement", sell: "Property Sale Mandate" };
   for (const [type, title] of Object.entries(expected)) {
     const result = await generate(type, { template_document_id: "" });
@@ -286,11 +292,13 @@ try {
   check(formSold.body.sale_status === "sold" && formSold.body.status === "sold", "choosing Sold in the edit form marks the sale as sold");
 
   console.log("\n=== CHECK 10: Rent has no project ===");
-  const lease = await call("/contracts/generate", { method: "POST", token: sales, body: { project_id: project.id, property_id: both.body.id, client_name: `Tenant ${tag}`, deal_type: "rent", original_price: 30000000, start_date: "2026-11-01", agreement_duration: 12, template_document_id: "" } });
+  // Two leases need two properties (one live lease per property).
+  const leaseHome = async (n) => (await call("/properties", { method: "POST", token: sales, body: { project_id: project.id, name: `HW Lease ${n} ${tag}`, property_type: "house", price: 90000000, location: "Mikocheni", area: 300, offer_rent: 1, rent_price: 2500000 } })).body.id;
+  const lease = await call("/contracts/generate", { method: "POST", token: sales, body: { project_id: project.id, property_id: await leaseHome("A"), client_name: `Tenant ${tag}`, deal_type: "rent", original_price: 30000000, start_date: "2026-11-01", agreement_duration: 12, template_document_id: "" } });
   check(lease.status === 201 && lease.body.contract?.project_id === null, `a Rent contract is saved without a project (${lease.status})`);
   const leaseText = (await query("SELECT body_text FROM documents WHERE id=$1", [lease.body.document?.id])).rows[0]?.body_text || "";
   check(leaseText.includes("# Lease Agreement") && !/Project:/.test(leaseText), "the Lease Agreement names the property, not a project");
-  const leaseNoProject = await call("/contracts/generate", { method: "POST", token: sales, body: { property_id: both.body.id, client_name: `Tenant B ${tag}`, deal_type: "rent", original_price: 30000000, start_date: "2026-11-01", agreement_duration: 12, template_document_id: "" } });
+  const leaseNoProject = await call("/contracts/generate", { method: "POST", token: sales, body: { property_id: await leaseHome("B"), client_name: `Tenant B ${tag}`, deal_type: "rent", original_price: 30000000, start_date: "2026-11-01", agreement_duration: 12, template_document_id: "" } });
   check(leaseNoProject.status === 201, "a Rent contract needs no project at all");
   check((await call("/contracts", { token: sales })).body.some((c) => c.id === leaseNoProject.body.contract?.id), "a contract without a project still shows in the register");
   check((await call("/contracts/generate", { method: "POST", token: sales, body: { property_id: both.body.id, client_name: "Buyer NP", deal_type: "buy", original_price: 1000, start_date: "2026-11-01", agreement_duration: 12 } })).status === 400, "a Sale still needs its project");

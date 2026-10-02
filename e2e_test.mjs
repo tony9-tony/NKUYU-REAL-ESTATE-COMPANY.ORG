@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { prepareTestDatabase, reapOrphanServers, connectedDatabase } from "./test_support/harness.mjs";
 import { closeDatabase, query } from "./backend/src/db.js";
+import { Payment } from "./backend/src/models/payment.js";
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.E2E_PORT || 3177);
@@ -126,7 +127,8 @@ async function main() {
   // Approval by a second Finance person is covered by final_checks_test; here it
   // is simulated, then the installment is re-derived through the API.
   const approveAsFinance = async (paymentId, debtId) => {
-    await query("UPDATE payments SET status='approved', approved_at=NOW() WHERE id=$1", [paymentId]);
+    // The model's approve also spreads the money over the installments.
+    await Payment.approve(paymentId, null);
     if (debtId) await call(`/debts/${debtId}`, { method: "PUT", body: "{}" });
   };
 
@@ -467,7 +469,9 @@ Signed by the Buyer: ____________________`;
     ["weeks", 2, "2027-02-14"],
     ["years", 1, "2028-01-31"],
   ]) {
-    const result = await call("/contracts/generate", { method: "POST", body: { ...common, template_document_id: null, agreement_duration_unit: unit, agreement_duration: duration, end_date: expected } });
+    // One live sale per property: each duration check sells its own villa.
+    const unitProperty = await call("/properties", { method: "POST", body: JSON.stringify({ project_id: projectId, name: `E2E Villa ${unit} ${RUN}`, property_type: "villa", status: "available", price: 500000, location: "Dar", area: 400, bedrooms: 4, bathrooms: 3 }) });
+    const result = await call("/contracts/generate", { method: "POST", body: { ...common, property_id: unitProperty.payload.id, template_document_id: null, agreement_duration_unit: unit, agreement_duration: duration, end_date: expected } });
     assert(result.status === 201 && result.payload.contract.end_date === expected, `${unit} duration persists the correct end date (${expected})`);
     const noPlanValues = buildContractValues({
       contract: result.payload.contract,

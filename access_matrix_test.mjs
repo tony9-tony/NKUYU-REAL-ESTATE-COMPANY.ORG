@@ -435,6 +435,17 @@ async function main() {
   res = await step("management_approve", sessions.director);
   check(res.status === 200 && res.payload.status === "approved", "the managing director approves");
   check((await step("send_to_customer", sessions.legal)).status === 200, "legal sends the contract to the customer");
+  // The contract comes into force only once the deposit is paid and approved.
+  res = await step("record_signature", sessions.legal, { signed_by: "Matrix Customer" });
+  check(res.status === 409 && /payment plan/.test(res.payload.error || ""), "the signature waits for a payment plan");
+  res = await call(`/contracts/${flow.id}/schedule`, { token: sessions.finance, method: "POST", body: { deposit: 100000, installments: 3, first_due_date: "2026-12-01" } });
+  check(res.status === 201 && res.payload.created === 4, "Finance creates the payment plan (deposit + 3 installments)");
+  const deposit = res.payload.debts[0];
+  res = await step("record_signature", sessions.legal, { signed_by: "Matrix Customer" });
+  check(res.status === 409 && /deposit/i.test(res.payload.error || ""), "the signature waits for the deposit");
+  const depositPay = await call("/payments", { token: sessions.finance, method: "POST", body: { contract_id: flow.id, debt_id: deposit.id, amount: 100000, paid_at: "2026-10-02", method: "bank", reference: `MATRIX-DEP-${stamp}`, evidence_text: "bank slip" } });
+  check(depositPay.status === 201, "Finance records the deposit");
+  check((await call(`/payments/${depositPay.payload.id}/approve`, { token: sessions.finance_manager, method: "POST", body: {} })).status === 200, "a second Finance person approves the deposit");
   res = await step("record_signature", sessions.legal, { signed_by: "Matrix Customer" });
   check(res.status === 200 && res.payload.status === "active", "legal records the signature and activates the contract");
   check(Boolean(res.payload.customer_signed_at), "the signature is stamped on the record");
@@ -448,7 +459,10 @@ async function main() {
   res = await call(`/contracts/${flow.id}`, { token: sessions.sales, method: "DELETE" });
   check(res.status === 403, "sales cannot delete a contract record; only Legal can");
   res = await call(`/contracts/${flow.id}`, { token: sessions.legal, method: "DELETE" });
-  check(res.status === 200, "legal may delete a contract record");
+  check(res.status === 409, "not even Legal deletes a contract with payments on record (it is cancelled instead)");
+  res = await call("/contracts", { token: sessions.director, method: "POST", body: { project_id: salesProject.id, client_name: `Matrix Spare ${stamp}`, contract_type: "new", deal_type: "buy", value: 1000 } });
+  res = await call(`/contracts/${res.payload.id}`, { token: sessions.legal, method: "DELETE" });
+  check(res.status === 200, "legal may delete a contract record that has no money on it");
 
   // --- Access matrix integrity, read from the live API ---------------------
   res = await call("/org/access-matrix", { token: sessions.admin });

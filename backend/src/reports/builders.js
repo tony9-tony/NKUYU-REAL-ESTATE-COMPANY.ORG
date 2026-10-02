@@ -71,7 +71,7 @@ async function buildRows(type, filters) {
     const paymentScope = scope("pmt", "payment");
     const debtScope = scope("d", "debt");
     sql = `SELECT d.due_date,d.client_name,d.amount,d.status,pr.name AS project_name,
-      COALESCE((SELECT SUM(pmt.amount) FROM payments pmt WHERE pmt.debt_id=d.id AND pmt.organization_id=$1 AND pmt.status='approved' AND ${paymentScope}),0) AS paid_amount
+      COALESCE((SELECT SUM(pa.amount) FROM payment_allocations pa JOIN payments pmt ON pmt.id=pa.payment_id WHERE pa.debt_id=d.id AND pmt.organization_id=$1 AND pmt.status='approved' AND ${paymentScope}),0) AS paid_amount
       FROM debts d JOIN contracts c ON c.id=d.contract_id AND c.organization_id=$1 AND ${contractScope}
       LEFT JOIN projects pr ON pr.id=c.project_id AND pr.organization_id=$1 AND ${projectScope}
       WHERE d.organization_id=$1 AND ${debtScope}`;

@@ -72,10 +72,27 @@ export async function shareContractWithHandoverDesks(contractId, actorId = null)
  * sharing existed get the shares they should have had. Safe to run every boot.
  */
 export async function backfillHandoverShares() {
-  const rows = (await query(
-    "SELECT id FROM contracts WHERE status <> ALL($1::text[])",
-    [[...PRIVATE_STATUSES]],
-  )).rows;
-  for (const row of rows) await shareContractWithHandoverDesks(row.id);
-  return rows.length;
+  // Set-based: one statement per (status, department) rather than several
+  // queries per contract, so startup stays fast as the register grows (the
+  // per-contract loop took ~50 s on 11,000 contracts).
+  const statuses = (await query("SELECT DISTINCT status FROM contracts WHERE status <> ALL($1::text[])", [[...PRIVATE_STATUSES]])).rows.map((row) => row.status);
+  let shared = 0;
+  for (const status of statuses) {
+    const names = handoverDepartments(status);
+    if (!names.length) continue;
+    const contracts = await query(
+      `INSERT INTO record_shares (organization_id, entity, record_id, department_id, created_by)
+       SELECT c.organization_id, 'contract', c.id, d.id, NULL FROM contracts c
+         JOIN departments d ON d.organization_id = c.organization_id AND d.name = ANY($2::text[])
+        WHERE c.status = $1
+       ON CONFLICT (entity, record_id, COALESCE(user_id, 0), COALESCE(department_id, 0)) DO NOTHING`, [status, names]);
+    await query(
+      `INSERT INTO record_shares (organization_id, entity, record_id, department_id, created_by)
+       SELECT c.organization_id, 'document', c.generated_document_id, d.id, NULL FROM contracts c
+         JOIN departments d ON d.organization_id = c.organization_id AND d.name = ANY($2::text[])
+        WHERE c.status = $1 AND c.generated_document_id IS NOT NULL
+       ON CONFLICT (entity, record_id, COALESCE(user_id, 0), COALESCE(department_id, 0)) DO NOTHING`, [status, names]);
+    shared += contracts.rowCount;
+  }
+  return shared;
 }

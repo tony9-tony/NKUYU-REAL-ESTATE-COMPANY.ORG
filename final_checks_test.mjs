@@ -154,6 +154,84 @@ try {
   } finally {
     await query("UPDATE users SET active=TRUE WHERE id = ANY($1::int[])", [others]);
   }
+
+  console.log("\n=== CHECK 08: one property, one live deal; the client is always in the register ===");
+  const legal = await make(`Legal FC ${tag}`, `legal.fc.${tag}@test.mkuyu.local`, "Legal Manager");
+  const house = (await call("/properties", { method: "POST", token: sales, body: { project_id: project.id, name: `FC House ${tag}`, property_type: "villa", price: 10000000, location: "Mbezi", area: 500 } })).body;
+  const house2 = (await call("/properties", { method: "POST", token: sales, body: { project_id: project.id, name: `FC House B ${tag}`, property_type: "villa", price: 6000000, location: "Mbezi", area: 400 } })).body;
+  check(Boolean(house?.id && house2?.id), "two properties are listed");
+  const buyerPhone = `+255 71${String(Date.now()).slice(-7)}`;
+  const deal = await call("/contracts", { method: "POST", token: sales, body: { project_id: project.id, property_id: house.id, client_name: `Buyer FC ${tag}`, client_phone: buyerPhone, contract_type: "new", deal_type: "buy", value: 10000000, start_date: "2026-10-05" } });
+  check(deal.status === 201 && Number(deal.body.client_id) > 0, "a contract typed with a new name registers the client automatically");
+  const autoClient = (await query("SELECT * FROM clients WHERE id=$1", [deal.body.client_id])).rows[0];
+  check(autoClient?.phone === buyerPhone && autoClient?.client_type === "buyer", "the new client carries the phone and is a Buyer");
+  const twice = await call("/contracts", { method: "POST", token: sales, body: { project_id: project.id, property_id: house.id, client_name: "Someone Else", contract_type: "new", deal_type: "buy", value: 10000000 } });
+  check(twice.status === 409, "a second sale contract on the same property is refused while the first is live");
+  const again = await call("/contracts", { method: "POST", token: sales, body: { project_id: project.id, property_id: house2.id, client_name: `Buyer FC ${tag}`, client_phone: buyerPhone, contract_type: "new", deal_type: "buy", value: 6000000 } });
+  check(again.status === 201 && Number(again.body.client_id) === Number(deal.body.client_id), "the same customer (same phone) is linked, not registered twice");
+
+  console.log("\n=== CHECK 09: Finance validation creates the plan from the contract terms ===");
+  await query("UPDATE contracts SET deposit_amount=2000000, installment_count=4, first_due_date='2026-11-01', payment_frequency='monthly' WHERE id=$1", [deal.body.id]);
+  await query("UPDATE contracts SET payment_mode='cash', deposit_amount=0, installment_count=1, first_due_date='2026-10-10' WHERE id=$1", [again.body.id]);
+  // The real hand-over: Sales submits, Legal reviews and approves; Finance then sees it.
+  for (const id of [deal.body.id, again.body.id]) {
+    const steps = [[sales, "submit"], [legal, "start_review"], [legal, "legal_approve"]];
+    for (const [who, action] of steps) {
+      const step = await call(`/contracts/${id}/transition`, { method: "POST", token: who, body: { action } });
+      if (step.status !== 200) console.log(`   ${action} on #${id}: ${step.status} ${step.body.error || ""}`);
+    }
+  }
+  const validated = await call(`/contracts/${deal.body.id}/transition`, { method: "POST", token: financeA, body: { action: "finance_validate" } });
+  check(validated.status === 200, `Finance validates the contract (${validated.status} ${validated.body.error || ""})`);
+  const plan = (await query("SELECT * FROM debts WHERE contract_id=$1 ORDER BY due_date, id", [deal.body.id])).rows;
+  check(plan.length === 5 && Number(plan[0].amount) === 2000000 && plan.slice(1).every((row) => Number(row.amount) === 2000000), `deposit + 4 installments are created (${plan.map((row) => Number(row.amount)).join(", ")})`);
+  const financeDebts = (await call(`/debts?contract_id=${deal.body.id}`, { token: financeB })).body;
+  const seen = (Array.isArray(financeDebts) ? financeDebts : financeDebts.rows || financeDebts.data || []).filter((row) => Number(row.contract_id) === Number(deal.body.id));
+  check(seen.length === 5, `another Finance officer sees the installments of a Sales contract (${seen.length})`);
+  await call(`/contracts/${again.body.id}/transition`, { method: "POST", token: financeA, body: { action: "finance_validate" } });
+  const cashPlan = (await query("SELECT amount FROM debts WHERE contract_id=$1", [again.body.id])).rows;
+  check(cashPlan.length === 1 && Number(cashPlan[0].amount) === 6000000, "a cash contract gets one payment of the full price");
+
+  console.log("\n=== CHECK 10: the property follows the contract; the deposit comes before the signature ===");
+  for (const [who, action] of [[legal, "submit_management"], [md, "management_approve"]]) {
+    const step = await call(`/contracts/${deal.body.id}/transition`, { method: "POST", token: who, body: { action } });
+    check(step.status === 200, `${action} (${step.status} ${step.body.error || ""})`);
+  }
+  check((await call(`/contracts/${deal.body.id}/transition`, { method: "POST", token: legal, body: { action: "send_to_customer" } })).status === 200, "Legal sends the approved contract to the customer");
+  check((await query("SELECT sale_status FROM properties WHERE id=$1", [house.id])).rows[0].sale_status === "reserved", "the property is Reserved while the customer has the contract");
+  const early = await call(`/contracts/${deal.body.id}/transition`, { method: "POST", token: legal, body: { action: "record_signature", signed_by: "Buyer FC" } });
+  check(early.status === 409, `the signature cannot be recorded before the deposit is paid (${early.status} ${early.body.error || ""})`);
+  const deposit = await call("/payments", { method: "POST", token: financeA, body: { contract_id: deal.body.id, debt_id: plan[0].id, amount: 3000000, paid_at: "2026-10-06", method: "bank", reference: `DEP-${tag}`, evidence_text: `NMB: TZS 3,000,000 received ref DEP-${tag}` } });
+  const depositOk = await call(`/payments/${deposit.body.id}/approve`, { method: "POST", token: financeB, body: {} });
+  check(depositOk.status === 200 && /^RCT-\d{4}-\d{6}$/.test(depositOk.body.receipt_number || ""), `the approved payment gets an MKUYU receipt number (${depositOk.body.receipt_number})`);
+  const afterPay = (await query("SELECT id, status, (SELECT COALESCE(SUM(amount),0) FROM payment_allocations WHERE debt_id=d.id) AS paid FROM debts d WHERE contract_id=$1 ORDER BY due_date, id", [deal.body.id])).rows;
+  check(afterPay[0].status === "paid" && Number(afterPay[1].paid) === 1000000 && Number(afterPay[2].paid) === 0, "an overpayment settles the deposit and the rest goes to the next installment");
+  check((await call(`/contracts/${deal.body.id}/transition`, { method: "POST", token: legal, body: { action: "record_signature", signed_by: "Buyer FC" } })).status === 200, "with the deposit paid the signature is recorded");
+  check((await query("SELECT sale_status FROM properties WHERE id=$1", [house.id])).rows[0].sale_status === "sold", "the property is Sold once the contract is active");
+  check((await query("SELECT status FROM clients WHERE id=$1", [deal.body.client_id])).rows[0].status === "active", "the customer becomes an active client");
+  const pdf = await fetch(`${base}/payments/${deposit.body.id}/mkuyu-receipt`, { headers: { Authorization: `Bearer ${financeA}` } });
+  const pdfBytes = Buffer.from(await pdf.arrayBuffer());
+  check(pdf.status === 200 && /pdf/.test(pdf.headers.get("content-type") || "") && pdfBytes.subarray(0, 4).toString() === "%PDF", "the MKUYU receipt downloads as a PDF");
+  check((await fetch(`${base}/payments/${solo.body.id}/mkuyu-receipt`, { headers: { Authorization: `Bearer ${sales}` } })).status >= 400, "Sales cannot download receipts");
+
+  console.log("\n=== CHECK 11: the contract account ===");
+  const account = await call(`/contracts/${deal.body.id}/account`, { token: md });
+  const totals = account.body.totals || {};
+  check(account.status === 200 && totals.price === 10000000 && totals.received === 3000000 && totals.balance === 7000000, `the MD sees price, received and balance (${totals.price} / ${totals.received} / ${totals.balance})`);
+  check(account.body.next_due && account.body.next_due.amount === 1000000, "the next amount due is what is left of the next installment");
+  check(account.body.payments?.[0]?.receipt_number === depositOk.body.receipt_number, "payments are listed with their receipt numbers");
+  check((await call(`/contracts/${deal.body.id}/account`, { token: sales })).status === 403, "Sales cannot read the contract account");
+
+  console.log("\n=== CHECK 12: refunds ===");
+  check((await call("/payments/refunds", { method: "POST", token: financeA, body: { contract_id: deal.body.id, amount: 9000000, reference: `RF-${tag}`, reason: "test", evidence_text: "slip" } })).status === 409, "a refund cannot exceed the money received");
+  check((await call("/payments/refunds", { method: "POST", token: financeA, body: { contract_id: deal.body.id, amount: 100, reference: `RF-${tag}`, reason: "test" } })).status === 400, "a refund needs proof");
+  check((await call("/payments/refunds", { method: "POST", token: sales, body: { contract_id: deal.body.id, amount: 100, reference: `RF-${tag}`, reason: "test", evidence_text: "slip" } })).status === 403, "Sales cannot record refunds");
+  const refund = await call("/payments/refunds", { method: "POST", token: financeA, body: { contract_id: deal.body.id, amount: 500000, method: "bank", reference: `RF-${tag}`, reason: "Agreed discount returned", evidence_text: "NMB transfer RF" } });
+  check(refund.status === 201 && refund.body.status === "pending", "Finance records a refund; it waits for approval");
+  check((await call(`/payments/refunds/${refund.body.id}/approve`, { method: "POST", token: financeA, body: {} })).status === 403, "the person who recorded a refund cannot approve it");
+  check((await call(`/payments/refunds/${refund.body.id}/approve`, { method: "POST", token: financeB, body: {} })).status === 200, "a second Finance officer approves the refund");
+  const afterRefund = (await call(`/contracts/${deal.body.id}/account`, { token: financeA })).body.totals || {};
+  check(afterRefund.refunded === 500000 && afterRefund.balance === 7500000, `the refund shows in the account (balance ${afterRefund.balance})`);
   void demoPasswordFor;
 } catch (error) {
   failures += 1;

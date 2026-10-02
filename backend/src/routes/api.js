@@ -14,6 +14,8 @@ import { Reminder } from "../models/reminder.js";
 import { Report } from "../models/report.js";
 import { REPORT_TYPES, REPORT_TYPE_IDS, PAYMENT_METHODS, reportTypeLabel, reportTypeIsFinancial } from "../models/reportTypes.js";
 import { Property, Client, Appointment, Document, PropertyImage } from "../models/catalog.js";
+import { findExistingClient } from "../org/clientMatch.js";
+import PDFDocument from "pdfkit";
 import { paginatedList, paginationRequested, parsePagination, searchTerm } from "../pagination.js";
 import {
   hashPassword,
@@ -270,9 +272,88 @@ async function validateContract(body, current = {}) {
     if (data.project_id && property.project_id && Number(property.project_id) !== Number(data.project_id)) {
       throw new HttpError(400, "property_id does not belong to the selected project");
     }
+    // One property, one live deal per category: a house cannot be sold (or
+    // let) to two customers at once. Checked when the property or the type of
+    // deal is chosen, not on every later edit of the same contract.
+    const changed = !current.id || Number(current.property_id) !== Number(data.property_id) || current.deal_type !== data.deal_type;
+    if (changed && (data.deal_type === "buy" || data.deal_type === "rent")) {
+      await assertPropertyFree(property, data.deal_type, current.id || null);
+    }
   }
   if (data.start_date && data.end_date && data.end_date < data.start_date) throw new HttpError(400, "end_date cannot be before start_date");
   return data;
+}
+
+/** Refuses a second live Buy (or Rent) contract on the same property. */
+async function assertPropertyFree(property, dealType, exceptContractId = null) {
+  const other = await queryOne(
+    `SELECT id, contract_number, client_name, status FROM contracts
+      WHERE organization_id=$1 AND property_id=$2 AND deal_type=$3 AND id <> COALESCE($4::int, 0)
+        AND status NOT IN ('rejected','cancelled') AND NOT ($3 = 'rent' AND status = 'completed')
+      ORDER BY id LIMIT 1`,
+    [await organizationId(), property.id, dealType, exceptContractId],
+  );
+  if (other) {
+    throw new HttpError(409, `${property.name} already has a ${dealType === "rent" ? "lease" : "sale"} contract in progress (${other.contract_number || `#${other.id}`}, ${other.client_name}, ${String(other.status).replace(/_/g, " ")}); cancel that one first`);
+  }
+  if (dealType === "buy" && property.sale_status === "sold") throw new HttpError(409, `${property.name} is already sold`);
+  if (dealType === "rent" && property.rent_status === "rented") throw new HttpError(409, `${property.name} is already rented`);
+}
+
+/**
+ * Every contract belongs to a client in the register. When Sales types a name
+ * instead of choosing a client, the client is found by phone or email, or
+ * registered as a prospect, so that client's contracts and payments are always
+ * found together.
+ */
+async function ensureContractClient(data) {
+  if (data.client_id) return data;
+  const existing = await findExistingClient(await organizationId(), { email: data.client_email, phone: data.client_phone });
+  if (existing) { data.client_id = existing.id; return data; }
+  const clientType = { buy: "buyer", rent: "tenant", sell: "seller" }[data.deal_type] || "buyer";
+  const created = await Client.create({
+    project_id: data.project_id || null, name: data.client_name, email: data.client_email || null, phone: data.client_phone || null,
+    client_type: clientType, status: "lead", notes: "Registered automatically when their contract was prepared.",
+  });
+  data.client_id = created.id;
+  return data;
+}
+
+// Contract transitions that release a property the contract was holding.
+const PROPERTY_RELEASE_ACTIONS = new Set(["cancel", "reject", "management_reject", "request_changes", "complete"]);
+
+/**
+ * A property's Buy/Rent state follows its contracts: Reserved while an approved
+ * contract is with the customer, Sold/Rented once the contract is active, and
+ * available again when that contract is cancelled, rejected or sent back (or,
+ * for a lease, completed). Sell mandates are about the owner's property and
+ * leave MKUYU's listing alone.
+ */
+async function syncPropertyForContract(contractId, action, userId) {
+  const contract = await queryOne("SELECT id, organization_id, property_id, deal_type, status, client_id FROM contracts WHERE id=$1", [contractId]);
+  if (!contract?.property_id || !["buy", "rent"].includes(contract.deal_type)) return;
+  const property = await queryOne("SELECT id, status, sale_status, rent_status, offer_buy, offer_rent FROM properties WHERE id=$1", [contract.property_id]);
+  if (!property) return;
+  const field = contract.deal_type === "buy" ? "sale_status" : "rent_status";
+  const closed = contract.deal_type === "buy" ? "sold" : "rented";
+  const statuses = (await query("SELECT status FROM contracts WHERE property_id=$1 AND deal_type=$2", [property.id, contract.deal_type])).rows.map((row) => row.status);
+  let target;
+  if (statuses.some((status) => status === "active" || (status === "completed" && contract.deal_type === "buy"))) target = closed;
+  else if (statuses.some((status) => status === "approved" || status === "customer_pending")) target = "reserved";
+  else target = "available";
+  const currentState = property[field] || "available";
+  if (target === currentState) return;
+  // Freeing a property only undoes what a contract did; a hand-set Reserved on a
+  // property whose contract is still in draft is left alone.
+  if (target === "available" && !(PROPERTY_RELEASE_ACTIONS.has(action) && [closed, "reserved"].includes(currentState))) return;
+  const next = { ...property, [field]: target };
+  const status = overallStatus(next, property.status);
+  await query(`UPDATE properties SET ${field}=$1, status=$2 WHERE id=$3`, [target, status, property.id]);
+  await recordPropertyHistory(property.id, userId, "status_changed", { from: property.status, to: status, [field.replace("_status", "")]: target, contract_id: contract.id, action });
+  // The customer is a client in force once their contract is.
+  if (contract.status === "active" && contract.client_id) {
+    await query("UPDATE clients SET status='active' WHERE id=$1 AND status='lead'", [contract.client_id]);
+  }
 }
 
 // Adds a whole number of months (or the equivalent in days/weeks/years) to a
@@ -293,6 +374,18 @@ function addMonths(dateString, months, unit = "months") {
   const anchor = new Date(Date.UTC(year, targetMonth, 1));
   const lastDay = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth() + 1, 0)).getUTCDate();
   return `${anchor.getUTCFullYear()}-${String(anchor.getUTCMonth() + 1).padStart(2, "0")}-${String(Math.min(day, lastDay)).padStart(2, "0")}`;
+}
+
+/** Months covered by an agreement duration (days and weeks round up to whole months). */
+function leaseMonths(duration, unit = "months") {
+  const value = Number(duration);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  switch (String(unit || "months").toLowerCase()) {
+    case "years": return value * 12;
+    case "weeks": return Math.max(1, Math.ceil((value * 7) / 30));
+    case "days": return Math.max(1, Math.ceil(value / 30));
+    default: return value;
+  }
 }
 
 /** Today as YYYY-MM-DD, read from the database so every process agrees. */
@@ -1034,6 +1127,14 @@ router.post("/contracts/:id/transition", route(async (req, res) => {
   const notes = optionalText(req.body?.notes, "notes", 2000);
   const signedBy = optionalText(req.body?.signed_by, "signed_by", 160);
   if (name === "record_signature" && !signedBy) throw new HttpError(400, "signed_by is required to record a customer signature");
+  // A contract comes into force only when the customer has signed AND paid what
+  // is due at signing: the deposit (or, for cash, the whole price), confirmed by
+  // Finance. The first installment of the plan is that payment.
+  if (name === "record_signature") {
+    const first = await queryOne("SELECT id, status, amount, notes FROM debts WHERE contract_id=$1 ORDER BY due_date NULLS LAST, id LIMIT 1", [id]);
+    if (!first) throw new HttpError(409, "this contract has no payment plan yet; Finance must create it before the contract can become active");
+    if (first.status !== "paid") throw new HttpError(409, `the ${String(first.notes || "first payment").toLowerCase()} must be paid and approved by Finance before the customer's signature is recorded`);
+  }
   if (name === "request_changes" && contract.legal_signed_by) {
     try {
       await clearContractSignatureDocument(contract);
@@ -1048,6 +1149,10 @@ router.post("/contracts/:id/transition", route(async (req, res) => {
     actorName: req.user.display_name,
     signedBy,
   });
+  // Finance's validation turns the agreed terms into the payment plan.
+  if (name === "finance_validate") await createScheduleFromTerms(id);
+  // The property follows the contract (Reserved / Sold / Rented / available).
+  await syncPropertyForContract(id, name, req.user.id);
   // The desk that now holds the contract must be able to open it (see handover.js).
   const sharedWith = await shareContractWithHandoverDesks(id, req.user.id);
   // Legal approval puts the approving lawyer's signature on the document.
@@ -1081,6 +1186,16 @@ router.post("/contracts/generate", route(async (req, res) => {
   // Pricing is the server's. A final_price / discount_amount / value in the body
   // is simply never read: validateContract derives them from original_price +
   // discount_pct, exactly as the plain create route does.
+  // A lease is priced from the property's rent: rent per month x the months of
+  // the agreement, unless Sales entered a price themselves.
+  if ((body.deal_type === "rent") && (body.original_price === undefined || body.original_price === null || body.original_price === "") && body.property_id) {
+    const leased = await Property.get(parseId(body.property_id, "property_id"));
+    const months = leaseMonths(body.agreement_duration, body.agreement_duration_unit);
+    if (leased?.rent_price && months) {
+      const monthly = leased.rent_period === "year" ? Number(leased.rent_price) / 12 : Number(leased.rent_price);
+      body.original_price = Math.round(monthly * months * 100) / 100;
+    }
+  }
   const data = await validateContract(body);
 
   // --- Agreement duration -------------------------------------------------
@@ -1112,8 +1227,15 @@ router.post("/contracts/generate", route(async (req, res) => {
     : optionalDate(body.contract_date, "contract_date");
 
   // --- Payment plan -------------------------------------------------------
-  // Optional. With no plan fields the contract is simply created without a
-  // schedule, which is a normal thing for Sales to do.
+  // Cash: everything is paid at signing, as one installment due on the start
+  // date. Installments: a deposit and equal installments. With no plan fields
+  // the contract is simply created without a schedule.
+  const paymentMode = body.payment_mode === undefined || body.payment_mode === null || body.payment_mode === ""
+    ? null : enumValue(body.payment_mode, new Set(["cash", "installments"]), "installments", "payment_mode");
+  if (paymentMode === "cash") {
+    body.deposit = 0; body.installments = 1; body.frequency = "monthly";
+    body.first_due_date = body.first_due_date || data.start_date;
+  }
   const wantsPlan = Boolean(body.deposit || body.installments || body.first_due_date);
   const plan = wantsPlan ? validateSchedule(body) : null;
   if (plan && !(data.value > 0)) throw new HttpError(400, "the final price must be greater than 0 to build a payment plan");
@@ -1170,6 +1292,7 @@ router.post("/contracts/generate", route(async (req, res) => {
   }
 
   // --- Create the contract through the existing model ----------------------
+  await ensureContractClient(data);
   const created = await Contract.create({
     ...data,
     contract_date: contractDate,
@@ -1180,6 +1303,7 @@ router.post("/contracts/generate", route(async (req, res) => {
     installment_count: plan ? plan.installments : null,
     first_due_date: plan ? plan.firstDueDate : null,
   });
+  if (paymentMode || plan) await query("UPDATE contracts SET payment_mode=$1 WHERE id=$2", [paymentMode || "installments", created.id]);
   const contract = await Contract.get(created.id);
 
   // --- Generate the FULL document -----------------------------------------
@@ -1516,7 +1640,7 @@ router.get("/contract-placeholders", route(async (req, res) => { res.json(CONTRA
 
 router.post("/contracts", route(async (req, res) => {
   requireContractAuthor(req.access);
-  const data = await validateContract(req.body || {});
+  const data = await ensureContractClient(await validateContract(req.body || {}));
   const result = await Contract.create(data);
   res.status(201).json(contractResponse(await Contract.get(result.id), req));
 }));
@@ -1573,24 +1697,57 @@ router.post("/contracts/:id/schedule", route(async (req, res) => {
   // Replacing drops the old installments, so refuse when any current installment
   // already has recorded payments — deleting them would orphan payment history.
   if (replaceRequested && existing > 0) {
-    const withPayments = Number((await queryOne("SELECT EXISTS(SELECT 1 FROM debts d JOIN payments p ON p.debt_id=d.id WHERE d.contract_id=$1 AND d.organization_id=$2) AS count", [id, orgId])).count);
+    const withPayments = Number((await queryOne("SELECT (EXISTS(SELECT 1 FROM debts d JOIN payments p ON p.debt_id=d.id WHERE d.contract_id=$1 AND d.organization_id=$2) OR EXISTS(SELECT 1 FROM debts d JOIN payment_allocations pa ON pa.debt_id=d.id WHERE d.contract_id=$1 AND d.organization_id=$2))::int AS count", [id, orgId])).count);
     if (withPayments > 0) {
       throw new HttpError(409, "cannot replace the schedule: some installments already have recorded payments");
     }
   }
-  const rows = buildSchedule(contract, { deposit, installments, firstDueDate, monthsPerStep: monthsPerFrequency(frequency) });
-  const createdIds = [];
-  // Installments inherit the contract's ownership, so a sales-owned contract
-  // never silently hands its payment schedule to the creator of the schedule.
-  const inherited = { owner_id: contract.owner_id ?? null, created_by: contract.created_by ?? null, department_id: contract.department_id ?? null, visibility: contract.visibility || "organization" };
   if (existing > 0) await query("DELETE FROM debts WHERE contract_id=$1 AND organization_id=$2", [id, orgId]);
-  for (const row of rows) {
-    const result = await queryOne("INSERT INTO debts (organization_id,contract_id,client_name,amount,due_date,status,notes,owner_id,created_by,department_id,visibility) VALUES ($1,$2,$3,$4,$5,'pending',$6,$7,$8,$9,$10) RETURNING id", [orgId, id, contract.client_name, row.amount, row.due_date, row.label, inherited.owner_id, inherited.created_by, inherited.department_id, inherited.visibility]);
-    createdIds.push(result.id);
-  }
-  for (const debtId of createdIds) await syncDebtReminder(debtId, rows[createdIds.indexOf(debtId)].due_date, "pending");
+  const createdIds = await insertSchedule(contract, { deposit, installments, firstDueDate, frequency });
+  // The plan Finance settled on is the contract's plan from now on.
+  await query("UPDATE contracts SET deposit_amount=$1, installment_count=$2, first_due_date=$3, payment_frequency=$4 WHERE id=$5", [deposit, installments, firstDueDate, frequency, id]);
   res.status(201).json({ created: createdIds.length, debts: await Promise.all(createdIds.map((debtId) => Debt.get(debtId))) });
 }));
+
+/**
+ * Writes a contract's installments (deposit first) and their reminders.
+ * Installments inherit the contract's ownership, so a sales-owned contract never
+ * silently hands its payment schedule to whoever created the schedule.
+ */
+async function insertSchedule(contract, { deposit, installments, firstDueDate, frequency }) {
+  const orgId = await organizationId();
+  const rows = buildSchedule(contract, { deposit, installments, firstDueDate, monthsPerStep: monthsPerFrequency(frequency) });
+  const inherited = { owner_id: contract.owner_id ?? null, created_by: contract.created_by ?? null, department_id: contract.department_id ?? null, visibility: contract.visibility || "organization" };
+  const createdIds = [];
+  for (const row of rows) {
+    const result = await queryOne("INSERT INTO debts (organization_id,contract_id,client_name,amount,due_date,status,notes,owner_id,created_by,department_id,visibility) VALUES ($1,$2,$3,$4,$5,'pending',$6,$7,$8,$9,$10) RETURNING id", [orgId, contract.id, contract.client_name, row.amount, row.due_date, row.label, inherited.owner_id, inherited.created_by, inherited.department_id, inherited.visibility]);
+    createdIds.push(result.id);
+  }
+  for (let index = 0; index < createdIds.length; index += 1) {
+    await Payment.syncInstallment(createdIds[index]);
+    await syncDebtReminderFromDb(createdIds[index]);
+  }
+  return createdIds;
+}
+
+/**
+ * When Finance validates a contract, its payment plan is created from the terms
+ * Sales put in the agreement (deposit, number of installments, frequency, first
+ * due date), so the schedule can never differ from what the customer signs.
+ * Nothing happens if the contract already has installments or has no plan.
+ */
+async function createScheduleFromTerms(contractId) {
+  const contract = await queryOne("SELECT * FROM contracts WHERE id=$1", [contractId]);
+  if (!contract || !(Number(contract.value) > 0)) return 0;
+  const existing = Number((await queryOne("SELECT COUNT(*)::int AS n FROM debts WHERE contract_id=$1", [contractId])).n);
+  if (existing > 0) return 0;
+  const installments = Number(contract.installment_count || 0);
+  if (!installments || !contract.first_due_date) return 0;
+  const deposit = Number(contract.deposit_amount || 0);
+  if (deposit >= Number(contract.value)) return 0;
+  const ids = await insertSchedule(contract, { deposit, installments, firstDueDate: String(contract.first_due_date).slice(0, 10), frequency: contract.payment_frequency || "monthly" });
+  return ids.length;
+}
 
 router.get("/debts/overdue", route(async (req, res) => res.json(await Debt.overdue())));
 router.get("/debts/upcoming", route(async (req, res) => {
@@ -1633,7 +1790,7 @@ router.post("/debts/:id/pay", route(async () => {
 router.delete("/debts/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   requireRecord(await Debt.get(id), "Debt");
-  if (await queryOne("SELECT 1 AS ok FROM payments WHERE debt_id=$1 LIMIT 1", [id])) {
+  if (await queryOne("SELECT 1 AS ok FROM payments WHERE debt_id=$1 UNION ALL SELECT 1 FROM payment_allocations WHERE debt_id=$1 LIMIT 1", [id])) {
     throw new HttpError(409, "this installment has recorded payments and cannot be deleted");
   }
   await Debt.remove(id);
@@ -1737,8 +1894,9 @@ router.post("/payments/:id/approve", route(async (req, res) => {
   if (!paymentHasEvidence(payment)) throw new HttpError(409, "attach the receipt or paste the bank / mobile-money message before approving this payment");
   const result = await Payment.approve(id, req.user.id, { selfApproved });
   if (!result.rowCount) throw new HttpError(409, "this payment could not be approved");
-  // Approval is the moment the money counts: the installment settles now.
-  await resyncInstallmentState([payment.debt_id]);
+  // Approval is the moment the money counts: it is spread over the oldest
+  // unpaid installments (surplus onto the next) and they settle now.
+  await resyncInstallmentState([payment.debt_id, ...(result.touchedDebts || [])]);
   await audit(req, "payment_approved", "payment", id, { amount: payment.amount, contract_id: payment.contract_id, reference: payment.reference, self_approved: selfApproved });
   res.json(paymentResponse(await Payment.get(id)));
 }));
@@ -1759,9 +1917,134 @@ router.post("/payments/:id/reverse", route(async (req, res) => {
   if (!reason) throw new HttpError(400, "reason is required to reverse a payment");
   const result = await Payment.reverse(id, req.user.id, reason);
   if (!result.rowCount) throw new HttpError(409, "this payment could not be reversed");
-  await resyncInstallmentState([payment.debt_id]);
+  await resyncInstallmentState([payment.debt_id, ...(result.touchedDebts || [])]);
   await audit(req, "payment_reversed", "payment", id, { amount: payment.amount, contract_id: payment.contract_id, reference: payment.reference, reason });
   res.json(paymentResponse(await Payment.get(id)));
+}));
+
+// ---------------------------------------------------------------------------
+// Refunds: money paid back to a customer (a lease's security deposit, a deal
+// cancelled after a deposit). Same discipline as a payment: a reference, proof,
+// and confirmation by a second Finance person (or self-approval while MKUYU has
+// a single Finance person). Declared before /payments/:id so the paths win.
+// ---------------------------------------------------------------------------
+function requireFinanceDesk(req) {
+  if (!canPermission(req.access, "validate_finance") || !canPermission(req.access, "view_financial")) {
+    throw new HttpError(403, "only Finance can do this");
+  }
+}
+router.get("/contracts/:id/refunds", route(async (req, res) => {
+  requireFinanceDesk(req);
+  const contractId = parseId(req.params.id);
+  requireRecord(await Contract.get(contractId), "Contract");
+  const rows = (await query(`SELECT r.*, cu.display_name AS created_by_name, au.display_name AS approved_by_name, c.client_name, c.contract_number
+      FROM refunds r JOIN contracts c ON c.id = r.contract_id LEFT JOIN users cu ON cu.id = r.created_by LEFT JOIN users au ON au.id = r.approved_by
+     WHERE r.organization_id=$1 AND ($2::int IS NULL OR r.contract_id=$2) ORDER BY r.created_at DESC LIMIT 500`, [await organizationId(), contractId])).rows;
+  res.json(rows);
+}));
+router.post("/payments/refunds", route(async (req, res) => {
+  requireFinanceDesk(req);
+  const body = req.body || {};
+  const contract = requireRecord(await Contract.get(parseId(body.contract_id, "contract_id")), "Contract");
+  const amount = positiveNumber(body.amount, "amount");
+  const reference = optionalText(body.reference, "reference", 160);
+  if (!reference) throw new HttpError(400, "reference is required: the transfer or cheque number of the refund");
+  const reason = optionalText(body.reason, "reason", 500);
+  if (!reason) throw new HttpError(400, "reason is required (e.g. security deposit returned at the end of the lease)");
+  const evidence = optionalText(body.evidence_text, "evidence_text", 4000);
+  if (!evidence) throw new HttpError(400, "proof is required: paste the transfer message or describe the slip");
+  const paidAt = optionalDate(body.paid_at, "paid_at") || await todayDate();
+  const received = Number((await queryOne("SELECT COALESCE(SUM(amount),0) AS t FROM payments WHERE contract_id=$1 AND status='approved'", [contract.id])).t);
+  const refunded = Number((await queryOne("SELECT COALESCE(SUM(amount),0) AS t FROM refunds WHERE contract_id=$1", [contract.id])).t);
+  if (amount > received - refunded + 0.001) throw new HttpError(409, `a refund cannot exceed the money received on this contract (TZS ${(received - refunded).toLocaleString("en-US")} available)`);
+  const method = enumValue(body.method, paymentMethods, "bank", "method");
+  const row = await queryOne("INSERT INTO refunds (organization_id, contract_id, amount, paid_at, method, reference, reason, evidence_text, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *",
+    [await organizationId(), contract.id, amount, paidAt, method, reference, reason, evidence, req.user.id]);
+  await audit(req, "refund_recorded", "contract", contract.id, { refund_id: row.id, amount, reference, reason });
+  res.status(201).json(row);
+}));
+router.post("/payments/refunds/:id/approve", route(async (req, res) => {
+  requireFinanceDesk(req);
+  const id = parseId(req.params.id);
+  const refund = await queryOne("SELECT * FROM refunds WHERE id=$1 AND organization_id=$2", [id, await organizationId()]);
+  if (!refund) throw new HttpError(404, "Refund not found");
+  requireRecord(await Contract.get(refund.contract_id), "Contract");
+  if (refund.status === "approved") throw new HttpError(409, "this refund is already approved");
+  const selfApproved = Number(refund.created_by) === Number(req.user.id);
+  if (selfApproved && await Payment.otherApprovers(req.user.id) > 0) throw new HttpError(403, "a refund must be approved by someone other than the person who recorded it");
+  const row = await queryOne("UPDATE refunds SET status='approved', approved_by=$1, approved_at=NOW(), self_approved=$2 WHERE id=$3 AND status='pending' RETURNING *", [req.user.id, selfApproved, id]);
+  await audit(req, "refund_approved", "contract", refund.contract_id, { refund_id: id, amount: refund.amount, self_approved: selfApproved });
+  res.json(row);
+}));
+
+// The money side of one contract, for Finance and the MD: price, what has been
+// received and confirmed, how it is spread over the installments, the balance,
+// the next installment due and anything overdue.
+router.get("/contracts/:id/account", route(async (req, res) => {
+  if (!can(req.access, "view_financial")) throw new HttpError(403, "the account of a contract requires financial access");
+  const contract = requireRecord(await Contract.get(parseId(req.params.id)), "Contract");
+  const orgId = await organizationId();
+  const installments = (await query(
+    `SELECT d.id, d.notes AS label, d.due_date, d.amount, d.status,
+            COALESCE((SELECT SUM(pa.amount) FROM payment_allocations pa JOIN payments p ON p.id=pa.payment_id AND p.status='approved' WHERE pa.debt_id=d.id), 0) AS paid
+       FROM debts d WHERE d.contract_id=$1 AND d.organization_id=$2 ORDER BY d.due_date NULLS LAST, d.id`, [contract.id, orgId])).rows
+    .map((row) => ({ ...row, amount: Number(row.amount), paid: Number(row.paid), balance: Math.max(0, Math.round((Number(row.amount) - Number(row.paid)) * 100) / 100) }));
+  const payments = (await query(
+    `SELECT p.id, p.amount, p.paid_at, p.method, p.reference, p.status, p.receipt_number, p.self_approved, p.reversal_reason, ab.display_name AS approved_by_name
+       FROM payments p LEFT JOIN users ab ON ab.id=p.approved_by WHERE p.contract_id=$1 AND p.organization_id=$2 ORDER BY p.paid_at, p.id`, [contract.id, orgId])).rows
+    .map((row) => ({ ...row, amount: Number(row.amount) }));
+  const refunds = (await query("SELECT id, amount, paid_at, method, reference, reason, status, self_approved FROM refunds WHERE contract_id=$1 ORDER BY created_at", [contract.id])).rows.map((row) => ({ ...row, amount: Number(row.amount) }));
+  const sum = (rows, test) => Math.round(rows.filter(test).reduce((total, row) => total + Number(row.amount), 0) * 100) / 100;
+  const price = Number(contract.value || 0);
+  const received = sum(payments, (row) => row.status === "approved");
+  const pending = sum(payments, (row) => row.status === "pending");
+  const allocated = Math.round(installments.reduce((total, row) => total + row.paid, 0) * 100) / 100;
+  const scheduled = Math.round(installments.reduce((total, row) => total + row.amount, 0) * 100) / 100;
+  const refunded = sum(refunds, (row) => row.status === "approved");
+  const today = (await todayDate());
+  const open = installments.filter((row) => row.balance > 0);
+  const next = open[0] || null;
+  const overdue = open.filter((row) => row.due_date && String(row.due_date).slice(0, 10) < today);
+  res.json({
+    contract: { id: contract.id, contract_number: contract.contract_number, client_name: contract.client_name, status: contract.status, deal_type: contract.deal_type, payment_mode: contract.payment_mode || null, position: contractPosition(contract) },
+    totals: {
+      price, scheduled, received, pending_approval: pending, allocated,
+      unapplied_credit: Math.max(0, Math.round((received - allocated) * 100) / 100),
+      refunded, balance: Math.max(0, Math.round((price - received + refunded) * 100) / 100),
+      overdue_count: overdue.length, overdue_amount: Math.round(overdue.reduce((total, row) => total + row.balance, 0) * 100) / 100,
+    },
+    next_due: next ? { id: next.id, label: next.label, due_date: next.due_date, amount: next.balance } : null,
+    installments, payments, refunds,
+  });
+}));
+
+// MKUYU's own receipt for an approved payment, as a PDF.
+router.get("/payments/:id/mkuyu-receipt", route(async (req, res) => {
+  const payment = requireRecord(await Payment.get(parseId(req.params.id)), "Payment");
+  if (payment.status !== "approved" || !payment.receipt_number) throw new HttpError(409, "a receipt is issued once the payment is approved");
+  const contract = requireRecord(await Contract.get(payment.contract_id), "Contract");
+  const org = await queryOne("SELECT name FROM organizations WHERE id=$1", [await organizationId()]);
+  const doc = new PDFDocument({ size: "A5", margin: 40 });
+  res.set("Content-Type", "application/pdf");
+  res.set("Content-Disposition", `${req.query.download === "1" ? "attachment" : "inline"}; filename="${payment.receipt_number}.pdf"`);
+  doc.pipe(res);
+  const money = (value) => `TZS ${Number(value).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+  doc.font("Helvetica-Bold").fontSize(18).text(org?.name || "MKUYU", { align: "left" });
+  doc.font("Helvetica").fontSize(9).fillColor("#666").text("Official payment receipt");
+  doc.moveDown(1.2).fillColor("#000").font("Helvetica-Bold").fontSize(13).text(`Receipt ${payment.receipt_number}`);
+  doc.moveDown(0.6).font("Helvetica").fontSize(10);
+  const line = (label, value) => { doc.font("Helvetica-Bold").text(`${label}: `, { continued: true }).font("Helvetica").text(String(value ?? "—")); };
+  line("Received from", payment.client_name);
+  line("Contract", `${contract.contract_number || `#${contract.id}`}${contract.property_name ? ` · ${contract.property_name}` : ""}`);
+  line("Amount", money(payment.amount));
+  line("Paid on", String(payment.paid_at).slice(0, 10));
+  line("Method", payment.method);
+  line("Transaction reference", payment.reference);
+  if (payment.installment_notes) line("For", payment.installment_notes);
+  line("Approved by", `${payment.approved_by_name || "Finance"}${payment.self_approved ? " (self-approved)" : ""}`);
+  line("Approved on", String(payment.approved_at || "").slice(0, 10));
+  doc.moveDown(1.5).fontSize(8).fillColor("#666").text("This receipt was issued by the MKUYU Real Estate Management System after Finance confirmed the payment against the bank or mobile-money statement.");
+  doc.end();
 }));
 
 // Attach or replace a receipt on an existing payment.
