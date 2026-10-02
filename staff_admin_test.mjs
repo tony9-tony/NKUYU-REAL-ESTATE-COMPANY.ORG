@@ -9,6 +9,7 @@
 import { legacyPasswordFor } from "./backend/src/org/demoCredentials.js";
 import { startIsolatedServer, prepareTestDatabase, reapOrphanServers } from "./test_support/harness.mjs";
 import { closeDatabase, query } from "./backend/src/db.js";
+import { hashPassword } from "./backend/src/auth.js";
 
 reapOrphanServers();
 await prepareTestDatabase();
@@ -168,12 +169,57 @@ console.log("\n=== the administrator keeps full authority ===");
 const mdAccount = await call("/org/users", adminToken, "POST", { display_name: "Deputy MD", email: `deputy.${tag}@test.mkuyu.local`, password: "TempPass#2026", role_ids: [roleId("Managing Director")] });
 check(mdAccount.status === 201, "the administrator can still create a Managing Director account");
 
+console.log("\n=== Add staff straight from a department ===");
+const departments = (await call("/org/departments", adminToken)).body;
+const deptByName = (name) => departments.find((d) => d.name === name);
+const sales = deptByName("SALES, MARKETING & OPERATIONS");
+check(sales?.default_role === "Sales, Marketing & Operations Officer", `Sales lists its default role (${sales?.default_role})`);
+check(deptByName("MANAGEMENT")?.default_role === null, "Management has no default role");
+const quickEmail = `quick.${tag}@test.mkuyu.local`;
+const quick = await call(`/org/departments/${sales.id}/staff`, adminToken, "POST", { email: quickEmail, password: "TempPass#2026" });
+check(quick.status === 201 && quick.body.role === "Sales, Marketing & Operations Officer", `email + password alone creates the account (${quick.status} ${quick.body.error || quick.body.role})`);
+check(quick.body.display_name === `quick.${tag}`, "a blank name falls back to the email's first part");
+const quickLogin = await signIn(quickEmail, "TempPass#2026");
+check(quickLogin.status === 200, "the new member signs in with that password");
+const quickUser = (await call("/org/users", adminToken)).body.find((u) => u.email === quickEmail) || {};
+const quickMe = (await call("/org/me", quickLogin.body.token)).body;
+check((quickMe.modules || []).includes("leads"), `they open straight into Sales work (modules: ${(quickMe.modules || []).join(",")})`);
+check((quickUser.departments || []).map((d) => d.name).join() === "SALES, MARKETING & OPERATIONS", `they belong to Sales only (${(quickUser.departments || []).map((d) => d.name).join()})`);
+check((quickUser.roles || []).map((r) => r.name ?? r).join() === "Sales, Marketing & Operations Officer", "they hold Sales' default role");
+check((await call(`/org/departments/${sales.id}/staff`, adminToken, "POST", { email: quickEmail, password: "TempPass#2026" })).status === 409, "the same email cannot be added twice");
+check((await call(`/org/departments/${sales.id}/staff`, adminToken, "POST", { email: `short.${tag}@test.mkuyu.local`, password: "short" })).status === 400, "a password under 8 characters is refused");
+check((await call(`/org/departments/${deptByName("MANAGEMENT").id}/staff`, adminToken, "POST", { email: `mgmt.${tag}@test.mkuyu.local`, password: "TempPass#2026" })).status === 400, "nobody is added to Management by default (no Managing Director by accident)");
+check((await call(`/org/departments/${sales.id}/staff`, quickLogin.body.token, "POST", { email: `self.${tag}@test.mkuyu.local`, password: "TempPass#2026" })).status === 403, "a sales officer cannot add staff");
+const extraDept = await call("/org/departments", adminToken, "POST", { name: `Field Team ${tag}` });
+const extraStaff = await call(`/org/departments/${extraDept.body.id}/staff`, adminToken, "POST", { display_name: "Field Hand", email: `field.${tag}@test.mkuyu.local`, password: "TempPass#2026" });
+check(extraStaff.status === 201 && extraStaff.body.role === "Staff Member", `a new department's member gets the basic Staff Member role (${extraStaff.body.error || extraStaff.body.role})`);
+
+console.log("\n=== Change my password: the administrator only ===");
+const adminPassword = legacyPasswordFor("admin@mkuyu.local");
+const newAdminPassword = `Fresh#${tag}2026`;
+const staffSelf = await call("/org/me/password", quickLogin.body.token, "PUT", { current_password: "TempPass#2026", new_password: "Another#2026x" });
+check(staffSelf.status === 403, `a staff member cannot change their own password (${staffSelf.status})`);
+check((await signIn(quickEmail, "TempPass#2026")).status === 200, "...and their password is unchanged");
+const otherAdminSession = (await signIn("admin@mkuyu.local", adminPassword)).body.token;
+check((await call("/org/me/password", adminToken, "PUT", { current_password: "wrong-password", new_password: newAdminPassword })).status === 400, "a wrong current password is refused");
+check((await call("/org/me/password", adminToken, "PUT", { current_password: adminPassword, new_password: "short" })).status === 400, "a new password under 8 characters is refused");
+check((await call("/org/me/password", adminToken, "PUT", { current_password: adminPassword, new_password: adminPassword })).status === 400, "the same password again is refused");
+const changed = await call("/org/me/password", adminToken, "PUT", { current_password: adminPassword, new_password: newAdminPassword });
+check(changed.status === 200, `the administrator changes their own password (${changed.status} ${changed.body.error || ""})`);
+check((await call("/org/users", adminToken)).status === 200, "this browser stays signed in");
+check((await call("/org/users", otherAdminSession)).status === 401, "every other admin session is signed out");
+check((await signIn("admin@mkuyu.local", adminPassword)).status !== 200, "the old password no longer works");
+check((await signIn("admin@mkuyu.local", newAdminPassword)).status === 200, "the new password works");
+// Put the seeded password back so the next run (and other suites) can sign in.
+await query("UPDATE users SET password_hash=$1 WHERE email='admin@mkuyu.local'", [hashPassword(adminPassword)]);
+
 // Tidy the throwaway database. Every name carries a unique tag, so a leftover
 // row (say, one an audit entry still references) never breaks a rerun.
 for (const [sql, value] of [
   ["DELETE FROM users WHERE email LIKE $1", `%.${tag}@test.mkuyu.local`],
   ["DELETE FROM roles WHERE id=$1", custom.body.id],
   ["DELETE FROM departments WHERE id=$1", department.body.id],
+  ["DELETE FROM departments WHERE id=$1", extraDept.body.id],
 ]) {
   try { await query(sql, [value]); } catch { /* left for the next database reset */ }
 }

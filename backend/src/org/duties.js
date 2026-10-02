@@ -67,6 +67,22 @@ export const ROLE_HOME_DEPARTMENT = {
 };
 
 /**
+ * The role a new member gets when added straight from a department ("Add staff"
+ * on the Departments page): the department's officer-level role. MANAGEMENT has
+ * none on purpose - its only role is the Managing Director, which must never be
+ * handed out by default. A department not listed here uses DEFAULT_STAFF_ROLE.
+ */
+export const DEPARTMENT_DEFAULT_ROLE = {
+  [SYSTEM_ADMIN_DEPARTMENT]: "Administration & IT Support Officer",
+  LEGAL: "Legal Officer",
+  "FINANCE & ACCOUNTS": "Finance Officer",
+  "SALES, MARKETING & OPERATIONS": "Sales, Marketing & Operations Officer",
+  "CUSTOMER SERVICE": "Customer Service Officer",
+  MANAGEMENT: null,
+};
+export const DEFAULT_STAFF_ROLE = "Staff Member";
+
+/**
  * Cross-department hand-offs a department-scoped assigner may make, on top of
  * assigning within their own department. Sales hands website leads to
  * Customer Service, who contact the customer. Nothing else crosses a

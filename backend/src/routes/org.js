@@ -4,7 +4,7 @@ import { BUSINESS_PERMISSIONS, organizationId, permissionKeys, requirePermission
 import { addRecordShare, can, canAccessModule, canReadModule, isReadOnlyModule, clearAccessCache, currentAccess, isScope, isVisibility, listRecordShares, ownershipFields, removeRecordShare, scopeCondition } from "../org/access.js";
 import { audit } from "../org/audit.js";
 import { attentionCount } from "../tasks/tasks.js";
-import { hashPassword, publicUser, revokeUserSessions } from "../auth.js";
+import { hashPassword, hashToken, publicUser, revokeUserSessions, verifyPassword } from "../auth.js";
 import { isProduction } from "../security.js";
 import { demoPasswordFor } from "../org/demoCredentials.js";
 import { UNPAGED_LIMIT, paginatedList, paginationRequested, parsePagination, searchTerm } from "../pagination.js";
@@ -17,7 +17,7 @@ import { Report } from "../models/report.js";
 import { Appointment, Client, Document, Property } from "../models/catalog.js";
 import { REPORT_TYPES, PAYMENT_METHODS, reportTypeIsFinancial } from "../models/reportTypes.js";
 import { CONTRACT_ACTIONS, WORKFLOW_STAGES, WORKFLOW_EXCEPTIONS, availableActions, canTransition, workflowGraph, workflowStagePermissions } from "../contracts/workflow.js";
-import { ROLE_DUTIES, CONTRACT_OWNERSHIP, ROLE_HOME_DEPARTMENT, TASK_HANDOFF, SYSTEM_PERMISSIONS, departmentDutyTree, checkRoleDuties, checkContractOwnership, checkNoSystemAdminLeak, checkDeadPermissions } from "../org/duties.js";
+import { ROLE_DUTIES, CONTRACT_OWNERSHIP, ROLE_HOME_DEPARTMENT, DEPARTMENT_DEFAULT_ROLE, DEFAULT_STAFF_ROLE, TASK_HANDOFF, SYSTEM_PERMISSIONS, departmentDutyTree, checkRoleDuties, checkContractOwnership, checkNoSystemAdminLeak, checkDeadPermissions } from "../org/duties.js";
 import taskRoutes from "./tasks.js";
 import { EXISTING_CLIENT_SQL, findExistingClient } from "../org/clientMatch.js";
 import { APPOINTMENT_TYPES, arrangeRequestAppointment } from "../org/requestAppointment.js";
@@ -643,6 +643,25 @@ router.get("/users/:id/photo", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// Change my password: the administrator account only. Staff never change their
+// own password; the administrator resets it for them (PUT /users/:id). The
+// current password must be given, so an unattended signed-in browser cannot be
+// used to take the account over. Every other session ends; this one stays.
+router.put("/me/password", requireAdmin(), async (req, res, next) => {
+  try {
+    const current = String(req.body?.current_password || "");
+    const fresh = String(req.body?.new_password || "");
+    if (!verifyPassword(current, req.user.password_hash)) return res.status(400).json({ error: "your current password is not correct" });
+    if (fresh.length < 8 || fresh.length > 128) return res.status(400).json({ error: "the new password must be between 8 and 128 characters" });
+    if (fresh === current) return res.status(400).json({ error: "the new password must be different from the current one" });
+    if (fresh === demoPasswordFor(req.user.email)) return res.status(400).json({ error: "that password follows the published demo scheme; choose another" });
+    await query("UPDATE users SET password_hash=$1 WHERE id=$2", [hashPassword(fresh), req.user.id]);
+    const ended = await query("DELETE FROM sessions WHERE user_id=$1 AND token_hash<>$2", [req.user.id, hashToken(req.token)]);
+    await audit(req, "password_changed", "user", req.user.id, { other_sessions_ended: ended.rowCount });
+    res.json({ ok: true, other_sessions_ended: ended.rowCount });
+  } catch (error) { next(error); }
+});
+
 router.get("/me", async (req, res, next) => {
   try { res.json(await buildMe(req)); } catch (error) { next(error); }
 });
@@ -665,7 +684,8 @@ const DEPARTMENT_SELECT = `SELECT d.*,
   (SELECT COUNT(*) FROM user_departments ud WHERE ud.department_id=d.id)::int AS all_members,
   (SELECT COUNT(*) FROM clients c WHERE c.department_id=d.id)::int AS client_count
   FROM departments d`;
-const withCore = (row) => row && ({ ...row, core: CORE_DEPARTMENTS.has(row.name) });
+const defaultRoleFor = (name) => (Object.hasOwn(DEPARTMENT_DEFAULT_ROLE, name) ? DEPARTMENT_DEFAULT_ROLE[name] : DEFAULT_STAFF_ROLE);
+const withCore = (row) => row && ({ ...row, core: CORE_DEPARTMENTS.has(row.name), default_role: defaultRoleFor(row.name) });
 
 router.get("/departments", requireAnyPermission("manage_users", "manage_roles"), async (req,res,next)=>{try{res.json((await rows(`${DEPARTMENT_SELECT} WHERE d.organization_id=$1 ORDER BY d.name`,[await organizationId()])).map(withCore));}catch(e){next(e);}});
 router.post("/departments", requirePermission("manage_roles"), async (req,res,next)=>{try{
@@ -818,13 +838,64 @@ router.get("/access-matrix", requireAdmin(), async (req, res, next) => {
 });
 router.put("/roles/:id/permissions", requirePermission("manage_permissions"), async (req,res,next)=>{try{const roleId=id(req.params.id,"role_id");await guardRoleChange(req,roleId,await organizationId());const keys=(Array.isArray(req.body?.permissions)?req.body.permissions:[]).map(String);if(!isAdminAccount(req)){const reserved=keys.filter((key)=>RESERVED_ROLE_PERMISSIONS.has(key));if(reserved.length)return res.status(403).json({error:`only the System Administrator can grant ${reserved.join(", ")}`});}await withTransaction(async(client)=>{await client.query("DELETE FROM role_permissions WHERE role_id=$1",[roleId]);for(const key of keys)await client.query("INSERT INTO role_permissions(role_id,permission_id) SELECT $1,id FROM permissions WHERE permission_key=$2 ON CONFLICT DO NOTHING",[roleId,String(key)]);});clearAccessCache();await audit(req,"updated","role_permissions",roleId);res.json({ok:true});}catch(e){next(e);}});
 router.get("/users", requirePermission("manage_users"), async (req,res,next)=>{try{const result=await rows(`SELECT u.id,u.email,u.display_name,u.role,u.active,u.created_at,${USER_ROLES_JSON} AS roles,${USER_DEPARTMENTS_JSON} AS departments FROM users u WHERE u.organization_id=$1 ORDER BY u.display_name`,[await organizationId()]);res.json(result);}catch(e){next(e);}});
-router.post("/users", requirePermission("manage_users"), async (req,res,next)=>{try{const password=String(req.body?.password||"");if(password.length<8||password.length>128)return res.status(400).json({error:"password must be between 8 and 128 characters"});if(isProduction()&&password===demoPasswordFor(String(req.body?.email||"").toLowerCase()))return res.status(400).json({error:"that password follows the published demo scheme; choose another"});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map(Number))];let departmentIds=[...new Set((Array.isArray(req.body?.department_ids)?req.body.department_ids:[]).map(Number))].filter(Boolean);if(!roleIds.length)return res.status(400).json({error:"select at least one role for the staff member"});if(roleIds.some((roleId)=>!Number.isInteger(roleId)||roleId<1))return res.status(400).json({error:"one or more selected roles are invalid"});const org=await organizationId();await assignableRoles(req,roleIds,org);
-    // Every staff member belongs to a department, or no department list would
-    // ever show them. Without a choice, the role's home department is used.
-    if(!departmentIds.length){const roleNames=await rows("SELECT name FROM roles WHERE id=ANY($1::int[]) AND organization_id=$2",[roleIds,org]);const homes=roleNames.map((row)=>ROLE_HOME_DEPARTMENT[row.name]).filter(Boolean);if(homes.length)departmentIds=(await rows("SELECT id FROM departments WHERE organization_id=$1 AND active AND name=ANY($2::text[])",[org,homes])).map((row)=>Number(row.id));}
-    if(!departmentIds.length)return res.status(400).json({error:"choose a department for the staff member"});
-    const liveDepartments=await rows("SELECT id FROM departments WHERE organization_id=$1 AND active AND id=ANY($2::int[])",[org,departmentIds]);
-    if(liveDepartments.length!==departmentIds.length)return res.status(400).json({error:"one or more selected departments do not exist or are inactive"});const newEmail=text(req.body?.email,"email").toLowerCase();if(await queryOne("SELECT 1 FROM users WHERE LOWER(email)=$1",[newEmail]))return res.status(409).json({error:"a staff account with this email already exists"});const r=await queryOne("INSERT INTO users(organization_id,email,password_hash,display_name,role) VALUES($1,$2,$3,$4,'staff') RETURNING id,email,display_name,role,active,created_at",[org,text(req.body?.email,"email").toLowerCase(),hashPassword(password),text(req.body?.display_name,"display_name",80)]);for(const roleId of roleIds)await query("INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE id=$2 AND organization_id=$3",[r.id,id(roleId,"role_id"),org]);for(const departmentId of departmentIds)await query("INSERT INTO user_departments(user_id,department_id) SELECT $1,id FROM departments WHERE id=$2 AND organization_id=$3",[r.id,id(departmentId,"department_id"),org]);clearAccessCache();await audit(req,"created","user",r.id,{role_ids:roleIds});res.status(201).json(r);}catch(e){next(e);}});
+/**
+ * Creates one staff account with its role(s) and department(s). Shared by the
+ * Staff page (role chosen) and a department's "Add staff" (role defaulted).
+ * Refuses, before writing anything, a weak or demo-scheme password, a role the
+ * caller may not hand out, an inactive department or an email already in use.
+ */
+async function createStaffAccount(req, org, { email, password, displayName, roleIds, departmentIds }) {
+  password = String(password || "");
+  if (password.length < 8 || password.length > 128) refuse("password must be between 8 and 128 characters", 400);
+  const newEmail = text(email, "email").toLowerCase();
+  if (isProduction() && password === demoPasswordFor(newEmail)) refuse("that password follows the published demo scheme; choose another", 400);
+  if (!roleIds.length) refuse("select at least one role for the staff member", 400);
+  if (roleIds.some((roleId) => !Number.isInteger(roleId) || roleId < 1)) refuse("one or more selected roles are invalid", 400);
+  await assignableRoles(req, roleIds, org);
+  // Every staff member belongs to a department, or no department list would
+  // ever show them. Without a choice, the role's home department is used.
+  if (!departmentIds.length) {
+    const roleNames = await rows("SELECT name FROM roles WHERE id=ANY($1::int[]) AND organization_id=$2", [roleIds, org]);
+    const homes = roleNames.map((row) => ROLE_HOME_DEPARTMENT[row.name]).filter(Boolean);
+    if (homes.length) departmentIds = (await rows("SELECT id FROM departments WHERE organization_id=$1 AND active AND name=ANY($2::text[])", [org, homes])).map((row) => Number(row.id));
+  }
+  if (!departmentIds.length) refuse("choose a department for the staff member", 400);
+  const liveDepartments = await rows("SELECT id FROM departments WHERE organization_id=$1 AND active AND id=ANY($2::int[])", [org, departmentIds]);
+  if (liveDepartments.length !== departmentIds.length) refuse("one or more selected departments do not exist or are inactive", 400);
+  if (await queryOne("SELECT 1 FROM users WHERE LOWER(email)=$1", [newEmail])) refuse("a staff account with this email already exists", 409);
+  const r = await withTransaction(async (c) => {
+    const user = (await c.query("INSERT INTO users(organization_id,email,password_hash,display_name,role) VALUES($1,$2,$3,$4,'staff') RETURNING id,email,display_name,role,active,created_at", [org, newEmail, hashPassword(password), text(displayName, "display_name", 80)])).rows[0];
+    for (const roleId of roleIds) await c.query("INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE id=$2 AND organization_id=$3", [user.id, roleId, org]);
+    for (const departmentId of departmentIds) await c.query("INSERT INTO user_departments(user_id,department_id) SELECT $1,id FROM departments WHERE id=$2 AND organization_id=$3", [user.id, departmentId, org]);
+    return user;
+  });
+  clearAccessCache();
+  await audit(req, "created", "user", r.id, { role_ids: roleIds, department_ids: departmentIds });
+  return r;
+}
+router.post("/users", requirePermission("manage_users"), async (req,res,next)=>{try{
+  const org=await organizationId();
+  const r=await createStaffAccount(req,org,{email:req.body?.email,password:req.body?.password,displayName:req.body?.display_name,
+    roleIds:[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map(Number))],
+    departmentIds:[...new Set((Array.isArray(req.body?.department_ids)?req.body.department_ids:[]).map(Number))].filter(Boolean)});
+  res.status(201).json(r);
+}catch(e){next(e);}});
+// "Add staff" from a department: only name, email and password. The member gets
+// the department's default role (DEPARTMENT_DEFAULT_ROLE), so they open straight
+// into that department's work; their role can still be changed on the Staff page.
+router.post("/departments/:id/staff", requirePermission("manage_users"), async (req,res,next)=>{try{
+  const org=await organizationId();const deptId=id(req.params.id,"department_id");
+  const dept=await queryOne("SELECT id,name,active FROM departments WHERE id=$1 AND organization_id=$2",[deptId,org]);
+  if(!dept)return res.status(404).json({error:"department not found"});
+  if(!dept.active)return res.status(400).json({error:"this department is inactive; activate it first"});
+  const roleName=defaultRoleFor(dept.name);
+  if(!roleName)return res.status(400).json({error:`${dept.name} has no default role; add this person on the Staff page and choose their role`});
+  const role=await queryOne("SELECT id FROM roles WHERE organization_id=$1 AND name=$2 AND active",[org,roleName]);
+  if(!role)return res.status(400).json({error:`the default role "${roleName}" is missing or inactive; add this person on the Staff page`});
+  const email=text(req.body?.email,"email").toLowerCase();
+  const r=await createStaffAccount(req,org,{email,password:req.body?.password,displayName:String(req.body?.display_name||"").trim()||email.split("@")[0],roleIds:[Number(role.id)],departmentIds:[Number(dept.id)]});
+  res.status(201).json({...r,role:roleName,department:dept.name});
+}catch(e){next(e);}});
 router.put("/users/:id", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");const org=await organizationId();const target=await guardTargetUser(req,userId,org,{allowSelf:false});
     // A bad new password is refused before anything is saved, so the request never half-applies.
     if(req.body?.password&&(String(req.body.password).length<8||String(req.body.password).length>128))return res.status(400).json({error:"password must be between 8 and 128 characters"});

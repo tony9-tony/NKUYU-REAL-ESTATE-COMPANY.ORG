@@ -2240,7 +2240,7 @@ function renderOrganization(section = "staff") {
   const canManageAccount = (user) => (isAdmin() && user.id !== org.me?.user?.id) || (user.role !== "admin" && user.id !== org.me?.user?.id
     && Math.max(0, ...(user.roles || []).map((role) => Number(role.rank || 0))) <= Number(org.me?.rank || 0));
   const meId = org.me?.user?.id;
-  const userRow = (user) => `<tr><td><strong>${escapeHtml(user.display_name)}</strong>${user.id === meId ? ` ${badge("You", "open")}` : ""}<div class="table-sub">${escapeHtml(user.email)}${(user.departments || []).length ? ` · ${escapeHtml((user.departments || []).map((d) => titleCase(d.name)).join(", "))}` : ""}</div></td><td>${user.roles?.map((role) => badge(role.name)).join(" ") || "No role"}</td><td>${user.active ? badge("Active", "approved") : badge("Inactive", "archived")}</td><td><div class="row-actions">${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="reset-password" data-id="${user.id}" title="Set a new sign-in password without changing the account">Reset password</button>` : ""}${canManageAccount(user) || user.id === meId ? `<button class="btn btn-soft btn-small" data-action="change-staff-department" data-id="${user.id}" title="Move to another department">Move department</button><button class="btn btn-soft btn-small" data-action="change-staff-role" data-id="${user.id}" title="Give a different role">Change role</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="toggle-user" data-id="${user.id}" data-active="${user.active ? 0 : 1}">${user.active ? "Deactivate" : "Activate"}</button>` : ""}</div></td></tr>`;
+  const userRow = (user) => `<tr><td><strong>${escapeHtml(user.display_name)}</strong>${user.id === meId ? ` ${badge("You", "open")}` : ""}<div class="table-sub">${escapeHtml(user.email)}${(user.departments || []).length ? ` · ${escapeHtml((user.departments || []).map((d) => titleCase(d.name)).join(", "))}` : ""}</div></td><td>${user.roles?.map((role) => badge(role.name)).join(" ") || "No role"}</td><td>${user.active ? badge("Active", "approved") : badge("Inactive", "archived")}</td><td><div class="row-actions">${user.id === meId && isAdmin() ? `<button class="btn btn-gold btn-small" data-action="change-my-password" title="Change the administrator's own sign-in password">Change my password</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="reset-password" data-id="${user.id}" title="Set a new sign-in password without changing the account">Reset password</button>` : ""}${canManageAccount(user) || user.id === meId ? `<button class="btn btn-soft btn-small" data-action="change-staff-department" data-id="${user.id}" title="Move to another department">Move department</button><button class="btn btn-soft btn-small" data-action="change-staff-role" data-id="${user.id}" title="Give a different role">Change role</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="toggle-user" data-id="${user.id}" data-active="${user.active ? 0 : 1}">${user.active ? "Deactivate" : "Activate"}</button>` : ""}</div></td></tr>`;
 
   const usersByDepartment = new Map(DEPARTMENT_ORDER.map((name) => [name, []]));
   const unassigned = [];
@@ -2297,7 +2297,7 @@ function renderOrganization(section = "staff") {
   // Departments page: every department (A-Z) with its staff behind "Show staff".
   if (section === "departments") {
     return `<div class="section-grid org-grid admin-pages">
-      ${mayAdminister ? renderAdminConsole(org, { canManage, canAddStaff: false, userRow }) : `<section class="card glass">${emptyState("No access", "Departments are managed by the administrator.", { iconName: "settings", compact: true })}</section>`}
+      ${mayAdminister ? renderAdminConsole(org, { canManage, canAddStaff: false, canAddToDepartment: permissions.includes("manage_users"), userRow }) : `<section class="card glass">${emptyState("No access", "Departments are managed by the administrator.", { iconName: "settings", compact: true })}</section>`}
     </div>`;
   }
 
@@ -2363,7 +2363,7 @@ function renderOrganization(section = "staff") {
  * reset password, activate/deactivate, change role, move department - and the
  * department's own rename / deactivate / delete. Core departments are fixed.
  */
-function renderAdminConsole(org, { canManage, canAddStaff, userRow, staffForm = "" }) {
+function renderAdminConsole(org, { canManage, canAddStaff, canAddToDepartment = false, userRow, staffForm = "" }) {
   const open = state.openDepartments || (state.openDepartments = new Set());
   const members = (dept) => org.users.filter((u) => (u.departments || []).some((d) => Number(d.id) === Number(dept.id)));
   // A to Z: staff by name, departments by name.
@@ -2382,14 +2382,17 @@ function renderAdminConsole(org, { canManage, canAddStaff, userRow, staffForm = 
           : `<button class="btn btn-soft btn-small" data-action="toggle-department" data-id="${d.id}" data-active="0"${active ? ` disabled title="Move its staff to another department first"` : ""}>Deactivate</button>`,
         Number(d.all_members || 0) ? "" : `<button class="btn btn-danger btn-small" data-action="delete-department" data-id="${d.id}">Delete</button>`,
       ].join("");
+      // Add staff: only where the department has a default role (not Management) and is active.
+      const addStaff = canAddToDepartment && d.active !== false && d.default_role
+        ? `<button class="btn btn-gold btn-small" data-action="add-department-staff" data-id="${d.id}" title="New account for this department · role: ${escapeHtml(d.default_role)}">${icon("plus")}Add staff</button>` : "";
       return `<div class="dept-group" data-department="${escapeHtml(d.name)}">
         <div class="dept-group-head" style="flex-wrap:wrap;gap:.6rem">
           <span class="dept-group-name">${escapeHtml(titleCase(d.name))}</span>
           ${d.core ? badge("Core", "neutral") : ""}${d.active === false ? badge("Inactive", "archived") : ""}
           <span class="dept-group-count">${active} staff · ${Number(d.client_count || 0)} client${Number(d.client_count || 0) === 1 ? "" : "s"}</span>
-          <span class="row-actions" style="margin-left:auto">${deptActions}<button class="btn btn-small${isOpen ? "" : " btn-primary"}" data-action="toggle-dept-staff" data-id="${d.id}" aria-expanded="${isOpen}">${isOpen ? "Hide staff" : `Show staff (${people.length})`}</button></span>
+          <span class="row-actions" style="margin-left:auto">${addStaff}${deptActions}<button class="btn btn-small${isOpen ? "" : " btn-primary"}" data-action="toggle-dept-staff" data-id="${d.id}" aria-expanded="${isOpen}">${isOpen ? "Hide staff" : `Show staff (${people.length})`}</button></span>
         </div>
-        ${isOpen ? (people.length ? staffTable(people) : `<p class="muted" style="margin:.5rem 0 0">No staff yet. Add one on the Staff page and choose this department.</p>`) : ""}
+        ${isOpen ? (people.length ? staffTable(people) : `<p class="muted" style="margin:.5rem 0 0">No staff yet. ${d.default_role ? "Press Add staff above." : "Add one on the Staff page and choose this department."}</p>`) : ""}
       </div>`;
     }).join("");
   const loose = org.users.filter((u) => !(u.departments || []).length);
@@ -2444,6 +2447,37 @@ function openStaffDepartment(userId) {
     async (data) => {
       await api(`/org/users/${user.id}/departments`, { method: "PUT", body: JSON.stringify({ department_ids: [Number(data.department_id)] }) });
       return "Department updated.";
+    });
+}
+
+/** The administrator's own password: current one first, the new one twice. */
+function openChangeMyPassword() {
+  openSmallForm("Change my password", "Your other signed-in devices are signed out. This browser stays signed in.",
+    `<div class="field full"><label for="my-current-password">Current password <span class="req">*</span></label><input id="my-current-password" name="current_password" type="password" required autocomplete="current-password"></div>
+     <div class="field full"><label for="my-new-password">New password <span class="req">*</span></label><input id="my-new-password" name="new_password" type="password" minlength="8" maxlength="128" required autocomplete="new-password" placeholder="At least 8 characters"></div>
+     <div class="field full"><label for="my-new-password-again">New password again <span class="req">*</span></label><input id="my-new-password-again" name="new_password_again" type="password" minlength="8" maxlength="128" required autocomplete="new-password"></div>`,
+    "Change password",
+    async (data) => {
+      if (data.new_password !== data.new_password_again) throw new Error("The two new passwords do not match.");
+      await api("/org/me/password", { method: "PUT", body: JSON.stringify({ current_password: data.current_password, new_password: data.new_password }) });
+      return "Password changed. Use the new one next time you sign in.";
+    });
+}
+
+/** New account straight into one department: name, email and password only. */
+function openAddDepartmentStaff(deptId) {
+  const dept = (state.organization.departments || []).find((d) => String(d.id) === String(deptId));
+  if (!dept) return;
+  openSmallForm(`Add staff to ${titleCase(dept.name)}`, `They sign in straight into ${titleCase(dept.name)} as ${dept.default_role}. You can change the role later on the Staff page.`,
+    `<div class="field full"><label for="dept-staff-name">Name</label><input id="dept-staff-name" name="display_name" maxlength="80" placeholder="e.g. Amina Sanga"></div>
+     <div class="field full"><label for="dept-staff-email">Email (they sign in with it) <span class="req">*</span></label><input id="dept-staff-email" name="email" type="email" required maxlength="160" autocomplete="off" placeholder="name@gmail.com"></div>
+     <div class="field full"><label for="dept-staff-password">Password <span class="req">*</span></label><input id="dept-staff-password" name="password" type="password" minlength="8" maxlength="128" required autocomplete="new-password" placeholder="At least 8 characters"></div>`,
+    "Add staff",
+    async (data) => {
+      await api(`/org/departments/${dept.id}/staff`, { method: "POST", body: JSON.stringify(data) });
+      state.openDepartments = state.openDepartments || new Set();
+      state.openDepartments.add(Number(dept.id));
+      return `Staff added to ${titleCase(dept.name)}.`;
     });
 }
 
@@ -4308,6 +4342,8 @@ function showProfile() {
       <div class="profile-photo-copy"><strong>${escapeHtml(user.display_name || "")}</strong><span>Profile photo · PNG or JPG, up to 15 MB</span>
         <div class="row-actions"><label class="btn btn-small btn-primary">${icon("image")}${user.has_photo ? "Change photo" : "Upload photo"}<input type="file" accept=".png,.jpg,.jpeg" data-profile-upload="photo" hidden></label>${user.has_photo ? `<button type="button" class="btn btn-small btn-ghost" data-action="remove-profile-image" data-kind="photo">Remove</button>` : ""}</div></div>`;
   }
+  // Only the administrator changes their own password; staff ask the administrator.
+  if (isAdmin() && head) head.insertAdjacentHTML("beforeend", `<div class="row-actions" style="margin-left:auto"><button type="button" class="btn btn-small btn-gold" data-action="change-my-password">Change my password</button></div>`);
   // Only members of Legal who approve contracts keep a signature.
   const signature = document.getElementById("profile-signature");
   if (signature && can("approve_legal")) {
@@ -5740,6 +5776,8 @@ document.addEventListener("click", async (event) => {
     catch (error) { showToast(error.message); }
   }
   if (action === "rename-department") openRenameDepartment(id);
+  if (action === "add-department-staff") openAddDepartmentStaff(id);
+  if (action === "change-my-password") openChangeMyPassword();
   if (action === "change-staff-department") openStaffDepartment(id);
   if (action === "change-staff-role") openStaffRole(id);
   if (action === "toggle-dept-staff") {
