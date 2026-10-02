@@ -232,6 +232,33 @@ try {
   check((await call(`/payments/refunds/${refund.body.id}/approve`, { method: "POST", token: financeB, body: {} })).status === 200, "a second Finance officer approves the refund");
   const afterRefund = (await call(`/contracts/${deal.body.id}/account`, { token: financeA })).body.totals || {};
   check(afterRefund.refunded === 500000 && afterRefund.balance === 7500000, `the refund shows in the account (balance ${afterRefund.balance})`);
+
+  console.log("\n=== CHECK 13: forgotten password: the administrator resets, the person chooses a new one ===");
+  const forgetful = `cs.fc.${tag}@test.mkuyu.local`;
+  const csId = (await query("SELECT id FROM users WHERE email=$1", [forgetful])).rows[0].id;
+  const notYet = await call("/auth/forgot-password", { method: "POST", body: { email: forgetful } });
+  check(notYet.status === 200 && notYet.body.reset_ready === false && /administrator/i.test(notYet.body.message), "without a reset, Forgot password says: contact your administrator");
+  check((await call("/auth/reset-password", { method: "POST", body: { email: forgetful, new_password: "NewPass#2026", confirm_password: "NewPass#2026" } })).status === 403, "nobody can set a password unless the administrator reset it");
+  check((await call(`/org/users/${csId}/reset-password`, { method: "POST", token: sales, body: {} })).status === 403, "Sales cannot reset passwords");
+  const opened = await call(`/org/users/${csId}/reset-password`, { method: "POST", token: admin, body: {} });
+  check(opened.status === 200 && opened.body.hours === 24, "the administrator resets the password");
+  check((await call("/org/me", { token: cs })).status === 401, "the person's open sessions end");
+  const oldLogin = await call("/auth/login", { method: "POST", body: { email: forgetful, password: "TempPass#2026" } });
+  check(oldLogin.status === 401 && /Forgot password/.test(oldLogin.body.error || ""), "the old password stops working and the sign-in screen points to Forgot password");
+  const users = (await call("/org/users", { token: admin })).body;
+  check(users.find((u) => u.id === csId)?.password_reset_pending === true, "the staff list shows the reset is waiting");
+  const ready = await call("/auth/forgot-password", { method: "POST", body: { email: forgetful.toUpperCase() } });
+  check(ready.body.reset_ready === true, "after the reset, Forgot password opens the new-password form");
+  check((await call("/auth/reset-password", { method: "POST", body: { email: forgetful, new_password: "NewPass#2026", confirm_password: "Other#2026x" } })).status === 400, "the two passwords must match");
+  check((await call("/auth/reset-password", { method: "POST", body: { email: forgetful, new_password: "short", confirm_password: "short" } })).status === 400, "a short password is refused");
+  const saved = await call("/auth/reset-password", { method: "POST", body: { email: forgetful, new_password: "NewPass#2026", confirm_password: "NewPass#2026" } });
+  check(saved.status === 200 && saved.body.ok === true, "the person saves the new password");
+  check((await call("/auth/reset-password", { method: "POST", body: { email: forgetful, new_password: "Again#20266", confirm_password: "Again#20266" } })).status === 403, "the reset works only once");
+  check((await call("/auth/forgot-password", { method: "POST", body: { email: forgetful } })).body.reset_ready === false, "afterwards Forgot password is back to: contact your administrator");
+  check(Boolean(await signIn(forgetful, "NewPass#2026")), "the person signs in with the new password");
+  check(Number((await query("SELECT COUNT(*) FROM audit_logs WHERE action IN ('password_reset_opened','password_set_after_reset') AND record_id=$1", [String(csId)])).rows[0].count) === 2, "both steps are in the audit log");
+  await query("UPDATE users SET password_reset_expires_at=NOW() - INTERVAL '1 minute' WHERE id=$1", [csId]);
+  check((await call("/auth/forgot-password", { method: "POST", body: { email: forgetful } })).body.reset_ready === false, "an expired reset no longer opens the form");
   void demoPasswordFor;
 } catch (error) {
   failures += 1;

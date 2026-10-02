@@ -148,6 +148,20 @@ There is no bank/mobile-money API: Finance records every payment by hand, with p
 - Mistakes are **reversed** with a reason (never deleted or edited once approved). Refunds are recorded with proof and need approval too.
 - `GET /contracts/:id/account` gives one contract's money picture: price, received, balance, next due, overdue, payments and refunds. The contract view shows it to Finance and the MD.
 
+## Forgotten passwords
+
+Staff do not reset their own password by e-mail. They contact the administrator:
+
+1. The administrator presses **Reset password** on the person's row (Staff page). The old password stops working at once and every session ends. The row shows "Password reset: waiting for them to choose a new one".
+2. The person opens the sign-in page, types their email and clicks **Forgot password?**. A form opens: *Enter your new password* and *Confirm your new password*.
+3. They save it and sign in with the new password.
+
+Without a reset from the administrator, **Forgot password?** only says "Contact your administrator". A reset is open for 24 hours, works once, and both steps are written to the audit log (`password_reset_opened`, `password_set_after_reset`). Endpoints: `POST /org/users/:id/reset-password`, `POST /auth/forgot-password`, `POST /auth/reset-password`.
+
+## Your work today
+
+Finance, Sales and the Managing Director open on a simple home: a short numbered list of the jobs waiting for them, one sentence each and one button that opens the job already filtered (for example *Payments waiting for your approval*). A strip under it shows how their work moves, and their main pages carry a one-line tip saying what their step is. The menus, permissions and screens are unchanged.
+
 ## Tests
 
 Tests never touch the live database: `test_support/guard.mjs` derives a separate test database from `.env` (override with `MKUYU_TEST_DB`).

@@ -69,6 +69,16 @@ export const Report = {
     add("clients_active", { table: "clients", alias: "c", entity: "client", conditions: [eq("c.status", "active")] });
     add("appointments_scheduled", { table: "appointments", alias: "a", entity: "appointment", conditions: [eq("a.status", "scheduled")] });
     add("documents_pending", { table: "documents", alias: "d", entity: "document", conditions: [eq("d.status", "pending")] });
+    // "Your work today": how many contracts sit at each hand-over, and the
+    // website requests waiting for Sales. Same scope as every other counter.
+    const contractAt = (name, ...conditions) => add(name, { table: "contracts", alias: "c", entity: "contract", conditions });
+    contractAt("contracts_draft", eq("c.status", "draft"));
+    contractAt("contracts_changes", eq("c.status", "changes_requested"));
+    contractAt("contracts_finance_review", eq("c.status", "legal_approved"), raw("c.finance_validated_at IS NULL"));
+    contractAt("contracts_management", eq("c.status", "pending_management_approval"));
+    contractAt("contracts_customer", eq("c.status", "customer_pending"));
+    add("requests_new", { table: "leads", alias: "l", entity: "lead", conditions: [raw("l.source IN ('website','website-contact')"), raw("l.task_id IS NULL"), raw("l.client_id IS NULL"), eq("l.status", "new")] });
+    add("requests_reported", { table: "leads", alias: "l", entity: "lead", extraFrom: "JOIN tasks t ON t.id=l.task_id", conditions: [raw("l.source IN ('website','website-contact')"), raw("t.status = 'submitted'")] });
 
     const summary = {
       financial,
@@ -95,6 +105,10 @@ export const Report = {
       // payments are claims or corrections, not income.
       addMoney("income_all", { table: "payments", alias: "p", entity: "payment", conditions: [eq("p.status", "approved")], sum: "p.amount" });
       addMoney("income_30d", { table: "payments", alias: "p", entity: "payment", conditions: [eq("p.status", "approved"), ge("p.paid_at", new Date(Date.now() - 30 * 86400000).toISOString())], sum: "p.amount" });
+      addMoney("payments_pending", { table: "payments", alias: "p", entity: "payment", conditions: [eq("p.status", "pending")], sum: "p.amount" });
+      // Pending payments someone else recorded: the ones this person may approve.
+      add("payments_to_approve", { table: "payments", alias: "p", entity: "payment", conditions: [eq("p.status", "pending"), (values) => { values.push(access?.userId ?? null); return `p.created_by IS DISTINCT FROM $${values.length}`; }] });
+      addMoney("debts_due_week", { table: "debts", alias: "d", entity: "debt", conditions: [raw("d.status <> 'paid'"), raw("d.due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + 7")], sum: "d.amount" });
     }
 
     const row = await queryOne(`SELECT ${columns.join(", ")} FROM (SELECT 1) AS anchor`, values);
@@ -108,12 +122,24 @@ export const Report = {
     summary.clients_active = count("clients_active");
     summary.appointments_scheduled = count("appointments_scheduled");
     summary.documents_pending = count("documents_pending");
+    summary.work = {
+      contracts_draft: count("contracts_draft"),
+      contracts_changes: count("contracts_changes"),
+      contracts_finance_review: count("contracts_finance_review"),
+      contracts_management: count("contracts_management"),
+      contracts_customer: count("contracts_customer"),
+      requests_new: count("requests_new"),
+      requests_reported: count("requests_reported"),
+    };
     if (financial) {
       summary.debts_pending = { count: count("debts_pending_count"), total: total("debts_pending_total") };
       summary.debts_overdue = { count: count("debts_overdue_count"), total: total("debts_overdue_total") };
       summary.debts_paid = { count: count("debts_paid_count"), total: total("debts_paid_total") };
       summary.income_all = { count: count("income_all_count"), total: total("income_all_total") };
       summary.income_30d = { count: count("income_30d_count"), total: total("income_30d_total") };
+      summary.payments_pending = { count: count("payments_pending_count"), total: total("payments_pending_total") };
+      summary.payments_to_approve = count("payments_to_approve");
+      summary.debts_due_week = { count: count("debts_due_week_count"), total: total("debts_due_week_total") };
     }
     return summary;
   },

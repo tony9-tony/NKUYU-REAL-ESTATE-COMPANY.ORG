@@ -1,4 +1,5 @@
 import { Router } from "express";
+import crypto from "node:crypto";
 import { query, queryOne, withTransaction } from "../db.js";
 import { BUSINESS_PERMISSIONS, organizationId, permissionKeys, requirePermission, requireAdmin, requireModuleAccess, requireScope } from "../org/rbac.js";
 import { addRecordShare, can, canAccessModule, canReadModule, isReadOnlyModule, clearAccessCache, currentAccess, isScope, isVisibility, listRecordShares, ownershipFields, removeRecordShare, scopeCondition } from "../org/access.js";
@@ -502,7 +503,7 @@ router.get("/workspace", async (req, res, next) => {
       // administrator account, or the ICT Officer), not only to the admin account.
       staffAdmin ? rows(`${DEPARTMENT_SELECT} WHERE d.organization_id=$1 ORDER BY d.name`, [org]).then((list) => list.map(withCore)) : [],
       staffAdmin ? rows("SELECT r.*, COALESCE((SELECT json_agg(p.permission_key ORDER BY p.permission_key) FROM role_permissions rpx JOIN permissions p ON p.id=rpx.permission_id WHERE rpx.role_id=r.id),'[]'::json) AS permissions FROM roles r WHERE r.organization_id=$1 ORDER BY r.rank DESC, r.name", [org]) : [],
-      can(access, "manage_users") ? rows(`SELECT u.id,u.email,u.display_name,u.role,u.active,${USER_ROLES_JSON} AS roles,${USER_DEPARTMENTS_JSON} AS departments FROM users u WHERE u.organization_id=$1 ORDER BY u.display_name`, [org]) : [],
+      can(access, "manage_users") ? rows(`SELECT u.id,u.email,u.display_name,u.role,u.active,(u.password_reset_expires_at > NOW()) AS password_reset_pending,${USER_ROLES_JSON} AS roles,${USER_DEPARTMENTS_JSON} AS departments FROM users u WHERE u.organization_id=$1 ORDER BY u.display_name`, [org]) : [],
       can(access, "manage_permissions") ? rows("SELECT permission_key, label FROM permissions ORDER BY permission_key") : [],
       // The full audit trail is administrator-only. A `view_audit` holder such as
       // the ICTO receives only system/security events, never business activity.
@@ -878,7 +879,7 @@ router.get("/access-matrix", requireAdmin(), async (req, res, next) => {
   } catch (error) { next(error); }
 });
 router.put("/roles/:id/permissions", requirePermission("manage_permissions"), async (req,res,next)=>{try{const roleId=id(req.params.id,"role_id");await guardRoleChange(req,roleId,await organizationId());const keys=(Array.isArray(req.body?.permissions)?req.body.permissions:[]).map(String);if(!isAdminAccount(req)){const reserved=keys.filter((key)=>RESERVED_ROLE_PERMISSIONS.has(key));if(reserved.length)return res.status(403).json({error:`only the System Administrator can grant ${reserved.join(", ")}`});}await withTransaction(async(client)=>{await client.query("DELETE FROM role_permissions WHERE role_id=$1",[roleId]);for(const key of keys)await client.query("INSERT INTO role_permissions(role_id,permission_id) SELECT $1,id FROM permissions WHERE permission_key=$2 ON CONFLICT DO NOTHING",[roleId,String(key)]);});clearAccessCache();await audit(req,"updated","role_permissions",roleId);res.json({ok:true});}catch(e){next(e);}});
-router.get("/users", requirePermission("manage_users"), async (req,res,next)=>{try{const result=await rows(`SELECT u.id,u.email,u.display_name,u.role,u.active,u.created_at,${USER_ROLES_JSON} AS roles,${USER_DEPARTMENTS_JSON} AS departments FROM users u WHERE u.organization_id=$1 ORDER BY u.display_name`,[await organizationId()]);res.json(result);}catch(e){next(e);}});
+router.get("/users", requirePermission("manage_users"), async (req,res,next)=>{try{const result=await rows(`SELECT u.id,u.email,u.display_name,u.role,u.active,u.created_at,(u.password_reset_expires_at > NOW()) AS password_reset_pending,${USER_ROLES_JSON} AS roles,${USER_DEPARTMENTS_JSON} AS departments FROM users u WHERE u.organization_id=$1 ORDER BY u.display_name`,[await organizationId()]);res.json(result);}catch(e){next(e);}});
 /**
  * Creates one staff account with its role(s) and department(s). Shared by the
  * Staff page (role chosen) and a department's "Add staff" (role defaulted).
@@ -946,6 +947,26 @@ router.put("/users/:id", requirePermission("manage_users"), async (req,res,next)
     // are dropped so a token minted against the old password cannot outlive it.
     if(req.body?.password){if(String(req.body.password).length<8||String(req.body.password).length>128)return res.status(400).json({error:"password must be between 8 and 128 characters"});if(String(req.body.password)===demoPasswordFor(target.email))return res.status(400).json({error:"that password follows the published demo scheme; choose another"});await query("UPDATE users SET password_hash=$1 WHERE id=$2",[hashPassword(req.body.password),userId]);await query("DELETE FROM sessions WHERE user_id=$1",[userId]);clearAccessCache();await audit(req,"password_reset","user",userId,{email:target.email,sessions_invalidated:true});}
     if(!r)return res.status(404).json({error:"user not found"});clearAccessCache();if(req.body?.active===false||req.body?.active===0||req.body?.active==="false")await revokeUserSessions(userId);await audit(req,"updated","user",userId);res.json(r);}catch(e){next(e);}});
+// Reset a staff member's password (they forgot it). The old password stops
+// working at once and every session ends; for the next 24 hours the person can
+// choose a new password themselves from "Forgot password?" on the sign-in
+// screen. Nobody else, the administrator included, ever learns the new password.
+export const PASSWORD_RESET_HOURS = 24;
+router.post("/users/:id/reset-password", requirePermission("manage_users"), async (req, res, next) => {
+  try {
+    const userId = id(req.params.id, "user_id");
+    const org = await organizationId();
+    const target = await guardTargetUser(req, userId, org, { allowSelf: false });
+    const row = await queryOne(`UPDATE users SET password_hash=$1, password_reset_expires_at=NOW() + ($2 || ' hours')::interval, password_reset_by=$3
+        WHERE id=$4 AND organization_id=$5 RETURNING id, email, display_name, password_reset_expires_at`,
+      [hashPassword(crypto.randomBytes(24).toString("hex")), String(PASSWORD_RESET_HOURS), req.user.id, userId, org]);
+    if (!row) return res.status(404).json({ error: "user not found" });
+    await revokeUserSessions(userId);
+    clearAccessCache();
+    await audit(req, "password_reset_opened", "user", userId, { email: target.email, expires_at: row.password_reset_expires_at, sessions_invalidated: true });
+    res.json({ ok: true, user_id: row.id, email: row.email, display_name: row.display_name, expires_at: row.password_reset_expires_at, hours: PASSWORD_RESET_HOURS });
+  } catch (e) { next(e); }
+});
 router.put("/users/:id/roles", requirePermission("manage_users"), async (req,res,next)=>{try{const userId=id(req.params.id,"user_id");const org=await organizationId();await guardTargetUser(req,userId,org,{allowSelf:true});const roleIds=[...new Set((Array.isArray(req.body?.role_ids)?req.body.role_ids:[]).map((roleId)=>id(roleId,"role_id")))];if(roleIds.length)await assignableRoles(req,roleIds,org);
     // An administrator may move THEMSELVES only between system-administration
     // roles (no business permission), so nobody can hand themselves Finance,

@@ -534,6 +534,10 @@ export async function runMigrations({ seedDemo = process.env.NODE_ENV !== "produ
   await migrateSessionSecurity();
   await migrateContractDealType();
   await migratePaymentApproval();
+  // Administrator-approved password reset: while the window is open the staff
+  // member sets a new password from "Forgot password?" on the sign-in screen.
+  await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMPTZ");
+  await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_by INTEGER REFERENCES users(id) ON DELETE SET NULL");
   // "Mark as done" on an appointment records who confirmed the meeting happened.
   await query("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS completed_by INTEGER REFERENCES users(id) ON DELETE SET NULL");
   await query("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ");

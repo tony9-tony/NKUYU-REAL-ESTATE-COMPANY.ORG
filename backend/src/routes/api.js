@@ -938,6 +938,9 @@ router.post("/auth/login", route(async (req, res) => {
   const passwordOk = verifyPassword(password, user?.password_hash || TIMING_DUMMY_HASH);
   if (!user || !passwordOk || user.active === false) {
     recordLoginFailure(req, email);
+    if (user && user.active !== false && user.password_reset_expires_at && new Date(user.password_reset_expires_at) > new Date()) {
+      throw new HttpError(401, "Your password was reset by the administrator. Click \"Forgot password?\" to choose a new one.");
+    }
     throw new HttpError(401, "email or password is incorrect");
   }
   // MK-01: in production a password anyone can derive from the address (the
@@ -956,6 +959,40 @@ router.post("/auth/login", route(async (req, res) => {
   const session = await createSession(user.id, { remember: body.remember !== false });
   await audit({ user }, "login", "auth", user.id, { portal });
   return sendSession(req, res, 200, { ...await publicUser(user), portal }, session);
+}));
+// Forgot password. Staff never get an e-mailed link: they ask the
+// administrator, who opens a reset (POST /org/users/:id/reset-password). While
+// that reset is open (24 hours) "Forgot password?" lets the person choose a new
+// password; otherwise it tells them to contact the administrator.
+const passwordResetLimit = rateLimit({ name: "password-reset", limit: 20, windowMs: 15 * 60 * 1000 });
+async function openResetFor(email) {
+  return queryOne("SELECT id, email, active FROM users WHERE LOWER(email)=LOWER($1) AND role<>'admin' AND active AND password_reset_expires_at > NOW()", [email]);
+}
+router.post("/auth/forgot-password", passwordResetLimit, route(async (req, res) => {
+  const email = validEmail(req.body?.email, "email");
+  if (!email) throw new HttpError(400, "enter your work email");
+  const open = await openResetFor(email);
+  res.json(open
+    ? { reset_ready: true, message: "Your administrator has reset your password. Choose a new one." }
+    : { reset_ready: false, message: "Contact your administrator to reset your password, then come back here." });
+}));
+router.post("/auth/reset-password", passwordResetLimit, route(async (req, res) => {
+  const email = validEmail(req.body?.email, "email");
+  if (!email) throw new HttpError(400, "enter your work email");
+  const fresh = typeof req.body?.new_password === "string" ? req.body.new_password : "";
+  const confirm = typeof req.body?.confirm_password === "string" ? req.body.confirm_password : "";
+  if (fresh.length < 8 || fresh.length > 128) throw new HttpError(400, "the new password must be between 8 and 128 characters");
+  if (fresh !== confirm) throw new HttpError(400, "the two passwords do not match");
+  if (isDemoPassword(email, fresh)) throw new HttpError(400, "that password follows the published demo scheme; choose another");
+  const open = await openResetFor(email);
+  if (!open) throw new HttpError(403, "There is no password reset for this account. Contact your administrator.");
+  // One use only: the reset closes in the same statement that sets the password.
+  const saved = await queryOne("UPDATE users SET password_hash=$1, password_reset_expires_at=NULL, password_reset_by=NULL WHERE id=$2 AND password_reset_expires_at > NOW() RETURNING id", [hashPassword(fresh), open.id]);
+  if (!saved) throw new HttpError(403, "There is no password reset for this account. Contact your administrator.");
+  await query("DELETE FROM sessions WHERE user_id=$1", [open.id]);
+  recordLoginSuccess(req, email);
+  await audit({ user: { id: open.id } }, "password_set_after_reset", "user", open.id, { email: open.email });
+  res.json({ ok: true, message: "Your new password is saved. Sign in with it now." });
 }));
 router.post("/auth/logout", route(async (req, res) => {
   const token = tokenFromRequest(req);

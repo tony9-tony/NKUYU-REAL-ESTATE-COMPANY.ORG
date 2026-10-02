@@ -54,3 +54,5 @@ Claude outputs/
 # Local test runner output and generated training videos (large media)
 test-results.txt
 training-videos/
+push-to-github.bat
+push-result.txt

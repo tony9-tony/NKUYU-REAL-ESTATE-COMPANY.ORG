@@ -36,7 +36,7 @@ const state = {
   allocationUnassigned: true,
   shares: null,
   reportFilters: { source: "", reportType: "", projectId: "", search: "", from: "", to: "" },
-  filters: { project: "", type: "", status: "", debtStatus: "", propertyStatus: "", clientStatus: "", appointmentStatus: "", documentStatus: "", documentSearch: "", sort: "" },
+  filters: { project: "", type: "", status: "", debtStatus: "", propertyStatus: "", clientStatus: "", appointmentStatus: "", documentStatus: "", documentSearch: "", sort: "", paymentStatus: "" },
   // ---- paginated list state -----------------------------------------------
   // The workspace returns the FIRST PAGE of each list, not the whole table, so
   // the dashboard must never derive a total from `state.X.length` - that is now
@@ -2034,7 +2034,7 @@ function generateContractFormBody() {
 
     <fieldset class="gen-section"><legend>Payment plan</legend>
       <div class="field full"><label for="gc-payment-mode">How will the customer pay?</label><select id="gc-payment-mode" name="payment_mode"><option value="installments" ${data.payment_mode !== "cash" ? "selected" : ""}>Installments: a deposit at signing, then equal installments</option><option value="cash" ${data.payment_mode === "cash" ? "selected" : ""}>Cash: the whole ${data.deal_type === "rent" ? "lease" : "price"} at signing</option></select><div class="field-help" id="gc-cash-note"${data.payment_mode === "cash" ? "" : " hidden"}>The whole final price is due on the start date. The contract becomes active once Finance confirms the payment.</div></div>
-      <div class="gen-plan-fields" style="display:contents"${data.payment_mode === "cash" ? " hidden" : ""}>
+      <div class="gen-plan-fields"${data.payment_mode === "cash" ? " hidden" : ""}>
       ${number("gc-deposit", "Deposit", data.deposit, 'placeholder="0"')}
       ${number("gc-installments", "Number of installments", data.installments, 'step="1" min="1" max="120" placeholder="6"')}
       <div class="field"><label for="gc-frequency">Payment frequency</label><select id="gc-frequency" name="frequency">${frequencies}</select></div>
@@ -2306,7 +2306,7 @@ function renderOrganization(section = "staff") {
   const canManageAccount = (user) => (isAdmin() && user.id !== org.me?.user?.id) || (user.role !== "admin" && user.id !== org.me?.user?.id
     && Math.max(0, ...(user.roles || []).map((role) => Number(role.rank || 0))) <= Number(org.me?.rank || 0));
   const meId = org.me?.user?.id;
-  const userRow = (user) => `<tr><td><strong>${escapeHtml(user.display_name)}</strong>${user.id === meId ? ` ${badge("You", "open")}` : ""}<div class="table-sub">${escapeHtml(user.email)}${(user.departments || []).length ? ` · ${escapeHtml((user.departments || []).map((d) => titleCase(d.name)).join(", "))}` : ""}</div></td><td>${user.roles?.map((role) => badge(role.name)).join(" ") || "No role"}</td><td>${user.active ? badge("Active", "approved") : badge("Inactive", "archived")}</td><td><div class="row-actions">${user.id === meId && isAdmin() ? `<button class="btn btn-gold btn-small" data-action="change-my-password" title="Change the administrator's own sign-in password">Change my password</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="reset-password" data-id="${user.id}" title="Set a new sign-in password without changing the account">Reset password</button>` : ""}${canManageAccount(user) || user.id === meId ? `<button class="btn btn-soft btn-small" data-action="change-staff-department" data-id="${user.id}" title="Move to another department">Move department</button><button class="btn btn-soft btn-small" data-action="change-staff-role" data-id="${user.id}" title="Give a different role">Change role</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="toggle-user" data-id="${user.id}" data-active="${user.active ? 0 : 1}">${user.active ? "Deactivate" : "Activate"}</button>` : ""}</div></td></tr>`;
+  const userRow = (user) => `<tr><td><strong>${escapeHtml(user.display_name)}</strong>${user.id === meId ? ` ${badge("You", "open")}` : ""}<div class="table-sub">${escapeHtml(user.email)}${(user.departments || []).length ? ` · ${escapeHtml((user.departments || []).map((d) => titleCase(d.name)).join(", "))}` : ""}</div></td><td>${user.roles?.map((role) => badge(role.name)).join(" ") || "No role"}</td><td>${user.active ? badge("Active", "approved") : badge("Inactive", "archived")}${user.password_reset_pending ? `<div class="table-sub">Password reset: waiting for them to choose a new one</div>` : ""}</td><td><div class="row-actions">${user.id === meId && isAdmin() ? `<button class="btn btn-gold btn-small" data-action="change-my-password" title="Change the administrator's own sign-in password">Change my password</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="reset-password" data-id="${user.id}" title="Set a new sign-in password without changing the account">Reset password</button>` : ""}${canManageAccount(user) || user.id === meId ? `<button class="btn btn-soft btn-small" data-action="change-staff-department" data-id="${user.id}" title="Move to another department">Move department</button><button class="btn btn-soft btn-small" data-action="change-staff-role" data-id="${user.id}" title="Give a different role">Change role</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="toggle-user" data-id="${user.id}" data-active="${user.active ? 0 : 1}">${user.active ? "Deactivate" : "Activate"}</button>` : ""}</div></td></tr>`;
 
   const usersByDepartment = new Map(DEPARTMENT_ORDER.map((name) => [name, []]));
   const unassigned = [];
@@ -2963,6 +2963,102 @@ function dashPanel(title, note, body, action = "", extraClass = "") {
 //      a wall of zeros.
 //   3. Every card, panel and quick action is gated exactly as before: modules
 //      via canModule(), money via view_financial, actions via can().
+/**
+ * Which simplified "Your work today" home this person gets. The Managing
+ * Director, the Finance desk and Sales each see their own short list of jobs;
+ * everyone else keeps the standard dashboard. Nothing here grants anything:
+ * every button opens a screen the person could already open.
+ */
+function workspaceRole() {
+  if (isAdmin()) return null;
+  if (can("approve_management")) return "md";
+  if (can("validate_finance") && canSeeFinancial()) return "finance";
+  if (can("submit_contract") && !can("approve_legal") && canModule("contracts")) return "sales";
+  return null;
+}
+
+/** The ordered steps of this person's part of the work, shown as a strip. */
+/** One plain-language line at the top of the pages each role uses most. */
+const PAGE_TIPS = {
+  finance: {
+    debts: "To record money: press “Record payment”, choose the contract, type the reference and attach the receipt or paste the SMS. Then approve it. The installment is marked paid by itself.",
+    contracts: "Your step: open a contract marked “Legal approved”, check the price and plan, then press “Validate financial terms”. The payment plan is created for you.",
+  },
+  sales: {
+    contracts: "Your step: press “Generate contract”, pick the property and customer, then press “Submit to Legal”. Anything Legal sends back shows as “Changes requested”.",
+    requests: "Your step: give each new request to Customer Service. When they report back, accept it and the customer becomes a client.",
+  },
+  md: {
+    contracts: "Your step: open a contract marked “Under MD review”, read it, then press “Management approval” or reject it with a reason.",
+  },
+};
+function addPageTip() {
+  const tip = PAGE_TIPS[workspaceRole()]?.[state.view];
+  if (!tip || content.querySelector(".page-tip")) return;
+  content.insertAdjacentHTML("afterbegin", `<div class="page-tip">${icon("spark")}<span>${escapeHtml(tip)}</span></div>`);
+}
+
+const WORK_FLOW = {
+  finance: ["Customer pays", "You record it (reference + proof)", "Approve it", "Give the MKUYU receipt", "Follow up the next due date"],
+  sales: ["Website request arrives", "Customer Service calls the customer", "You prepare the contract", "Legal → Finance → MD", "Customer signs"],
+  md: ["Sales prepares", "Legal reviews", "Finance checks the money", "You approve", "Legal releases to the customer"],
+};
+
+function workTodayPanel(role) {
+  const summary = state.summary || {};
+  const work = summary.work || {};
+  const n = (value) => Number(value || 0);
+  const jobs = [];
+  // job: count (null = always available), title, what to do, button, where it goes.
+  const job = (count, title, help, label, go, tone = "") => jobs.push({ count, title, help, label, go, tone });
+  const toView = (view, filters = {}, scroll = "") => ({ view, filters, scroll });
+  if (role === "finance") {
+    job(n(state.organization.me?.sole_finance_approver ? summary.payments_pending?.count : summary.payments_to_approve), "Payments waiting for your approval", "Check the reference and the proof, then approve. Only approved money counts.", "Approve payments", toView("debts", { paymentStatus: "pending" }, "#payments-section"), "gold");
+    job(n(work.contracts_finance_review), "Contracts to check", "Legal approved them. Check the price and payment plan, then press “Validate financial terms”.", "Check contracts", toView("contracts", { status: "legal_approved" }));
+    job(null, "Money received?", "Record it with the transaction reference and the receipt or SMS.", "Record a payment", { action: "new-payment" });
+    job(n(summary.debts_due_week?.count), "Due in the next 7 days", "Call these customers before the due date.", "See who to call", toView("debts", { debtStatus: "upcoming" }), "amber");
+    job(n(summary.debts_overdue?.count), "Overdue installments", "Follow these up today.", "See overdue", toView("debts", { debtStatus: "overdue" }), "red");
+  }
+  if (role === "sales") {
+    if (canModule("leads")) {
+      job(n(work.requests_new), "New website requests", "Give each one to Customer Service to call the customer.", "Open requests", toView("requests"), "gold");
+      job(n(work.requests_reported), "Customer Service reported back", "Read what the customer said, then accept or send back.", "Read reports", toView("requests"));
+    }
+    job(n(work.contracts_changes), "Contracts sent back to you", "Fix what Legal asked for, then submit again.", "Fix contracts", toView("contracts", { status: "changes_requested" }), "amber");
+    job(n(work.contracts_draft), "Drafts not yet sent to Legal", "Check the draft and press “Submit to Legal”.", "Submit drafts", toView("contracts", { status: "draft" }));
+    job(null, "Customer ready to buy or rent?", "The system fills the contract, price and payment plan for you.", "Prepare a contract", { action: "generate-contract" });
+  }
+  if (role === "md") {
+    job(n(work.contracts_management), "Contracts waiting for your approval", "Open each one, read it, then approve or reject.", "Review contracts", toView("contracts", { status: "pending_management_approval" }), "gold");
+    job(n(work.contracts_customer), "With the customer to sign", "No action needed. Legal records the signature.", "See them", toView("contracts", { status: "customer_pending" }));
+    if (canSeeFinancial()) {
+      job(n(summary.payments_pending?.count), "Payments Finance has not approved yet", "For your information. Finance approves them.", "See payments", toView("debts", { paymentStatus: "pending" }, "#payments-section"));
+      job(n(summary.debts_overdue?.count), "Overdue installments", summary.debts_overdue?.total ? `${money(summary.debts_overdue.total)} past due. Finance follows up.` : "Finance follows these up.", "See overdue", toView("debts", { debtStatus: "overdue" }), "red");
+    }
+    if (canModule("reports")) job(null, "How is the business doing?", "Sales, money received and contracts, for any period.", "Open reports", toView("reports"));
+  }
+  if (!jobs.length) return "";
+  const waiting = jobs.filter((entry) => entry.count > 0).length;
+  const cards = jobs.map((entry, index) => {
+    const idle = entry.count === 0;
+    const attrs = entry.go.action
+      ? `data-action="${entry.go.action}"`
+      : `data-action="work-go" data-view="${escapeHtml(entry.go.view)}" data-filters="${escapeHtml(JSON.stringify(entry.go.filters || {}))}" data-scroll="${escapeHtml(entry.go.scroll || "")}"`;
+    const badgeHtml = entry.count === null
+      ? `<span class="work-count work-count-plus">${icon("plus")}</span>`
+      : idle ? `<span class="work-count work-count-done">${icon("check")}</span>` : `<span class="work-count ${entry.tone ? `work-${entry.tone}` : ""}">${entry.count > 99 ? "99+" : entry.count}</span>`;
+    return `<li class="work-card${idle ? " work-card-idle" : ""}"><span class="work-num">${index + 1}</span>${badgeHtml}<div class="work-copy"><strong>${escapeHtml(entry.title)}</strong><span>${escapeHtml(idle ? "Nothing waiting. Well done." : entry.help)}</span></div><button class="btn ${idle ? "btn-soft" : "btn-primary"} btn-small" ${attrs}>${escapeHtml(entry.label)}${icon("arrow")}</button></li>`;
+  }).join("");
+  const flow = (WORK_FLOW[role] || []).map((step, index) => `<li class="work-step"><span>${index + 1}</span>${escapeHtml(step)}</li>`).join("");
+  return `<article class="panel work-panel">
+    <div class="panel-head"><div><h2 class="panel-title">Your work today</h2><div class="panel-note">${waiting ? `${waiting} thing${waiting === 1 ? "" : "s"} waiting for you. Start at number 1.` : "Nothing is waiting for you right now."}</div></div></div>
+    <div class="panel-body">
+    <ol class="work-list">${cards}</ol>
+    ${flow ? `<div class="work-flow"><span class="work-flow-label">How your work moves</span><ol>${flow}</ol></div>` : ""}
+    </div>
+  </article>`;
+}
+
 function renderDashboard() {
   const summary = state.summary || {};
   const financial = canSeeFinancial() && summary.financial !== false;
@@ -3018,7 +3114,7 @@ function renderDashboard() {
     if (canModule("properties")) cards.push(card("Available properties", summary.properties_available || 0, "Ready to sell or lease", "home"));
     if (canModule("projects")) cards.push(card("Active projects", summary.active_projects || 0, "Developments in progress", "building"));
     if (canModule("clients")) cards.push(card("Active clients", summary.clients_active || 0, "Relationships on record", "users"));
-    if (canModule("contracts")) cards.push(card("New contracts", newContracts.count || 0, `${money(newContracts.total || 0)} contract value`, "contract"));
+    if (canModule("contracts")) cards.push(card("New contracts", newContracts.count || 0, newContracts.total === null || newContracts.total === undefined ? "Signed and active" : `${money(newContracts.total || 0)} contract value`, "contract"));
     if (canModule("leads")) cards.push(card("Open leads", leads.filter((lead) => lead.status !== "converted").length, `${leads.filter((lead) => lead.status === "new").length} new enquiries`, "spark"));
     if (canModule("appointments")) cards.push(card("Scheduled appointments", summary.appointments_scheduled || 0, "Viewings, calls and meetings", "calendar"));
     if (financial && canModule("debts")) cards.push(card("Outstanding", money(pending.total || 0), `${pending.count || 0} open installment${Number(pending.count) === 1 ? "" : "s"}`, "wallet", "amber"));
@@ -3121,7 +3217,7 @@ function renderDashboard() {
       ${quickActions.length ? `<div class="dash-actions">${quickActions.join("")}</div>` : ""}
     </section>
     <div class="dash-top${startSteps.length ? " has-start" : ""}">
-      ${attentionPanel}
+      ${workTodayPanel(workspaceRole()) || attentionPanel}
       ${startSteps.length ? dashPanel("Get started", "Set up the workspace in a few steps", `<ol class="start-list">${startSteps.join("")}</ol>`, "", "start-panel") : ""}
     </div>
     ${cards.length ? `<div class="stat-grid">${cards.join("")}</div>` : ""}
@@ -3287,7 +3383,7 @@ function renderDebts() {
         : emptyState("No installments yet", "Payment plans created with a contract appear here as installments.", { iconName: "wallet", compact: true, action: mayCreate ? `<button class="btn btn-primary btn-small" data-action="new-debt">${icon("plus")}Add a debt</button>` : "" })}</div>`}
     </div>
     <div class="section">
-      <div class="section-head"><div><h2 class="section-title">Recorded payments</h2><div class="section-note">Money actually received, with receipts</div></div>${mayCreate ? `<button class="btn btn-soft btn-small" data-action="new-payment">${icon("plus")}Record payment</button>` : ""}</div>
+      <div class="section-head" id="payments-section"><div><h2 class="section-title">Recorded payments</h2><div class="section-note">Money actually received, with receipts</div></div><div class="row-actions"><select class="filter-input" data-filter="paymentStatus" aria-label="Filter payments by approval"><option value="">All payments</option><option value="pending" ${filters.paymentStatus === "pending" ? "selected" : ""}>Waiting for approval</option><option value="approved" ${filters.paymentStatus === "approved" ? "selected" : ""}>Approved</option><option value="reversed" ${filters.paymentStatus === "reversed" ? "selected" : ""}>Reversed</option></select>${mayCreate ? `<button class="btn btn-soft btn-small" data-action="new-payment">${icon("plus")}Record payment</button>` : ""}</div></div>
       ${renderPaymentsTable(mayEdit, mayDelete)}
     </div>
     ${canModule("reminders") ? `<div class="section">
@@ -3376,7 +3472,9 @@ function renderReminders() {
 // the set the debts register offers on the same screen.
 function renderPaymentsTable(mayEdit = can("edit"), mayDelete = can("delete")) {
   const mayApprove = can("validate_finance") && canSeeFinancial();
-  const payments = [...(state.payments || [])].sort((a, b) => String(b.paid_at).localeCompare(String(a.paid_at)));
+  const paymentStatus = state.filters?.paymentStatus || "";
+  const payments = [...(state.payments || [])].filter((payment) => !paymentStatus || payment.status === paymentStatus).sort((a, b) => String(b.paid_at).localeCompare(String(a.paid_at)));
+  if (!payments.length && paymentStatus) return `<div class="panel">${emptyState(paymentStatus === "pending" ? "No payment is waiting for approval" : "No payments match", paymentStatus === "pending" ? "Everything recorded has been approved." : "Choose “All payments” to see the rest.", { iconName: "check", compact: true })}</div>`;
   if (!payments.length) return `<div class="panel">${emptyState("No payments recorded", "Use “Record payment” on an installment to log money received, with its transaction reference and proof.", { iconName: "money", compact: true })}</div>`;
   const rows = payments.map((payment) => {
     // Only a pending payment (not yet counted) is corrected or deleted; an
@@ -4213,8 +4311,10 @@ function render() {
   if (state.view === "reminders") renderReminders();
   if (state.view === "appointments") renderAppointments();
   if (state.view === "leads") renderLeads();
+  addPageTip();
   if (state.view === "requests") {
     renderRequests();
+    addPageTip();
     if (!state.requests && !state.requestsRequested) loadRequests().then(() => { updateNavigation(); if (state.view === "requests") render(); });
   }
   if (state.view === "documents") renderDocuments();
@@ -5305,12 +5405,35 @@ async function resetPassword(userId) {
   if (!user) { showToast("That staff account is no longer listed."); return; }
   const confirmed = await confirmDialog({
     title: "Reset password",
-    message: `Set a new password for ${user.display_name}? Their account, role, department and history stay exactly as they are.`,
-    confirmLabel: "Continue",
+    message: `Reset the password of ${user.display_name}? Their old password stops working now. They then choose a new one themselves on the sign-in screen. Their account, role, department and history stay exactly as they are.`,
+    confirmLabel: "Reset password",
     tone: "primary",
   });
   if (!confirmed) return;
-  openModal("reset-password", user);
+  try {
+    const result = await api(`/org/users/${user.id}/reset-password`, { method: "POST", body: "{}" });
+    if (state.organization.users) user.password_reset_pending = true;
+    render();
+    infoDialog("Password reset", `Tell ${user.display_name} to do this within ${result.hours || 24} hours:`, [
+      "Open the MKUYU sign-in page.",
+      `Type the work email ${result.email || user.email}.`,
+      "Click \"Forgot password?\".",
+      "Enter the new password twice and save it.",
+      "Sign in with the new password.",
+    ]);
+  } catch (error) {
+    showToast(error.message || "Unable to reset the password.");
+  }
+}
+
+/** A message with numbered steps and a single Done button. */
+function infoDialog(title, message, steps = []) {
+  modal.dataset.type = "info";
+  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(title)}</h2><p class="modal-sub">${escapeHtml(message)}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
+    ${steps.length ? `<ol class="info-steps">${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol>` : ""}
+    <div class="form-actions"><button type="button" class="btn btn-primary" data-action="close-modal">Done</button></div>`;
+  modalBackdrop.hidden = false;
+  setTimeout(() => modal.querySelector(".form-actions .btn")?.focus(), 0);
 }
 
 async function removePropertyPhoto(propertyId, imageId) {
@@ -5580,7 +5703,7 @@ document.getElementById("primary-nav").addEventListener("click", (event) => {
   state.view = item.dataset.view;
   if (state.view === "templates") { state.templatesLoaded = false; state.templatesRequested = false; }
   if (state.view === "requests") { state.requests = null; state.requestsRequested = false; }
-  state.filters = { project: "", type: "", status: "", debtStatus: "", propertyStatus: "", clientStatus: "", appointmentStatus: "", documentStatus: "", documentSearch: "", sort: "" };
+  state.filters = { project: "", type: "", status: "", debtStatus: "", propertyStatus: "", clientStatus: "", appointmentStatus: "", documentStatus: "", documentSearch: "", sort: "", paymentStatus: "" };
   // On a small screen the navigation is a drawer: choosing a destination closes it.
   setNavOpen(false);
   // Re-render the nav so the active marker follows the new view.
@@ -5680,7 +5803,7 @@ async function loadContractAccount(contractId) {
     const paid = row.balance <= 0;
     const late = !paid && row.due_date && String(row.due_date).slice(0, 10) < today();
     const stateBadge = paid ? badge("Paid", "approved") : row.paid > 0 ? badge("Part paid", "pending") : late ? badge("Overdue", "rejected") : badge("Open", "neutral");
-    return `<tr><td><span class="cell-main">${escapeHtml(row.label || "Installment")}</span></td><td>${formatDate(row.due_date)}</td><td>${stateBadge}</td><td class="amount">${money(row.amount)}</td><td class="amount">${money(row.paid)}</td><td class="amount">${money(row.balance)}</td></tr>`;
+    return `<tr><td><span class="cell-main">${escapeHtml(row.label || "Installment")}</span></td><td>${formatDate(row.due_date)}</td><td>${stateBadge}</td><td class="amount">${money(row.amount)}</td><td class="amount">${money(row.balance)}</td></tr>`;
   }).join("");
   const paymentRows = (account.payments || []).map((row) => {
     const status = row.status === "approved" ? badge("Approved", "approved") : row.status === "reversed" ? badge("Reversed", "rejected") : badge("Pending approval", "pending");
@@ -5709,7 +5832,7 @@ async function loadContractAccount(contractId) {
     </div>` : "";
   host.innerHTML = `<div class="section-head"><div><h2 class="section-title">Account</h2><div class="section-note">Only money approved by Finance counts. Each approved payment has an MKUYU receipt for the customer.</div></div></div>
     ${totals}
-    ${installmentRows ? `<h3 class="section-title" style="margin-top:18px">Installments</h3>${table(`<th>Installment</th><th>Due</th><th>State</th><th class="align-right">Amount</th><th class="align-right">Paid</th><th class="align-right">Balance</th>`, installmentRows)}` : `<p class="muted">No payment plan yet.</p>`}
+    ${installmentRows ? `<h3 class="section-title" style="margin-top:18px">Installments</h3>${table(`<th>Installment</th><th>Due</th><th>State</th><th class="align-right">Amount</th><th class="align-right">Left to pay</th>`, installmentRows)}` : `<p class="muted">No payment plan yet.</p>`}
     ${paymentRows ? `<h3 class="section-title" style="margin-top:18px">Payments</h3>${table(`<th>Paid on</th><th class="align-right">Amount</th><th>Reference</th><th>Status</th><th>MKUYU receipt</th>`, paymentRows)}` : ""}
     ${refundRows ? `<h3 class="section-title" style="margin-top:18px">Refunds</h3>${table(`<th>Paid on</th><th class="align-right">Amount</th><th>Reference</th><th>Reason</th><th>Status</th><th></th>`, refundRows)}` : ""}
     ${refundForm}`;
@@ -5930,6 +6053,20 @@ document.addEventListener("click", async (event) => {
   if (action === "save-signature-title") {
     try { await api("/org/me/signature-title", { method: "PUT", body: JSON.stringify({ signature_title: document.getElementById("signature-title")?.value || "" }) }); showToast("Signature title saved."); await reloadProfile(); }
     catch (error) { showToast(error.message || "Unable to save."); }
+  }
+  if (action === "work-go") {
+    // A "Your work today" card: open the screen already narrowed to the job.
+    closeModal();
+    if (allowedViewFor(target.dataset.view) !== false) {
+      let filters = {};
+      try { filters = JSON.parse(target.dataset.filters || "{}"); } catch { filters = {}; }
+      state.filters = { ...state.filters, status: "", debtStatus: "", paymentStatus: "", ...filters };
+      state.view = target.dataset.view;
+      updateNavigation();
+      render();
+      const scroll = target.dataset.scroll;
+      if (scroll) setTimeout(() => document.querySelector(scroll)?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+    }
   }
   if (action === "open-alert-view") {
     // Route through the normal view switch, which re-applies the navigation
@@ -6312,18 +6449,81 @@ if (portalTabs) {
   });
 }
 
-// There is no self-service reset endpoint, and inventing one would be a
-// security hole. Say plainly who can help instead of showing a dead form.
+// Forgot password. Staff ask the administrator, who presses "Reset password".
+// Only then does "Forgot password?" open the form where the person chooses a
+// new password; otherwise it tells them to contact the administrator.
+const resetForm = document.getElementById("reset-form");
+const resetMessage = document.getElementById("reset-message");
+
+function showResetForm(email) {
+  authForm.hidden = true;
+  if (portalTabs) portalTabs.hidden = true;
+  document.querySelector(".auth-switch")?.setAttribute("hidden", "");
+  resetForm.hidden = false;
+  resetForm.reset();
+  document.getElementById("reset-email").value = email;
+  resetMessage.hidden = true;
+  authTitle.textContent = "Set a new password";
+  authSubtitle.textContent = "Your administrator reset your password. Choose a new one.";
+  document.getElementById("reset-password").focus();
+}
+
+function closeResetForm(message = "") {
+  resetForm.hidden = true;
+  authForm.hidden = false;
+  document.querySelector(".auth-switch")?.removeAttribute("hidden");
+  setAuthMode("login");
+  if (message) showAuthMessage(message, "info");
+}
+
 if (authForgot) {
-  authForgot.addEventListener("click", () => {
-    showAuthMessage(
-      authPortal === "admin"
-        ? "A system administrator resets passwords from Administration → Users."
-        : "Ask your administrator or department head to reset your password.",
-      "info",
-    );
+  authForgot.addEventListener("click", async () => {
+    if (authPortal === "admin") {
+      showAuthMessage("The administrator account changes its password from Staff → Change my password.", "info");
+      return;
+    }
+    const emailInput = document.getElementById("auth-email");
+    const email = String(emailInput.value || "").trim();
+    if (!email || !emailInput.checkValidity()) {
+      showAuthMessage("Type your work email above first, then click \"Forgot password?\".", "info");
+      emailInput.focus();
+      return;
+    }
+    authForgot.disabled = true;
+    try {
+      const answer = await api("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) });
+      if (answer.reset_ready) showResetForm(email);
+      else showAuthMessage("Contact your administrator to reset your password. When they have done it, come back and click \"Forgot password?\" again.", "info");
+    } catch (error) {
+      showAuthMessage(error.message || "Unable to check right now. Try again.");
+    } finally {
+      authForgot.disabled = false;
+    }
   });
 }
+
+resetForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const body = Object.fromEntries(new FormData(resetForm));
+  const show = (text) => { resetMessage.textContent = text; resetMessage.classList.remove("info"); resetMessage.hidden = false; };
+  if (String(body.new_password || "").length < 8) { show("The new password must have at least 8 characters."); return; }
+  if (body.new_password !== body.confirm_password) { show("The two passwords do not match. Type them again."); return; }
+  const submit = document.getElementById("reset-submit");
+  submit.disabled = true;
+  try {
+    await api("/auth/reset-password", { method: "POST", body: JSON.stringify(body) });
+    const email = body.email;
+    closeResetForm("Your new password is saved. Sign in with it now.");
+    document.getElementById("auth-email").value = email;
+    document.getElementById("auth-password").value = "";
+    document.getElementById("auth-password").focus();
+  } catch (error) {
+    show(error.message || "Unable to save the new password.");
+  } finally {
+    submit.disabled = false;
+  }
+});
+document.getElementById("reset-back")?.addEventListener("click", () => closeResetForm());
 
 document.querySelector('[data-action="logout"]')?.addEventListener("click", async () => {
   try {

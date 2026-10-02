@@ -2120,3 +2120,68 @@ label.btn { cursor: pointer; }
 .apt-reminder-head h2 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 1.1rem; }
 .apt-reminder-list { list-style: none; margin: 0 0 14px; padding: 0; display: grid; gap: 10px; }
 .apt-reminder-item { display: grid; gap: 2px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line, rgba(0, 0, 0, .1)); }
+
+/* Numbered steps in an information dialog (e.g. after a password reset). */
+.info-steps { margin: 4px 0 18px; padding-left: 22px; display: grid; gap: 8px; line-height: 1.45; }
+
+/* "Your work today": the simplified home for Finance, Sales and the MD.
+   Numbered jobs, one plain sentence each, one button that opens the job. */
+.work-panel { grid-column: 1 / -1; }
+.work-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.work-card {
+  display: grid;
+  grid-template-columns: 26px 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.work-card:not(.work-card-idle) { border-color: var(--border-strong); box-shadow: var(--shadow-sm); }
+.work-card-idle { background: var(--surface-alt); }
+.work-card-idle .work-copy strong { color: var(--ink-2); }
+.work-num { font-weight: 800; color: var(--muted-2); font-size: var(--fs-md); text-align: center; }
+.work-count {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-pill);
+  background: var(--green-soft);
+  color: var(--ink);
+  font-weight: 800;
+  font-size: var(--fs-lg);
+}
+.work-count .icon { width: 18px; height: 18px; }
+.work-count.work-gold { background: var(--gold); color: #fff; }
+.work-count.work-amber { background: var(--warning-soft); color: var(--warning); }
+.work-count.work-red { background: var(--danger-soft); color: var(--danger); }
+.work-count-done { background: var(--success-soft); color: var(--success); }
+.work-count-plus { background: var(--surface-sunken); color: var(--ink-2); }
+.work-copy { display: grid; gap: 3px; min-width: 0; }
+.work-copy strong { font-size: var(--fs-md); color: var(--ink); }
+.work-copy span { color: var(--muted); font-size: var(--fs-sm); line-height: 1.45; }
+.work-card .btn { white-space: nowrap; }
+.work-flow { margin-top: 18px; padding-top: 14px; border-top: 1px dashed var(--border); }
+.work-flow-label { display: block; font-size: var(--fs-xs); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted-2); margin-bottom: 10px; }
+.work-flow ol { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.work-step { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px 6px 6px; border-radius: var(--radius-pill); background: var(--gold-soft); color: var(--gold-ink); font-size: var(--fs-sm); font-weight: 600; }
+.work-step span { display: grid; place-items: center; width: 20px; height: 20px; border-radius: var(--radius-pill); background: var(--gold); color: #fff; font-size: var(--fs-xs); }
+@media (max-width: 720px) {
+  .work-card { grid-template-columns: 36px minmax(0, 1fr); }
+  .work-num { display: none; }
+  .work-card .btn { grid-column: 1 / -1; justify-self: start; }
+}
+
+/* Contract wizard: the installment fields sit in the form grid; hidden for cash. */
+.gen-plan-fields { display: contents; }
+.gen-plan-fields[hidden] { display: none; }
+
+/* One-line guide at the top of a role's main pages. */
+.page-tip { display: flex; align-items: flex-start; gap: 10px; margin-bottom: var(--sp-4); padding: 12px 14px; border-radius: var(--radius-md); background: var(--gold-soft); border: 1px solid var(--green-soft); color: var(--gold-ink); font-size: var(--fs-base); line-height: 1.5; }
+.page-tip .icon { flex: 0 0 auto; margin-top: 2px; color: var(--gold); }
+
+/* Contract account tables: keep dates and amounts on one line. */
+#contract-account td, #contract-account th { white-space: nowrap; }
+#contract-account td:nth-child(4) .cell-main, #contract-account .cell-main { white-space: normal; }
