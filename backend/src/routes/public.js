@@ -65,6 +65,34 @@ async function photosFor(req, ids) {
   return map;
 }
 
+/**
+ * A unit in a building without photos of its own shows photos of the building
+ * (taken from its published sibling units), marked `shared`, so a visitor
+ * never sees an empty listing while the unit's own photos are still to come.
+ */
+async function withBuildingPhotos(req, rows, photos) {
+  const need = [...new Set(rows.filter((r) => r.project_kind === "building" && r.project_id && !(photos.get(r.id) || []).length).map((r) => r.project_id))];
+  if (!need.length) return photos;
+  const siblings = (await query(
+    `SELECT p.id, p.project_id FROM properties p WHERE p.project_id = ANY($1::int[]) AND p.organization_id = $2 AND ${PUBLISHED} ORDER BY p.featured DESC, p.id`,
+    [need, await organizationId()],
+  )).rows;
+  const siblingPhotos = await photosFor(req, siblings.map((s) => s.id));
+  const byProject = new Map();
+  for (const sibling of siblings) {
+    const list = byProject.get(sibling.project_id) || [];
+    if (list.length < 4) list.push(...(siblingPhotos.get(sibling.id) || []).slice(0, 4 - list.length));
+    byProject.set(sibling.project_id, list);
+  }
+  const out = new Map(photos);
+  for (const row of rows) {
+    if (row.project_kind !== "building" || (out.get(row.id) || []).length) continue;
+    const shared = byProject.get(row.project_id) || [];
+    if (shared.length) out.set(row.id, shared.map((photo) => ({ ...photo, shared: true })));
+  }
+  return out;
+}
+
 const serviceList = (row) => [row.offer_rent ? "rent" : null, openToBuy(row) ? "buy" : null].filter(Boolean);
 
 function toPublicProperty(row, photos) {
@@ -97,7 +125,7 @@ function toPublicProperty(row, photos) {
     bathrooms: Number(row.bathrooms) || 0,
     area: Number(row.area) || 0,
     featured: Boolean(row.featured),
-    photos: (photos.get(row.id) || []).map((photo) => ({ ...photo, alt: row.name })),
+    photos: (photos.get(row.id) || []).map((photo) => ({ ...photo, alt: photo.shared ? `${row.project_name || "The building"} (building photo)` : row.name })),
     summary: row.summary || "",
     description: row.description || "",
     features: String(row.features || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
@@ -131,7 +159,7 @@ router.get("/properties", route(async (req, res) => {
   if (filter === false) return;
   const conditions = [...LISTED, ...(filter ? [filter] : [])];
   const rows = (await query(`${propertySelect} WHERE ${conditions.join(" AND ")} ORDER BY ${OPEN_FIRST}, p.featured DESC, p.created_at DESC, p.id DESC`, [await organizationId()])).rows;
-  const photos = await photosFor(req, rows.map((r) => r.id));
+  const photos = await withBuildingPhotos(req, rows, await photosFor(req, rows.map((r) => r.id)));
   res.set("Cache-Control", "public, max-age=60");
   res.json(rows.map((row) => toPublicProperty(row, photos)));
 }));
@@ -142,7 +170,7 @@ router.get("/properties/:id", route(async (req, res) => {
   if (!id) return notFound(res, "Property");
   const row = await queryOne(`${propertySelect} WHERE p.id = $1 AND p.organization_id = $2 AND ${PUBLISHED}`, [id, await organizationId()]);
   if (!row) return notFound(res, "Property");
-  const photos = await photosFor(req, [row.id]);
+  const photos = await withBuildingPhotos(req, [row], await photosFor(req, [row.id]));
   res.set("Cache-Control", "public, max-age=60");
   res.json(toPublicProperty(row, photos));
 }));
@@ -205,7 +233,7 @@ router.get("/projects/:id", route(async (req, res) => {
       ORDER BY p.floor NULLS LAST, length(COALESCE(p.unit_number, '')), p.unit_number, p.id`,
     [await organizationId(), id],
   )).rows;
-  const photos = await photosFor(req, [...new Set([...row.property_ids, ...units.map((u) => u.id)])]);
+  const photos = await withBuildingPhotos(req, units, await photosFor(req, [...new Set([...row.property_ids, ...units.map((u) => u.id)])]));
   res.set("Cache-Control", "public, max-age=60");
   res.json({ ...toPublicProject(row, photos), properties: units.map((unit) => toPublicProperty(unit, photos)) });
 }));

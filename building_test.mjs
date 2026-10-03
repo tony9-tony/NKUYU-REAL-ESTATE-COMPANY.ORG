@@ -14,6 +14,7 @@ async function call(path, { token, method = "GET", body } = {}) {
   let json; try { json = JSON.parse(text); } catch { json = text; }
   return { status: r.status, body: json };
 }
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 const login = async (email) => (await call("/auth/login", { method: "POST", body: { email, password: demoPasswordFor(email) } })).body.token;
 
 try {
@@ -64,6 +65,19 @@ try {
   check(staffView.status === "leased" && staffView.sale_status === "available", "staff see it as rented; its sale state is kept for later");
   await call(`/properties/${u101.body.id}`, { token: sales, method: "PUT", body: { rent_status: "available" } });
   check((await call("/public/properties?service=buy")).body.some((p) => p.id === u101.body.id), "when the rent ends the unit is back on the Buy side");
+
+  // Building photos: a unit without photos of its own shows the building's.
+  const form = new FormData();
+  form.append("file", new Blob([PNG], { type: "image/png" }), "tower.png");
+  const uploaded = await fetch(`${server.base}/properties/${saleOnly.body.id}/images`, { method: "POST", headers: { Authorization: `Bearer ${sales}` }, body: form });
+  check(uploaded.status === 201, "a photo is uploaded on one unit");
+  const withPhotos = (await call(`/public/projects/${pid}`)).body.properties;
+  const own = withPhotos.find((u) => u.id === saleOnly.body.id);
+  const borrowed = withPhotos.find((u) => u.id === rentOnly.body.id);
+  check(own?.photos.length === 1 && !own.photos[0].shared, "that unit shows its own photo");
+  check(borrowed?.photos.length === 1 && borrowed.photos[0].shared === true && borrowed.photos[0].url === own.photos[0].url, "a unit without photos shows the building's photo, marked as shared");
+  const single = (await call(`/public/properties/${rentOnly.body.id}`)).body;
+  check(single.photos?.[0]?.shared === true, "the unit page shows the building photo too");
 
   // A visitor picks a unit and sends a request: Sales sees which unit.
   const phone = `+2557${String(Date.now()).slice(-8)}`;
