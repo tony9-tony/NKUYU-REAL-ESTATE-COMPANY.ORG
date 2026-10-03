@@ -176,6 +176,28 @@ The server makes **one automatic database backup a day** (a PostgreSQL dump, or 
 
 The System & backups page shows whether automatic backups are on and when the last one was made.
 
+## Bank statement upload
+
+Finance downloads the day's statement from internet banking (CSV or Excel .xlsx) and presses **Upload bank statement** (Payments & debts, or "Your work today"). Every credit is listed with the customer it most likely belongs to (contract number in the narration, a payer seen before, phone, name, amount). Finance ticks the lines, checks the customer and presses **Save selected** (or **Save & approve** when they are the only Finance person). Money out, fees and balances are skipped; a line already recorded is shown as such, so the same statement can be uploaded twice safely. A line with no bank reference gets a stable one built from its date, amount and description.
+
+## Customer e-mails (receipts and reminders)
+
+When Finance approves a payment the customer receives the MKUYU receipt (PDF) by e-mail, and three days before an installment is due they receive a reminder. Nothing is sent until the company's e-mail account is set in `.env`:
+
+```
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_USER=payments@yourcompany.co.tz
+SMTP_PASS=<app password>
+MAIL_FROM="MKUYU Real Estate <payments@yourcompany.co.tz>"
+```
+
+`MAIL_RECEIPTS=0` / `MAIL_REMINDERS=0` turn either off and `MAIL_REMINDER_DAYS` changes the 3 days. Every e-mail is logged (`email_log`); the System & backups page shows whether e-mail is on and the last one sent. No extra package is used (a small SMTP client in `backend/src/mail.js`).
+
+## Fonts without internet
+
+The interface fonts can be served by MKUYU itself: on a computer with internet, double-click `fetch-fonts.bat` (or `node tools/fetch_fonts.mjs`) once. The files land in `frontend/fonts`; until then Google Fonts is used.
+
 ## Tests
 
 Tests never touch the live database: `test_support/guard.mjs` derives a separate test database from `.env` (override with `MKUYU_TEST_DB`).

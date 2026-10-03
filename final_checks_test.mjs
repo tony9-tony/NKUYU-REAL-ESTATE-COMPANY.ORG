@@ -324,6 +324,34 @@ try {
   } finally {
     await query("UPDATE users SET active=TRUE WHERE id = ANY($1::int[])", [others]);
   }
+
+  console.log("\n=== CHECK 16: bank statement upload ===");
+  const csv = [
+    "Account statement",
+    "Date,Description,Reference,Debit,Credit,Balance",
+    `06/10/2026,"TRANSFER FROM BUYER FC ${deal.body.contract_number}",ST1-${tag},,"3,000.00",`,
+    "06/10/2026,Bank charges,,\"5,000.00\",,",
+    `07/10/2026,CASH DEPOSIT UNKNOWN PAYER ${tag},,,"1,234.00",`,
+  ].join("\n");
+  const sendStatement = async (token, body, name = "statement.csv") => {
+    const form = new FormData();
+    form.append("file", new Blob([body], { type: "text/csv" }), name);
+    const response = await fetch(`${base}/payments/statement`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
+    return { status: response.status, body: await response.json().catch(() => ({})) };
+  };
+  check((await sendStatement(sales, csv)).status === 403, "Sales cannot upload bank statements");
+  check((await sendStatement(financeB, "hello,world\n1,2", "statement.csv")).status === 400, "a file without date and amount columns is refused with a clear message");
+  const read = await sendStatement(financeB, csv);
+  const lineOne = read.body.rows?.find((row) => row.reference === `ST1-${tag}`.toUpperCase());
+  check(read.status === 200 && read.body.rows.length === 2 && read.body.skipped === 1, `money in is read, money out is skipped (${read.body.rows?.length} in, ${read.body.skipped} skipped)`);
+  check(lineOne?.suggestions?.[0]?.contract_id === deal.body.id, "the contract number in the narration points to the right contract");
+  const unknown = read.body.rows?.find((row) => row.amount === 1234);
+  check(Boolean(unknown?.reference?.startsWith("BANK-")), "a line without a reference gets a stable one (so it is never recorded twice)");
+  const savedStatement = await call("/payments/statement/save", { method: "POST", token: financeB, body: { rows: [{ ...lineOne, contract_id: deal.body.id }] } });
+  check(savedStatement.status === 200 && savedStatement.body.saved === 1, `the chosen line is saved as a payment (${JSON.stringify(savedStatement.body).slice(0, 200)})`);
+  const reread = await sendStatement(financeB, csv);
+  check(reread.body.rows.find((row) => row.reference === `ST1-${tag}`.toUpperCase())?.already_recorded, "uploading the same statement again shows the line as already recorded");
+  check((await call("/payments/statement/save", { method: "POST", token: financeB, body: { rows: [{ ...lineOne, contract_id: deal.body.id }] } })).body.failed === 1, "the same line cannot be saved twice");
   void demoPasswordFor;
 } catch (error) {
   failures += 1;

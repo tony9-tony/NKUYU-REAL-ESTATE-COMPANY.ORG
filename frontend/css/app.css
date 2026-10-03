@@ -2202,3 +2202,19 @@ label.btn { cursor: pointer; }
 .pay-change { position: absolute; top: 10px; right: 12px; font-size: var(--fs-sm); font-weight: 700; color: var(--gold-ink); pointer-events: none; }
 .pay-empty { padding: 8px 2px; }
 .pay-warning { display: block; padding: 8px 12px; margin-bottom: 8px; border-radius: var(--radius); background: var(--warning-soft); color: var(--warning); font-weight: 600; }
+
+/* Contract form in pages. */
+.gen-paged .gen-section[data-page]:not(.gen-page-active) { display: none; }
+.gen-pagebar { list-style: none; margin: 0 0 4px; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.gen-pagebar button { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px 6px 6px; border-radius: var(--radius-pill); border: 1px solid var(--border); background: var(--surface); color: var(--muted); font-weight: 600; font-size: var(--fs-sm); }
+.gen-pagebar span { display: grid; place-items: center; width: 22px; height: 22px; border-radius: var(--radius-pill); background: var(--surface-sunken); color: var(--ink-2); font-size: var(--fs-xs); }
+.gen-pagebar .active button { border-color: var(--gold); color: var(--ink); background: var(--gold-soft); }
+.gen-pagebar .active span { background: var(--gold); color: #fff; }
+.gen-pagebar .done span { background: var(--success); color: #fff; }
+
+/* Requests & leads tabs. */
+.request-tabs { display: inline-flex; margin-bottom: var(--sp-4); }
+
+/* Bank statement upload. */
+.statement-done td { opacity: .55; }
+.statement-contract { min-width: 260px; }

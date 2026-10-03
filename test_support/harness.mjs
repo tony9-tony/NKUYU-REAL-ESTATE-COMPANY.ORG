@@ -149,6 +149,7 @@ export async function startIsolatedServer({ port, label = "test" } = {}) {
       DATA_DIR: dir,
       // Test servers never make automatic backups.
       AUTO_BACKUP: "0",
+      MAIL_REMINDERS: "0",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

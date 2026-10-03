@@ -36,7 +36,8 @@
     "test:isolated": "node --import ./test_support/guard.mjs test_support/verify_isolation.mjs",
     "test:audit": "node --import ./test_support/guard.mjs ui_audit_regression.mjs",
     "test": "npm run test:unit && npm run test:access && npm run test:frontend && npm run test:e2e",
-    "test:backup": "node --import ./test_support/guard.mjs backup_test.mjs"
+    "test:backup": "node --import ./test_support/guard.mjs backup_test.mjs",
+    "test:mail": "node --import ./test_support/guard.mjs mail_test.mjs"
   },
   "engines": {
     "node": ">=20"

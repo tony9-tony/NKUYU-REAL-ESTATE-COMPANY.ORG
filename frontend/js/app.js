@@ -272,8 +272,8 @@ const viewMeta = {
   debts: ["Payments & debts", "Installments, balances, recorded payments and reminders"],
   reminders: ["Reminders", "Installments due now and falling due soon, so no payment date is missed"],
   appointments: ["Appointments", "Viewings, calls, meetings and inspections"],
-  requests: ["Requests", "Buy, Rent and Sell requests and Contact-page messages from the website, from arrival to answer"],
-  leads: ["Leads", "Enquiries and prospects, before they become clients"],
+  requests: ["Requests & leads", "Buy, Rent and Sell requests and Contact-page messages from the website, from arrival to answer"],
+  leads: ["Requests & leads", "Enquiries recorded by the team (calls, walk-ins, referrals), before they become clients"],
   documents: ["Documents", "Agreements, titles, receipts, reports and permits"],
   templates: ["Contract templates", "The Word files every new contract is produced on"],
   reports: ["Reports", "Generated and uploaded management reports"],
@@ -1065,8 +1065,9 @@ const NAV_ITEMS = [
   { view: "clients", label: "Clients", icon: "users", module: "clients", permission: "view", group: "Business" },
   // Website Buy/Rent requests, followed from arrival to client. Same module
   // and permission as Leads: it is a narrower view of the same records.
-  { view: "requests", label: "Requests", icon: "inbox", module: "leads", permission: "view", group: "Business" },
-  { view: "leads", label: "Leads", icon: "spark", module: "leads", permission: "view", group: "Business" },
+  { view: "requests", label: "Requests & leads", icon: "inbox", module: "leads", permission: "view", group: "Business" },
+  // Leads live under "Requests & leads" (a tab there), not as a second menu entry.
+  { view: "leads", label: "Leads", icon: "spark", module: "leads", permission: "view", group: "Business", mergedInto: "requests" },
   { view: "appointments", label: "Appointments", icon: "calendar", module: "appointments", permission: "view", group: "Business" },
   { view: "contracts", label: "Contracts", icon: "contract", module: "contracts", permission: "view", group: "Contracts & records" },
   { view: "documents", label: "Documents", icon: "folder", module: "documents", permission: "view", group: "Contracts & records" },
@@ -1200,6 +1201,7 @@ function updateNavigation() {
       ].map((item) => ({ ...item, group: "Administration" }));
     }
     const activeView = state.view;
+    allowed = allowed.filter((item) => !item.mergedInto);
     // The count is a hint drawn from records the caller can already open. It is
     // only ever attached to an item they are entitled to, so it cannot disclose
     // the existence of anything hidden from them. The page being looked at is
@@ -1216,7 +1218,8 @@ function updateNavigation() {
       const count = source === undefined ? 0 : live.has(item.view) ? Number(source) || 0 : unseenCount(`nav:${item.view}`, source);
       const heading = item.group && item.group !== lastGroup ? `<div class="nav-group-label">${escapeHtml(item.group)}</div>` : "";
       lastGroup = item.group || null;
-      return `${heading}<button class="nav-item${item.view === activeView ? " active" : ""}" data-view="${item.view}"${item.view === activeView ? ' aria-current="page"' : ""}><span class="nav-ic">${icon(item.icon)}</span><span class="nav-label">${escapeHtml(item.label)}</span>${count > 0 ? `<span class="nav-count">${count > 99 ? "99+" : count}</span>` : ""}</button>`;
+      const isActive = item.view === activeView || NAV_ITEMS.some((other) => other.view === activeView && other.mergedInto === item.view);
+      return `${heading}<button class="nav-item${isActive ? " active" : ""}" data-view="${item.view}"${isActive ? ' aria-current="page"' : ""}><span class="nav-ic">${icon(item.icon)}</span><span class="nav-label">${escapeHtml(item.label)}</span>${count > 0 ? `<span class="nav-count">${count > 99 ? "99+" : count}</span>` : ""}</button>`;
     }).join("");
   }
   // Administrator-only controls outside the nav are hidden for anyone else, but
@@ -1984,6 +1987,32 @@ function genField(id, label, control) {
   return `<div class="field"><label for="${id}">${label}</label>${control}</div>`;
 }
 
+/* The contract form in four short pages instead of one long one. Every field
+   stays in the same form, so nothing typed is lost when moving between pages. */
+const GEN_PAGES = ["Customer", "Property & dates", "Price", "Payment"];
+function genPageBar(page) {
+  return `<ol class="gen-pagebar full">${GEN_PAGES.map((label, index) => `<li class="${index + 1 === page ? "active" : index + 1 < page ? "done" : ""}"><button type="button" data-action="gen-page" data-page="${index + 1}"><span>${index + 1}</span>${escapeHtml(label)}</button></li>`).join("")}</ol>`;
+}
+/** Checks the fields of one page; shows the first problem and returns false. */
+function genPageValid(form, page) {
+  for (const field of form.querySelectorAll(`fieldset[data-page="${page}"] input, fieldset[data-page="${page}"] select, fieldset[data-page="${page}"] textarea`)) {
+    if (!field.checkValidity()) { showGenPage(form, page); field.reportValidity(); return false; }
+  }
+  return true;
+}
+function showGenPage(form, page) {
+  const last = GEN_PAGES.length;
+  const target = Math.min(Math.max(1, Number(page) || 1), last);
+  state.contractGen.page = target;
+  form.querySelectorAll("fieldset[data-page]").forEach((set) => set.classList.toggle("gen-page-active", Number(set.dataset.page) === target));
+  form.querySelector(".gen-pagebar")?.replaceWith(Object.assign(document.createElement("div"), { innerHTML: genPageBar(target) }).firstElementChild);
+  form.querySelector('[data-action="gen-back"]').hidden = target === 1;
+  form.querySelector('[data-action="gen-next"]').hidden = target === last;
+  form.querySelector('[data-action="contract-preview"]').hidden = target !== last;
+  form.closest(".modal")?.scrollTo?.({ top: 0 });
+  form.querySelector("fieldset.gen-page-active input:not([readonly]):not([type=hidden]), fieldset.gen-page-active select")?.focus();
+}
+
 function generateContractFormBody() {
   const data = generateContractFormData();
   const priced = pricingPreview(null, data.original_price, data.discount_pct);
@@ -1993,8 +2022,10 @@ function generateContractFormBody() {
   const frequencies = CONTRACT_FREQUENCIES.map((value) => `<option value="${value}" ${data.frequency === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("");
   const text = (id, name, value, extra = "") => genField(id, name.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase()), `<input id="${id}" name="${name}" value="${escapeHtml(value)}" ${extra}>`);
   const number = (id, name, value, extra = "") => genField(id, name, `<input id="${id}" name="${name}" type="number" step="0.01" min="0" value="${escapeHtml(value)}" ${extra}>`);
-  return `<form id="contract-generate-form" class="form-grid">
-    <fieldset class="gen-section"><legend>Client information</legend>
+  const genPage = state.contractGen?.page || 1;
+  return `<form id="contract-generate-form" class="form-grid gen-paged">
+    ${genPageBar(genPage)}
+    <fieldset class="gen-section${genPage === 1 ? " gen-page-active" : ""}" data-page="1"><legend>Client information</legend>
       <div class="field full"><label for="gc-client">Client from register (optional)</label><select id="gc-client" name="client_id"><option value="">Type a new name below</option>${clients}</select></div>
       ${text("gc-client-name", `${contractKind(data.deal_type)?.client || "Client"} name`, data.client_name, 'required maxlength="120" placeholder="Full name"')}
       ${text("gc-client-phone", "Client phone", data.client_phone, 'maxlength="40" placeholder="+255 ..."')}
@@ -2002,7 +2033,7 @@ function generateContractFormBody() {
       <div class="field full"><label for="gc-company">Company</label><input id="gc-company" type="text" value="${escapeHtml(state.organization?.me?.organization_name || "MKUYU")}" readonly aria-readonly="true" tabindex="-1" title="Taken from the organization record"></div>
     </fieldset>
 
-    <fieldset class="gen-section"><legend>Property information</legend>
+    <fieldset class="gen-section${genPage === 2 ? " gen-page-active" : ""}" data-page="2"><legend>Property information</legend>
       ${data.deal_type === "rent"
         // A lease is about a property only: no project to choose.
         ? `<input type="hidden" id="gc-project" name="project_id" value="">
@@ -2014,7 +2045,7 @@ function generateContractFormBody() {
       <div class="field"><label for="gc-property-location">Location</label><input id="gc-property-location" type="text" readonly aria-readonly="true" tabindex="-1" value="${escapeHtml(property?.location || "")}" title="Read from the property record"></div>
     </fieldset>
 
-    <fieldset class="gen-section"><legend>Agreement</legend>
+    <fieldset class="gen-section${genPage === 2 ? " gen-page-active" : ""}" data-page="2"><legend>Agreement</legend>
       ${text("gc-start", "Agreement start date", data.start_date, 'type="date" required')}
       ${genField("gc-duration", "Agreement duration", `<input id="gc-duration" name="agreement_duration" type="number" min="1" max="1200" step="1" value="${escapeHtml(data.agreement_duration || "")}" placeholder="24" required>`)}
       <div class="field"><label for="gc-duration-unit">Duration unit</label><select id="gc-duration-unit" name="agreement_duration_unit">${units}</select></div>
@@ -2025,14 +2056,14 @@ function generateContractFormBody() {
       <div class="field full"><div class="field-help">The end date is derived from the duration; the server refuses a stated end date that disagrees with it.</div></div>
     </fieldset>
 
-    <fieldset class="gen-section"><legend>Pricing</legend>
+    <fieldset class="gen-section${genPage === 3 ? " gen-page-active" : ""}" data-page="3"><legend>Pricing</legend>
       ${number("gc-original", "Original price", data.original_price, 'required placeholder="0"')}
       ${number("gc-discount", "Discount %", data.discount_pct, 'max="100" placeholder="0"')}
       <div class="field"><label for="gc-discount-amount">Discount amount</label><input id="gc-discount-amount" type="text" value="${escapeHtml(money(priced.discount_amount))}" readonly aria-readonly="true" tabindex="-1" title="Calculated by the server"></div>
       <div class="field"><label for="gc-final-price">Final price</label><input id="gc-final-price" type="text" value="${escapeHtml(money(priced.final_price))}" readonly aria-readonly="true" tabindex="-1" title="Calculated by the server. The payment plan is built from this amount."></div>
     </fieldset>
 
-    <fieldset class="gen-section"><legend>Payment plan</legend>
+    <fieldset class="gen-section${genPage === 4 ? " gen-page-active" : ""}" data-page="4"><legend>Payment plan</legend>
       <div class="field full"><label for="gc-payment-mode">How will the customer pay?</label><select id="gc-payment-mode" name="payment_mode"><option value="installments" ${data.payment_mode !== "cash" ? "selected" : ""}>Installments: a deposit at signing, then equal installments</option><option value="cash" ${data.payment_mode === "cash" ? "selected" : ""}>Cash: the whole ${data.deal_type === "rent" ? "lease" : "price"} at signing</option></select><div class="field-help" id="gc-cash-note"${data.payment_mode === "cash" ? "" : " hidden"}>The whole final price is due on the start date. The contract becomes active once Finance confirms the payment.</div></div>
       <div class="gen-plan-fields"${data.payment_mode === "cash" ? " hidden" : ""}>
       ${number("gc-deposit", "Deposit", data.deposit, 'placeholder="0"')}
@@ -2043,7 +2074,7 @@ function generateContractFormBody() {
       </div>
     </fieldset>
 
-    <fieldset class="gen-section"><legend>Contract</legend>
+    <fieldset class="gen-section${genPage === 4 ? " gen-page-active" : ""}" data-page="4"><legend>Contract</legend>
       <div class="field full"><label for="gc-template">Contract template</label><select id="gc-template" name="template_document_id">${contractTemplateOptions(data.template_choice, data.deal_type)}</select></div>
       <div class="field full"><div class="field-help">The ${escapeHtml(contractKind(data.deal_type)?.agreement || "agreement")} is placed on this template; its header and footer repeat on every page.${can("upload_contract_templates") ? " To add or change templates, open <strong>Contract templates</strong> in the sidebar." : " Templates are maintained by the MD, ICT, sales officers and Legal Officers."}</div></div>
       ${canModule("documents") && can("create") ? `<div class="field full"><label for="gc-attachment">Supporting document (optional)</label><input id="gc-attachment" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.png,.jpg,.jpeg,.gif,.webp,.bmp">${state.contractGen?.attachment ? `<div class="field-help">Selected: ${escapeHtml(state.contractGen.attachment.name)}</div>` : `<div class="field-help">The uploaded file will be linked to this contract in Documents.</div>`}</div>` : ""}
@@ -2054,7 +2085,9 @@ function generateContractFormBody() {
 
     <div class="form-actions full">
       <button class="btn" type="button" data-action="close-modal">Cancel</button>
-      <button class="btn btn-primary" type="button" data-action="contract-preview">Review contract${icon("arrow")}</button>
+      <button class="btn btn-soft" type="button" data-action="gen-back"${genPage === 1 ? " hidden" : ""}>Back</button>
+      <button class="btn btn-primary" type="button" data-action="gen-next"${genPage === GEN_PAGES.length ? " hidden" : ""}>Next${icon("arrow")}</button>
+      <button class="btn btn-primary" type="button" data-action="contract-preview"${genPage === GEN_PAGES.length ? "" : " hidden"}>Review contract${icon("arrow")}</button>
     </div>
   </form>`;
 }
@@ -2190,7 +2223,7 @@ function renderGenerateContractModal() {
 async function openGenerateContractModal(prefill = {}) {
   // The wizard starts by asking what the contract is for. A Sell request opens
   // it already set to Sell for that seller, straight on the details.
-  state.contractGen = { step: prefill.deal_type ? "form" : "type", result: null, error: null, data: { ...prefill }, attachment: null };
+  state.contractGen = { step: prefill.deal_type ? "form" : "type", page: 1, result: null, error: null, data: { ...prefill }, attachment: null };
   if (!state.contractTemplates) {
     // A caller without document access still gets the built-in template, so a
     // refusal here must not block contract generation.
@@ -2393,6 +2426,7 @@ function renderOrganization(section = "staff") {
     return `<div class="section-grid org-grid admin-pages">
       <section class="card glass"><div class="section-head"><div><h2 class="section-title">Backups</h2><div class="section-note">${backups?.error ? escapeHtml(backups.error) : `${(backups?.list || []).length} backup${(backups?.list || []).length === 1 ? "" : "s"} kept on the server${(backups?.list || []).length > 10 ? " · the 10 newest are listed" : ""} · make one before any big change`}</div></div><button class="btn btn-primary btn-small" data-action="backup-now">Create backup</button></div>
         ${autoBackupNote(backups?.status)}
+        ${emailStatusNote(backups?.email)}
         ${backupRows ? `<div class="table-wrap"><table><thead><tr><th>File</th><th>Type</th><th>Size</th><th>Made</th><th class="align-right">Actions</th></tr></thead><tbody>${backupRows}</tbody></table></div>` : `<div class="empty">${backups ? "No backup yet." : "Loading…"}</div>`}
       </section>
       <section class="card glass"><div class="section-head"><div><h2 class="section-title">Activity log</h2><div class="section-note">The latest 50 recorded actions, newest first · read-only</div></div></div><div class="table-wrap"><table><thead><tr><th>User</th><th>Action</th><th>Module</th><th>When</th></tr></thead><tbody>${fullActivity || `<tr><td colspan="4" class="empty">No activity recorded</td></tr>`}</tbody></table></div></section>
@@ -3002,6 +3036,13 @@ const PAGE_TIPS = {
     contracts: "Your step: open a contract marked “Under MD review”, read it, then press “Management approval” or reject it with a reason.",
   },
 };
+/** "From the website" / "Added by staff": the two halves of Requests & leads. */
+function addRequestTabs() {
+  if (!["requests", "leads"].includes(state.view) || !canModule("leads") || content.querySelector(".request-tabs")) return;
+  const tab = (view, label, note) => `<button type="button" class="seg-btn${state.view === view ? " active" : ""}" data-action="open-alert-view" data-view="${view}" aria-pressed="${state.view === view}" title="${escapeHtml(note)}">${escapeHtml(label)}</button>`;
+  content.insertAdjacentHTML("afterbegin", `<div class="segmented request-tabs">${tab("requests", "From the website", "Buy, Rent and Sell requests and messages sent from the public website")}${tab("leads", "Added by staff", "Enquiries recorded by the team: calls, walk-ins, referrals")}</div>`);
+}
+
 function addPageTip() {
   const tip = PAGE_TIPS[workspaceRole()]?.[state.view];
   if (!tip || content.querySelector(".page-tip")) return;
@@ -3027,7 +3068,8 @@ function workTodayPanel(role) {
   if (role === "finance") {
     job(n(state.organization.me?.sole_finance_approver ? summary.payments_pending?.count : summary.payments_to_approve), "Payments waiting for your approval", "Check the reference and the proof, then approve. Only approved money counts.", "Approve payments", toView("debts", { paymentStatus: "pending" }, "#payments-section"), "gold");
     job(n(work.contracts_finance_review), "Contracts to check", "Marked Under Finance review. Check the price and payment plan, then press “Validate financial terms”.", "Check contracts", toView("contracts", { status: "legal_approved" }));
-    job(null, "Money received?", "Record it with the transaction reference and the receipt or SMS.", "Record a payment", { action: "new-payment" });
+    job(null, "Money received?", "Paste the SMS or bank alert, check the customer and save.", "Record a payment", { action: "new-payment" });
+    job(null, "Many payments today?", "Upload today's bank statement: every payment is matched to its customer at once.", "Upload statement", { action: "statement-upload" });
     job(n(summary.debts_due_week?.count), "Due in the next 7 days", "Call these customers before the due date.", "See who to call", toView("debts", { debtStatus: "upcoming" }), "amber");
     job(n(summary.debts_overdue?.count), "Overdue installments", "Follow these up today.", "See overdue", toView("debts", { debtStatus: "overdue" }), "red");
   }
@@ -3411,7 +3453,7 @@ function renderDebts() {
         : emptyState("No installments yet", "Payment plans created with a contract appear here as installments.", { iconName: "wallet", compact: true, action: mayCreate ? `<button class="btn btn-primary btn-small" data-action="new-debt">${icon("plus")}Add a debt</button>` : "" })}</div>`}
     </div>
     <div class="section">
-      <div class="section-head" id="payments-section"><div><h2 class="section-title">Recorded payments</h2><div class="section-note">Money actually received, with receipts</div></div><div class="row-actions"><select class="filter-input" data-filter="paymentStatus" aria-label="Filter payments by approval"><option value="">All payments</option><option value="pending" ${filters.paymentStatus === "pending" ? "selected" : ""}>Waiting for approval</option><option value="approved" ${filters.paymentStatus === "approved" ? "selected" : ""}>Approved</option><option value="reversed" ${filters.paymentStatus === "reversed" ? "selected" : ""}>Reversed</option></select>${mayCreate ? `<button class="btn btn-soft btn-small" data-action="new-payment">${icon("plus")}Record payment</button>` : ""}</div></div>
+      <div class="section-head" id="payments-section"><div><h2 class="section-title">Recorded payments</h2><div class="section-note">Money actually received, with receipts</div></div><div class="row-actions"><select class="filter-input" data-filter="paymentStatus" aria-label="Filter payments by approval"><option value="">All payments</option><option value="pending" ${filters.paymentStatus === "pending" ? "selected" : ""}>Waiting for approval</option><option value="approved" ${filters.paymentStatus === "approved" ? "selected" : ""}>Approved</option><option value="reversed" ${filters.paymentStatus === "reversed" ? "selected" : ""}>Reversed</option></select>${mayCreate && can("validate_finance") ? `<button class="btn btn-soft btn-small" data-action="statement-upload">${icon("file")}Upload bank statement</button>` : ""}${mayCreate ? `<button class="btn btn-soft btn-small" data-action="new-payment">${icon("plus")}Record payment</button>` : ""}</div></div>
       ${renderPaymentsTable(mayEdit, mayDelete)}
     </div>
     ${canModule("reminders") ? `<div class="section">
@@ -3783,7 +3825,7 @@ function renderClients() {
 // authorized here - the view is only offered to holders of the leads module.
 function renderLeads() {
   // Website Buy/Rent requests have their own view (Requests).
-  const leads = (state.organization.leads || []).filter((lead) => lead.source !== "website");
+  const leads = (state.organization.leads || []).filter((lead) => !["website", "website-contact"].includes(lead.source));
   const status = state.filters.status || "";
   const statuses = [...new Set(leads.map((lead) => lead.status).filter(Boolean))].sort();
   const rows = leads.filter((lead) => !status || lead.status === status);
@@ -4339,9 +4381,11 @@ function render() {
   if (state.view === "reminders") renderReminders();
   if (state.view === "appointments") renderAppointments();
   if (state.view === "leads") renderLeads();
+  addRequestTabs();
   addPageTip();
   if (state.view === "requests") {
     renderRequests();
+    addRequestTabs();
     addPageTip();
     if (!state.requests && !state.requestsRequested) loadRequests().then(() => { updateNavigation(); if (state.view === "requests") render(); });
   }
@@ -5118,7 +5162,7 @@ async function handleFormSubmit(event) {
   event.preventDefault();
   const form = event.target;
   // Forms with their own submit handler (the signed contract upload).
-  if (form.id === "signed-copy-form") return;
+  if (form.id === "signed-copy-form" || form.id === "statement-form") return;
   const data = Object.fromEntries(new FormData(form));
   const type = modal.dataset.type;
   const id = form.dataset.id;
@@ -5521,6 +5565,87 @@ async function createBackup() {
 }
 
 /* --------------------------------------------------------------------------
+   Bank statement upload: every credit with its customer, saved in one go.
+   -------------------------------------------------------------------------- */
+function openStatementUpload() {
+  modal.dataset.type = "statement";
+  modal.classList.add("modal-wide");
+  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">Upload bank statement</h2><p class="modal-sub">Download today's statement from internet banking (CSV or Excel) and upload it here.</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
+    <form id="statement-form" class="form-grid">
+      <div class="field full"><label for="statement-file">Statement file <span class="req">*</span></label><input id="statement-file" name="file" type="file" required accept=".csv,.xlsx,.txt"><div class="field-help">Only money coming in is read. Lines already recorded are skipped, so the same statement can be uploaded twice safely.</div></div>
+    </form>
+    <div class="form-actions"><button type="button" class="btn" data-action="close-modal">Cancel</button><button type="submit" form="statement-form" class="btn btn-primary">Read statement</button></div>`;
+  modalBackdrop.hidden = false;
+}
+
+function renderStatementRows(result) {
+  const sole = state.organization.me?.sole_finance_approver;
+  const options = (row) => {
+    const suggested = new Set((row.suggestions || []).map((entry) => String(entry.contract_id)));
+    const top = row.suggestions?.[0];
+    const pick = top && top.score >= 30 ? String(top.contract_id) : "";
+    const label = (entry) => `${entry.client_name} · ${entry.contract_number || ""} · ${entry.deal_type === "rent" ? "Rent" : "Buy"}`;
+    return `<option value="">Choose the customer…</option>${(row.suggestions || []).map((entry) => `<option value="${entry.contract_id}"${String(entry.contract_id) === pick ? " selected" : ""}>★ ${escapeHtml(label(entry))}</option>`).join("")}${(result.contracts || []).filter((entry) => !suggested.has(String(entry.contract_id))).map((entry) => `<option value="${entry.contract_id}">${escapeHtml(label(entry))}</option>`).join("")}`;
+  };
+  const rows = result.rows.map((row) => {
+    const done = Boolean(row.already_recorded);
+    const top = row.suggestions?.[0];
+    const checked = !done && top && top.score >= 30;
+    return `<tr data-line="${row.line}"${done ? ' class="statement-done"' : ""}>
+      <td><input type="checkbox" class="statement-pick"${checked ? " checked" : ""}${done ? " disabled" : ""} aria-label="Save this line"></td>
+      <td>${formatDate(row.paid_at)}</td>
+      <td class="amount">${money(row.amount)}</td>
+      <td><span class="cell-main">${escapeHtml(row.payer_name || "—")}</span><span class="cell-sub">${escapeHtml(row.description)} · ref ${escapeHtml(row.reference)}</span></td>
+      <td>${done ? `<span class="muted">Already recorded (${escapeHtml(row.already_recorded.client_name || "")}, ${escapeHtml(row.already_recorded.status)})</span>` : `<select class="statement-contract">${options(row)}</select>${top ? `<span class="cell-sub">${escapeHtml(top.reasons.join(", "))}</span>` : `<span class="cell-sub">${escapeHtml(row.note || "Not recognised: choose the customer")}</span>`}`}</td>
+    </tr>`;
+  }).join("");
+  modal.querySelector(".statement-body").innerHTML = result.rows.length
+    ? `<p class="muted">${result.rows.length} payment${result.rows.length === 1 ? "" : "s"} in · ${result.skipped} other line${result.skipped === 1 ? "" : "s"} skipped (money out, fees, balances). Check the customer on each line, then save.</p>
+      <div class="table-wrap"><table><thead><tr><th></th><th>Date</th><th class="align-right">Amount</th><th>From</th><th>Customer</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    : `<p class="muted">No money came in on this statement.</p>`;
+  modal.querySelector(".form-actions").innerHTML = `<button type="button" class="btn" data-action="close-modal">Close</button>${result.rows.length ? `<button type="button" class="btn ${sole ? "btn-soft" : "btn-primary"}" data-action="statement-save">Save selected</button>${sole ? `<button type="button" class="btn btn-primary" data-action="statement-save" data-approve="1">Save &amp; approve selected</button>` : ""}` : ""}`;
+  state.statement = result;
+}
+
+async function saveStatementRows(approve) {
+  const result = state.statement;
+  if (!result) return;
+  const chosen = [];
+  for (const tr of modal.querySelectorAll("tr[data-line]")) {
+    if (!tr.querySelector(".statement-pick")?.checked) continue;
+    const row = result.rows.find((entry) => String(entry.line) === tr.dataset.line);
+    const contractId = tr.querySelector(".statement-contract")?.value;
+    if (!contractId) { showToast(`Line ${tr.dataset.line}: choose the customer, or untick it.`); tr.querySelector(".statement-contract")?.focus(); return; }
+    chosen.push({ line: row.line, contract_id: Number(contractId), amount: row.amount, paid_at: row.paid_at, reference: row.reference, description: row.description, payer_name: row.payer_name, payer_phone: row.payer_phone });
+  }
+  if (!chosen.length) { showToast("Tick the lines to save."); return; }
+  try {
+    const saved = await api("/payments/statement/save", { method: "POST", body: { rows: chosen, approve } });
+    const failed = saved.results.filter((entry) => !entry.ok);
+    closeModal();
+    showToast(`${saved.saved} payment${saved.saved === 1 ? "" : "s"} saved${approve ? " and approved" : ""}.${failed.length ? ` ${failed.length} not saved: ${failed.map((entry) => `line ${entry.line} (${entry.error})`).join("; ")}` : ""}`);
+    await refresh();
+  } catch (error) {
+    showToast(error.message || "Unable to save the statement.");
+  }
+}
+
+document.addEventListener("submit", async (event) => {
+  if (event.target.id !== "statement-form") return;
+  event.preventDefault();
+  const button = modal.querySelector('button[form="statement-form"]');
+  if (button) { button.disabled = true; button.textContent = "Reading…"; }
+  try {
+    const result = await api("/payments/statement", { method: "POST", form: true, body: new FormData(event.target) });
+    event.target.outerHTML = `<div class="statement-body"></div>`;
+    renderStatementRows(result);
+  } catch (error) {
+    showToast(error.message || "Unable to read the statement.");
+    if (button) { button.disabled = false; button.textContent = "Read statement"; }
+  }
+});
+
+/* --------------------------------------------------------------------------
    Simple payment entry: find the customer, paste the message, save.
    -------------------------------------------------------------------------- */
 function paymentPeriodText(debt) {
@@ -5664,6 +5789,14 @@ function initPaymentForm(prefill) {
   }
 }
 
+/** Customer e-mails (receipts and reminders): on once an SMTP account is set in .env. */
+function emailStatusNote(email) {
+  if (!email) return "";
+  if (!email.configured) return `<div class="page-tip">${icon("alert")}<span>Customer e-mails are OFF. To send receipts and payment reminders automatically, put the company's e-mail account in .env (SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, MAIL_FROM) and restart the server.</span></div>`;
+  const last = (email.recent || [])[0];
+  return `<div class="page-tip">${icon("check")}<span>Customer e-mails are ON: receipts ${email.receipts ? "on approval" : "off"}, reminders ${email.reminders ? `${email.reminder_days} days before the due date` : "off"}.${last ? ` Last: ${escapeHtml(last.kind)} to ${escapeHtml(last.recipient || "")} (${escapeHtml(last.status)}${last.error ? `: ${escapeHtml(last.error)}` : ""}).` : ""}</span></div>`;
+}
+
 /** One line on the automatic daily backup: on/off, the last one, and the copy folder. */
 function autoBackupNote(status) {
   if (!status) return "";
@@ -5680,8 +5813,8 @@ async function loadBackups() {
   if (!isAdmin()) return;
   state.backupsRequested = true;
   try {
-    const [list, status] = await Promise.all([api("/backups"), api("/backups/status").catch(() => null)]);
-    state.backups = { list, status };
+    const [list, status, email] = await Promise.all([api("/backups"), api("/backups/status").catch(() => null), api("/email/status").catch(() => null)]);
+    state.backups = { list, status, email };
   } catch (error) {
     state.backups = { list: [], error: error.message || "Unable to load backups." };
   }
@@ -6189,9 +6322,22 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "new-contract") await openGenerateContractModal();
   if (action === "generate-contract") await openGenerateContractModal(target.dataset.deal ? { deal_type: target.dataset.deal, client_id: target.dataset.clientId || "", client_name: target.dataset.clientName || "", client_phone: target.dataset.clientPhone || "", client_email: target.dataset.clientEmail || "" } : {});
+  if (action === "gen-next" || action === "gen-back" || action === "gen-page") {
+    const form = document.getElementById("contract-generate-form");
+    if (form) {
+      const current = state.contractGen.page || 1;
+      const wanted = action === "gen-next" ? current + 1 : action === "gen-back" ? current - 1 : Number(target.dataset.page);
+      // Moving forward checks the pages being left; moving back never does.
+      let ok = true;
+      for (let page = current; page < wanted && ok; page += 1) ok = genPageValid(form, page);
+      if (ok) showGenPage(form, wanted);
+    }
+  }
   if (action === "contract-preview") {
     const form = document.getElementById("contract-generate-form");
-    if (form?.reportValidity()) {
+    let pagesOk = Boolean(form);
+    for (let page = 1; form && page <= GEN_PAGES.length && pagesOk; page += 1) pagesOk = genPageValid(form, page);
+    if (pagesOk && form?.reportValidity()) {
       state.contractGen.data = generateContractFormData();
       state.contractGen.step = "review";
       renderGenerateContractModal();
@@ -6246,6 +6392,8 @@ document.addEventListener("click", async (event) => {
     openModal("document", { prefill: true, contract_id: id, project_id: contract?.project_id, client_id: contract?.client_id, category: "agreement", title: contract ? `${contract.contract_number || "Contract"} · ` : "" });
   }
   if (action === "view-contract") viewContract(id);
+  if (action === "statement-upload") { closeModal(); openStatementUpload(); }
+  if (action === "statement-save") await saveStatementRows(target.dataset.approve === "1");
   if (action === "signed-copy") { closeModal(); openSignedCopyForm(id); }
   if (action === "open-signed-contract") openFileInTab(`/contracts/${id}/signed-document`).catch((error) => showToast(error.message || "Unable to open the signed contract."));
   if (action === "edit-contract-from-view") {
@@ -6273,6 +6421,7 @@ document.addEventListener("click", async (event) => {
     if (data.deal_type !== kind) data.template_choice = "";
     state.contractGen.data = { ...data, deal_type: kind };
     state.contractGen.step = "form";
+    state.contractGen.page = 1;
     renderGenerateContractModal();
     updateGenerateContractPreview();
   }

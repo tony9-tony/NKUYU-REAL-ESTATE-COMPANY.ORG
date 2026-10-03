@@ -1,6 +1,10 @@
 import { Router } from "express";
 import { autoBackupStatus, backupNamePattern, createBackup, listBackups } from "../backups.js";
 import { normalizePhone, parsePaymentMessage } from "../payments/parseMessage.js";
+import { emailReceipt, writeReceiptPdf } from "../payments/notices.js";
+import { parseStatement } from "../payments/statement.js";
+import multer from "multer";
+import { mailConfigured } from "../mail.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -1942,20 +1946,18 @@ router.get("/payments/lookup", route(async (req, res) => {
   matches.sort((a, b) => String(a.next_due?.due_date || "9999").localeCompare(String(b.next_due?.due_date || "9999")));
   res.json(matches.slice(0, 12));
 }));
-router.post("/payments/parse-message", route(async (req, res) => {
-  requireFinancialAccess(req);
-  const text = optionalText(req.body?.text, "text", 4000) || "";
-  const parsed = parsePaymentMessage(text);
-  const all = await payableContracts(req);
-  // What Finance has linked before: a payer's phone or name seen on an earlier
-  // payment points to the same contract next time.
+/** Contracts this payer has paid before (by phone or name), with how often. */
+async function learnedContracts(parsed) {
   const learned = new Map();
-  if (parsed.payer_phone || parsed.payer_name) {
-    const values = [await organizationId(), parsed.payer_phone, parsed.payer_name];
-    for (const row of (await query("SELECT contract_id, COUNT(*)::int AS n FROM payments WHERE organization_id=$1 AND status<>'reversed' AND ((payer_phone IS NOT NULL AND payer_phone=$2) OR (payer_name IS NOT NULL AND UPPER(payer_name)=UPPER($3))) GROUP BY contract_id", values)).rows) learned.set(row.contract_id, row.n);
-  }
+  if (!parsed.payer_phone && !parsed.payer_name) return learned;
+  const values = [await organizationId(), parsed.payer_phone || null, parsed.payer_name || null];
+  for (const row of (await query("SELECT contract_id, COUNT(*)::int AS n FROM payments WHERE organization_id=$1 AND status<>'reversed' AND ((payer_phone IS NOT NULL AND payer_phone=$2) OR (payer_name IS NOT NULL AND UPPER(payer_name)=UPPER($3))) GROUP BY contract_id", values)).rows) learned.set(row.contract_id, row.n);
+  return learned;
+}
+/** Ranks the payable contracts for one payment: best match first, with the reasons. */
+function rankContracts(parsed, all, learned) {
   const payerWords = lookupText(parsed.payer_name).split(" ").filter((word) => word.length >= 3);
-  const suggestions = all.map((entry) => {
+  return all.map((entry) => {
     let score = 0;
     const reasons = [];
     if (parsed.contract_number && entry.contract_number === parsed.contract_number) { score += 100; reasons.push("contract number in the message"); }
@@ -1971,9 +1973,62 @@ router.post("/payments/parse-message", route(async (req, res) => {
       else if (entry.open_debts.some((debt) => Math.abs(debt.balance - parsed.amount) < 1)) { score += 15; reasons.push("amount equals an installment"); }
     }
     return { ...entry, score, reasons };
-  }).filter((entry) => entry.score > 0).sort((a, b) => b.score - a.score || String(a.next_due?.due_date || "9999").localeCompare(String(b.next_due?.due_date || "9999"))).slice(0, 5);
+  }).filter((entry) => entry.score > 0).sort((a, b) => b.score - a.score || String(a.next_due?.due_date || "9999").localeCompare(String(b.next_due?.due_date || "9999")));
+}
+router.post("/payments/parse-message", route(async (req, res) => {
+  requireFinancialAccess(req);
+  const text = optionalText(req.body?.text, "text", 4000) || "";
+  const parsed = parsePaymentMessage(text);
+  const all = await payableContracts(req);
+  const suggestions = rankContracts(parsed, all, await learnedContracts(parsed)).slice(0, 5);
   const duplicate = parsed.reference ? await Payment.findByReference(parsed.reference, null) : null;
   res.json({ parsed, suggestions, duplicate: duplicate ? { id: duplicate.id, client_name: duplicate.client_name, status: duplicate.status } : null });
+}));
+
+// ---- Bank statement upload -----------------------------------------------
+// Finance downloads the day's statement from internet banking (CSV or Excel)
+// and uploads it. Every credit is shown with the contract it most likely
+// belongs to; Finance checks the list and saves the ones they want at once.
+const statementUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 1 } }).single("file");
+router.post("/payments/statement", (req, res, next) => statementUpload(req, res, (error) => (error ? next(new HttpError(400, error.message)) : next())), route(async (req, res) => {
+  requireFinanceDesk(req);
+  if (!req.file?.buffer?.length) throw new HttpError(400, "choose the statement file (CSV or Excel)");
+  const { credits, skipped, columns } = await parseStatement(req.file.buffer, req.file.originalname);
+  const all = await payableContracts(req);
+  const rows = [];
+  for (const credit of credits) {
+    const duplicate = await Payment.findByReference(credit.reference, null);
+    const ranked = rankContracts(credit, all, await learnedContracts(credit)).slice(0, 3);
+    // A contract number that is not open for payments yet (still in review).
+    let note = null;
+    if (credit.contract_number && !ranked.some((entry) => entry.contract_number === credit.contract_number)) {
+      const named = await queryOne("SELECT status, finance_validated_at FROM contracts WHERE organization_id=$1 AND contract_number=$2", [await organizationId(), credit.contract_number]);
+      if (named) note = `${credit.contract_number} is not approved yet (${contractPosition(named).label}); it takes payments once the MD has approved it`;
+    }
+    rows.push({ ...credit, note, already_recorded: duplicate ? { id: duplicate.id, client_name: duplicate.client_name, status: duplicate.status } : null, suggestions: ranked.map((entry) => ({ contract_id: entry.contract_id, contract_number: entry.contract_number, client_name: entry.client_name, deal_type: entry.deal_type, score: entry.score, reasons: entry.reasons })) });
+  }
+  res.json({ rows, skipped, columns, contracts: all.map((entry) => ({ contract_id: entry.contract_id, contract_number: entry.contract_number, client_name: entry.client_name, deal_type: entry.deal_type })) });
+}));
+router.post("/payments/statement/save", route(async (req, res) => {
+  requireFinanceDesk(req);
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows.slice(0, 500) : [];
+  if (!rows.length) throw new HttpError(400, "choose at least one line to save");
+  const approve = req.body?.approve === true;
+  if (approve && await Payment.otherApprovers(req.user.id) > 0) throw new HttpError(403, "another Finance person must approve these payments; save them without approving");
+  const results = [];
+  for (const row of rows) {
+    try {
+      const data = await validatePayment({ contract_id: row.contract_id, amount: row.amount, paid_at: row.paid_at, method: "bank", reference: row.reference, notes: row.notes || null, evidence_text: `Bank statement line: ${String(row.description || "").slice(0, 300)} (${row.paid_at}, TZS ${row.amount})` });
+      const created = await Payment.create(data);
+      if (row.payer_name || row.payer_phone) await query("UPDATE payments SET payer_name=$1, payer_phone=$2 WHERE id=$3", [row.payer_name ? String(row.payer_name).toUpperCase().slice(0, 120) : null, normalizePhone(row.payer_phone), created.id]);
+      const saved = approve ? await approvePayment(req, created.id) : paymentResponse(await Payment.get(created.id));
+      results.push({ line: row.line, ok: true, payment_id: created.id, status: saved.status, receipt_number: saved.receipt_number || null });
+    } catch (error) {
+      results.push({ line: row.line, ok: false, error: error.message });
+    }
+  }
+  await audit(req, "bank_statement_saved", "payment", null, { lines: rows.length, saved: results.filter((r) => r.ok).length, approved: approve });
+  res.json({ results, saved: results.filter((r) => r.ok).length, failed: results.filter((r) => !r.ok).length });
 }));
 router.get("/payments", route(async (req, res) => {
   const projectId = req.query.project_id === undefined ? null : parseId(req.query.project_id, "project_id");
@@ -2080,6 +2135,9 @@ async function approvePayment(req, id) {
   // unpaid installments (surplus onto the next) and they settle now.
   await resyncInstallmentState([payment.debt_id, ...(result.touchedDebts || [])]);
   await audit(req, "payment_approved", "payment", id, { amount: payment.amount, contract_id: payment.contract_id, reference: payment.reference, self_approved: selfApproved });
+  // The customer's receipt goes out by e-mail in the background (when e-mail
+  // is set up); a mail problem never affects the approval.
+  emailReceipt(id).catch((error) => console.warn(`receipt e-mail failed: ${error.message}`));
   return paymentResponse(await Payment.get(id));
 }
 
@@ -2233,22 +2291,7 @@ router.get("/payments/:id/mkuyu-receipt", route(async (req, res) => {
   res.set("Content-Type", "application/pdf");
   res.set("Content-Disposition", `${req.query.download === "1" ? "attachment" : "inline"}; filename="${payment.receipt_number}.pdf"`);
   doc.pipe(res);
-  const money = (value) => `TZS ${Number(value).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
-  doc.font("Helvetica-Bold").fontSize(18).text(org?.name || "MKUYU", { align: "left" });
-  doc.font("Helvetica").fontSize(9).fillColor("#666").text("Official payment receipt");
-  doc.moveDown(1.2).fillColor("#000").font("Helvetica-Bold").fontSize(13).text(`Receipt ${payment.receipt_number}`);
-  doc.moveDown(0.6).font("Helvetica").fontSize(10);
-  const line = (label, value) => { doc.font("Helvetica-Bold").text(`${label}: `, { continued: true }).font("Helvetica").text(String(value ?? "—")); };
-  line("Received from", payment.client_name);
-  line("Contract", `${contract.contract_number || `#${contract.id}`}${contract.property_name ? ` · ${contract.property_name}` : ""}`);
-  line("Amount", money(payment.amount));
-  line("Paid on", String(payment.paid_at).slice(0, 10));
-  line("Method", payment.method);
-  line("Transaction reference", payment.reference);
-  if (payment.installment_notes) line("For", payment.installment_notes);
-  line("Approved by", `${payment.approved_by_name || "Finance"}${payment.self_approved ? " (self-approved)" : ""}`);
-  line("Approved on", String(payment.approved_at || "").slice(0, 10));
-  doc.moveDown(1.5).fontSize(8).fillColor("#666").text("This receipt was issued by the MKUYU Real Estate Management System after Finance confirmed the payment against the bank or mobile-money statement.");
+  writeReceiptPdf(doc, payment, contract, org?.name);
   doc.end();
 }));
 
@@ -2326,6 +2369,12 @@ router.post("/reminders/:id/acknowledge", route(async (req, res) => {
 // ---- Backups in data/backups (see backups.js) ------------------------------
 router.get("/backups", requireAdmin(), route((req, res) => res.json(listBackups())));
 router.get("/backups/status", requireAdmin(), route((req, res) => res.json(autoBackupStatus())));
+// Whether customer e-mails (receipts, reminders) are set up, and the latest ones sent.
+router.get("/email/status", route(async (req, res) => {
+  if (!req.access?.isAdmin && !can(req.access, "view_financial")) throw new HttpError(403, "only Finance and the administrator see e-mail status");
+  const recent = (await query("SELECT kind, recipient, subject, status, error, created_at FROM email_log ORDER BY id DESC LIMIT 20")).rows;
+  res.json({ configured: mailConfigured(), receipts: process.env.MAIL_RECEIPTS !== "0", reminders: process.env.MAIL_REMINDERS !== "0", reminder_days: Number(process.env.MAIL_REMINDER_DAYS || 3), recent });
+}));
 router.post("/backups", requireAdmin(), route(async (req, res) => {
   res.status(201).json(await createBackup());
 }));
