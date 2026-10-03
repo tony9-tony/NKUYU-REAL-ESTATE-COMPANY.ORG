@@ -194,6 +194,10 @@ MAIL_FROM="MKUYU Real Estate <payments@yourcompany.co.tz>"
 
 `MAIL_RECEIPTS=0` / `MAIL_REMINDERS=0` turn either off and `MAIL_REMINDER_DAYS` changes the 3 days. Every e-mail is logged (`email_log`); the System & backups page shows whether e-mail is on and the last one sent. No extra package is used (a small SMTP client in `backend/src/mail.js`).
 
+## Language (English / Kiswahili)
+
+Each person picks the language in **My profile → Settings → Language · Lugha**, or with the English / Kiswahili switch on the sign-in page. The choice is kept on that computer (browser). `frontend/js/i18n.js` holds the Kiswahili wording; the interface is written in English and shown in Kiswahili as it appears. Names, numbers, references, what people typed and the contract documents are never translated. To fix a word, change its line in `i18n.js`.
+
 ## Fonts without internet
 
 The interface fonts can be served by MKUYU itself: on a computer with internet, double-click `fetch-fonts.bat` (or `node tools/fetch_fonts.mjs`) once. The files land in `frontend/fonts`; until then Google Fonts is used.

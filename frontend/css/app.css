@@ -2218,3 +2218,8 @@ label.btn { cursor: pointer; }
 /* Bank statement upload. */
 .statement-done td { opacity: .55; }
 .statement-contract { min-width: 260px; }
+
+/* Language switch on the sign-in card. */
+.lang-switch { display: flex; justify-content: flex-end; gap: 4px; margin-bottom: 10px; }
+.lang-btn { padding: 4px 10px; border-radius: var(--radius-pill); border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: var(--fs-xs); font-weight: 700; }
+.lang-btn.active { background: var(--ink); color: #fff; border-color: var(--ink); }

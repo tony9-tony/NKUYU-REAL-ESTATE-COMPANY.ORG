@@ -2646,7 +2646,7 @@ function renderDepartmentCards(departments) {
             ${duty.yours ? `<span class="duty-tag duty-tag-yours">Yours</span>` : ""}
           </div>
           <p class="duty-note">${escapeHtml(duty.description || "")}</p>
-          <div class="duty-perms">${duty.permissionLabels.map((permission) => `<code>${escapeHtml(permission.label)}</code>`).join("")}</div>
+          <div class="duty-perms">${duty.permissionLabels.map((permission) => `<code class="i18n-ok">${escapeHtml(permission.label)}</code>`).join("")}</div>
         </li>`).join("");
       return `
         <div class="role">
@@ -5020,7 +5020,10 @@ function openModal(type, record = null) {
     body = `<div class="profile-head" id="profile-head"></div>
       <div class="table-wrap"><table><tbody></tbody></table></div>
       <div id="profile-signature"></div>
-      <p class="field-help" style="margin-top:14px">Role, department and permissions are managed by an administrator in Administration → Users.</p>`;
+      <p class="field-help" style="margin-top:14px">Role, department and permissions are managed by an administrator in Administration → Users.</p>
+      <div class="section"><div class="section-head"><div><h2 class="section-title">Settings</h2></div></div>
+        <div class="field"><label for="profile-language">Language · Lugha</label><select id="profile-language" data-action-change="set-language"><option value="en"${currentLanguage() === "en" ? " selected" : ""}>English</option><option value="sw"${currentLanguage() === "sw" ? " selected" : ""}>Kiswahili</option></select><div class="field-help">Changes the language of the menus, buttons and messages on this computer.</div></div>
+      </div>`;
   }
   if (type === "alerts") {
     // Read-only summary. Each row is derived from records the caller is already
@@ -6263,6 +6266,23 @@ async function approveRefund(refundId, contractId) {
     showToast(error.message || "Unable to approve the refund.");
   }
 }
+
+/** The interface language chosen on this computer ("en" or "sw"). */
+function currentLanguage() {
+  return window.MKUYU_I18N?.lang === "sw" ? "sw" : "en";
+}
+function setLanguage(next) {
+  if (!window.MKUYU_I18N || next === currentLanguage()) return;
+  window.MKUYU_I18N.setLanguage(next);
+}
+document.addEventListener("change", (event) => {
+  if (event.target?.id === "profile-language") setLanguage(event.target.value);
+});
+document.addEventListener("click", (event) => {
+  const button = event.target.closest?.(".lang-btn");
+  if (button) setLanguage(button.dataset.lang);
+});
+document.querySelectorAll(".lang-btn").forEach((button) => button.classList.toggle("active", button.dataset.lang === currentLanguage()));
 
 /** Opens or closes the small-screen navigation drawer. */
 function setNavOpen(open) {
