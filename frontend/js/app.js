@@ -4807,7 +4807,27 @@ function openModal(type, record = null) {
       <div class="field full"><div class="field-help">Prefilled from the terms in the contract. The deposit is due first; the rest (${money(Math.max(0, numberValue(record?.value) - numberValue(plan.deposit, 0)))}) is split equally across the installments. The final installment absorbs rounding. Reminders are created automatically.</div></div>
     </div>`;
   }
-  if (type === "payment") {
+  if (type === "payment" && !record?.id) {
+    // The simple way: find the customer, paste the message, check, save.
+    title = "Record payment";
+    subtitle = "Find the customer, paste the bank or mobile-money message, check and save.";
+    submitLabel = state.organization.me?.sole_finance_approver ? "Save only" : "Save payment";
+    const methods = paymentMethodChoices();
+    const prefill = record || {};
+    body = `<div class="form-grid">
+      <div class="field full"><label for="pay-search">Customer <span class="req">*</span></label><input id="pay-search" type="search" autocomplete="off" placeholder="Type a name, phone number or contract number"><input type="hidden" name="contract_id" id="pay-contract" value="${escapeHtml(prefill.contract_id || "")}"><div id="pay-results" class="pay-results"></div><div id="pay-selected"></div></div>
+      <div class="field full"><label for="pay-message">Bank or mobile-money message</label><textarea id="pay-message" name="evidence_text" rows="3" maxlength="4000" placeholder="Paste the SMS or bank alert here. The amount, reference and date fill in by themselves."></textarea><div id="pay-message-note" class="field-help"></div></div>
+      <div class="field"><label for="pay-debt">Installment</label><select id="pay-debt" name="debt_id"><option value="">Choose the customer first</option></select></div>
+      <div class="field"><label for="pay-amount">Amount (TSh) <span class="req">*</span></label><input id="pay-amount" name="amount" type="number" min="0" step="0.01" required value="${escapeHtml(prefill.amount ?? "")}"></div>
+      <div class="field"><label for="pay-reference">Reference <span class="req">*</span></label><input id="pay-reference" name="reference" maxlength="120" required placeholder="From the message or slip"></div>
+      <div class="field"><label for="pay-date">Paid on</label><input id="pay-date" name="paid_at" type="date" required value="${today()}"></div>
+      <div class="field"><label for="pay-method">Method</label><select id="pay-method" name="method">${methods.map((m) => `<option value="${escapeHtml(m.value)}"${m.value === "bank" ? " selected" : ""}>${escapeHtml(m.label)}</option>`).join("")}</select></div>
+      <div class="field full" id="pay-short" hidden><div class="pay-warning" id="pay-short-text"></div><label for="pay-notes">Short reason <span class="req">*</span></label><input id="pay-notes" name="notes" maxlength="300" placeholder="e.g. will pay the rest on the 20th"></div>
+      <div class="field full"><label for="pay-file">Receipt or bank slip</label><input id="pay-file" name="file" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp"><div class="field-help">Only needed when there is no message to paste.</div></div>
+      <input type="hidden" name="payer_name" id="pay-payer-name"><input type="hidden" name="payer_phone" id="pay-payer-phone">
+    </div>`;
+  }
+  if (type === "payment" && record?.id) {
     // The same form records a new payment and corrects an existing one. A
     // corrected payment goes back to "pending" so a second Finance person
     // confirms it again (the server resets the approval).
@@ -4974,7 +4994,8 @@ function openModal(type, record = null) {
   const actions = `<div class="form-actions">
     <button type="button" class="btn" data-action="close-modal">${isReadOnly ? "Close" : "Cancel"}</button>
     ${type === "report-generate" ? `<button type="button" class="btn btn-soft" data-action="preview-report">Preview</button>` : ""}
-    ${isReadOnly ? "" : `<button type="submit" class="btn btn-primary">${submitLabel}</button>`}
+    ${isReadOnly ? "" : `<button type="submit" class="btn ${type === "payment" && !record?.id && state.organization.me?.sole_finance_approver ? "btn-soft" : "btn-primary"}">${submitLabel}</button>`}
+    ${type === "payment" && !record?.id && state.organization.me?.sole_finance_approver ? `<button type="submit" name="approve_now" value="1" class="btn btn-primary" title="You are the only Finance person, so you approve it now (marked self-approved)">Save &amp; approve</button>` : ""}
   </div>`;
   const head = `<div class="modal-head"><div><h2 class="modal-title" id="modal-title">${title}</h2><p class="modal-sub">${subtitle}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>`;
   modal.innerHTML = isReadOnly
@@ -4983,6 +5004,7 @@ function openModal(type, record = null) {
   markRequiredFields(modal);
   modalBackdrop.hidden = false;
   hydrateImages(modal);
+  if (type === "payment" && !record?.id) initPaymentForm(record || {});
   if (type === "property") wirePropertyTypeFields(modal);
   const contractSelect = document.getElementById("field-contract");
   const clientInput = document.getElementById("field-debt-client");
@@ -5189,6 +5211,12 @@ async function handleFormSubmit(event) {
       const result = await api(`/contracts/${id}/schedule`, { method: "POST", body: JSON.stringify(payload) });
       showToast(`Schedule created: ${result.created} installment${result.created === 1 ? "" : "s"}.`);
     } else if (type === "payment") {
+      if (!data.contract_id) { showToast("Choose the customer first."); return; }
+      if (event.submitter?.name === "approve_now") data.approve_now = "true";
+      const shortField = form.querySelector("#pay-short");
+      if (shortField && !shortField.hidden && !String(data.notes || "").trim()) { showToast("Write a short reason why the amount is less than agreed."); form.querySelector("#pay-notes")?.focus(); return; }
+      if (!data.payer_name) delete data.payer_name;
+      if (!data.payer_phone) delete data.payer_phone;
       data.contract_id = Number(data.contract_id);
       data.debt_id = data.debt_id ? Number(data.debt_id) : null;
       data.amount = numberValue(data.amount);
@@ -5214,14 +5242,14 @@ async function handleFormSubmit(event) {
         // Multipart path stores the receipt alongside the payment record.
         const payload = new FormData();
         payload.append("file", receiptFile);
-        ["contract_id", "debt_id", "amount", "paid_at", "method", "reference", "notes", "evidence_text"].forEach((key) => {
+        ["contract_id", "debt_id", "amount", "paid_at", "method", "reference", "notes", "evidence_text", "payer_name", "payer_phone", "approve_now"].forEach((key) => {
           if (data[key] !== undefined && data[key] !== null && data[key] !== "") payload.append(key, data[key]);
         });
-        await api("/payments/upload", { method: "POST", form: true, body: payload });
-        showToast("Payment recorded. It counts once another Finance person approves it.");
+        const saved = await api("/payments/upload", { method: "POST", form: true, body: payload });
+        showToast(saved.status === "approved" ? `Payment saved and approved. Receipt ${saved.receipt_number || ""} is ready.` : "Payment recorded. It counts once it is approved.");
       } else {
-        await api("/payments", { method: "POST", body: JSON.stringify(data) });
-        showToast("Payment recorded. It counts once another Finance person approves it.");
+        const saved = await api("/payments", { method: "POST", body: JSON.stringify(data) });
+        showToast(saved.status === "approved" ? `Payment saved and approved. Receipt ${saved.receipt_number || ""} is ready.` : "Payment recorded. It counts once it is approved.");
       }
     } else if (type === "debt") {
       data.contract_id = Number(data.contract_id);
@@ -5490,6 +5518,150 @@ async function createBackup() {
     if (state.view === "system") render();
     await downloadFile(`/backups/${encodeURIComponent(backup.name)}/download`, backup.name);
   } catch (error) { showToast(error.message || "Backup failed."); }
+}
+
+/* --------------------------------------------------------------------------
+   Simple payment entry: find the customer, paste the message, save.
+   -------------------------------------------------------------------------- */
+function paymentPeriodText(debt) {
+  if (!debt?.period?.start) return "";
+  return `${formatDate(debt.period.start)} – ${debt.period.end ? formatDate(debt.period.end) : "end of lease"}`;
+}
+
+function paymentResultRow(entry) {
+  const next = entry.next_due;
+  const owed = next ? `Next: ${escapeHtml(next.label)} · ${money(next.balance)} due ${formatDate(next.due_date)}${entry.deal_type === "rent" && next.period ? ` · ${escapeHtml(paymentPeriodText(next))}` : ""}` : "Nothing owed";
+  return `<button type="button" class="pay-result" data-action="pay-pick" data-id="${entry.contract_id}">
+    <span class="pay-result-main"><strong>${escapeHtml(entry.client_name || "")}</strong> ${badge(entry.deal_type === "rent" ? "Rent" : entry.deal_type === "sell" ? "Sell" : "Buy", entry.deal_type === "rent" ? "leased" : "open")}<span class="muted"> ${escapeHtml(entry.contract_number || "")}${entry.property_name ? ` · ${escapeHtml(entry.property_name)}` : ""}</span></span>
+    <span class="pay-result-sub">${owed}${entry.reasons?.length ? ` · <em>${escapeHtml(entry.reasons.join(", "))}</em>` : ""}</span>
+  </button>`;
+}
+
+function initPaymentForm(prefill) {
+  const form = document.getElementById("record-form");
+  if (!form) return;
+  const $ = (id) => form.querySelector(`#${id}`);
+  const results = $("pay-results");
+  const found = new Map();
+  let chosen = null;
+  // Fields the message filled in may be replaced by a later message; fields
+  // the officer typed are never overwritten.
+  // The date (today) and method (bank) are defaults, so a message may replace them.
+  const auto = new Set(["pay-date", "pay-method"]);
+  const setAuto = (id, value) => {
+    const input = $(id);
+    if (!input || value === null || value === undefined || value === "") return;
+    if (input.value && !auto.has(id)) return;
+    input.value = value; auto.add(id);
+  };
+  ["pay-amount", "pay-reference", "pay-date", "pay-method"].forEach((id) => $(id)?.addEventListener("input", () => auto.delete(id)));
+
+  const checkAmount = () => {
+    const debtId = $("pay-debt").value;
+    const debt = chosen?.open_debts?.find((entry) => String(entry.debt_id) === String(debtId));
+    const amount = numberValue($("pay-amount").value);
+    const short = $("pay-short");
+    if (debt && amount > 0 && amount < debt.balance - 0.5) {
+      $("pay-short-text").textContent = `Less than agreed: this installment is ${money(debt.balance)}. The rest (${money(debt.balance - amount)}) stays owed.`;
+      short.hidden = false;
+    } else {
+      short.hidden = true;
+    }
+    const note = $("pay-message-note");
+    if (debt && amount > debt.balance + 0.5 && note && !note.dataset.duplicate) note.textContent = `More than this installment: the extra ${money(amount - debt.balance)} goes to the next one.`;
+  };
+  $("pay-amount").addEventListener("input", checkAmount);
+  $("pay-debt").addEventListener("change", () => {
+    const debt = chosen?.open_debts?.find((entry) => String(entry.debt_id) === String($("pay-debt").value));
+    if (debt) setAuto("pay-amount", debt.balance);
+    checkAmount();
+  });
+
+  const pick = (entry) => {
+    chosen = entry;
+    $("pay-contract").value = entry.contract_id;
+    results.innerHTML = "";
+    $("pay-search").value = "";
+    $("pay-selected").innerHTML = `<div class="pay-chosen">${paymentResultRow(entry).replace('data-action="pay-pick"', 'data-action="pay-change" title="Choose another customer"')}<span class="pay-change">Change</span></div>`;
+    const debts = entry.open_debts || [];
+    $("pay-debt").innerHTML = debts.length
+      ? debts.map((debt, index) => `<option value="${debt.debt_id}"${index === 0 ? " selected" : ""}>${escapeHtml(debt.label)} · ${money(debt.balance)} · ${formatDate(debt.due_date)}${debt.period ? ` · ${escapeHtml(paymentPeriodText(debt))}` : ""}</option>`).join("")
+      : `<option value="">No installment owed — general payment</option>`;
+    if (debts[0]) setAuto("pay-amount", debts[0].balance);
+    checkAmount();
+  };
+  const show = (rows, empty) => {
+    rows.forEach((entry) => found.set(String(entry.contract_id), entry));
+    results.innerHTML = rows.length ? rows.map(paymentResultRow).join("") : `<div class="muted pay-empty">${escapeHtml(empty)}</div>`;
+  };
+  results.addEventListener("click", (event) => {
+    const button = event.target.closest('[data-action="pay-pick"]');
+    if (button && found.get(button.dataset.id)) pick(found.get(button.dataset.id));
+  });
+  $("pay-selected").addEventListener("click", (event) => {
+    if (!event.target.closest(".pay-chosen")) return;
+    chosen = null; $("pay-contract").value = ""; $("pay-selected").innerHTML = "";
+    $("pay-debt").innerHTML = `<option value="">Choose the customer first</option>`; $("pay-short").hidden = true;
+    $("pay-search").focus();
+  });
+
+  let searchTimer = null;
+  $("pay-search").addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    const q = $("pay-search").value.trim();
+    if (q.length < 2) { results.innerHTML = ""; return; }
+    searchTimer = setTimeout(async () => {
+      try { show(await api(`/payments/lookup?q=${encodeURIComponent(q)}`), "No approved or active contract matches. Check the spelling, or search by phone or contract number."); }
+      catch (error) { results.innerHTML = `<div class="muted pay-empty">${escapeHtml(error.message || "Search failed.")}</div>`; }
+    }, 250);
+  });
+
+  let messageTimer = null;
+  $("pay-message").addEventListener("input", () => {
+    clearTimeout(messageTimer);
+    const text = $("pay-message").value.trim();
+    const note = $("pay-message-note");
+    if (text.length < 15) { note.textContent = ""; delete note.dataset.duplicate; return; }
+    messageTimer = setTimeout(async () => {
+      try {
+        const { parsed, suggestions, duplicate } = await api("/payments/parse-message", { method: "POST", body: { text } });
+        setAuto("pay-amount", parsed.amount);
+        setAuto("pay-reference", parsed.reference);
+        setAuto("pay-date", parsed.paid_at);
+        setAuto("pay-method", parsed.method);
+        $("pay-payer-name").value = parsed.payer_name || "";
+        $("pay-payer-phone").value = parsed.payer_phone || "";
+        const read = [parsed.amount ? money(parsed.amount) : null, parsed.reference ? `ref ${parsed.reference}` : null, parsed.payer_name ? `from ${parsed.payer_name}` : null, parsed.payer_phone || null].filter(Boolean);
+        if (duplicate) {
+          note.dataset.duplicate = "1";
+          note.innerHTML = `<span class="pay-warning">This reference is already recorded (payment #${duplicate.id}, ${escapeHtml(duplicate.client_name || "")}, ${escapeHtml(duplicate.status)}). Do not record it twice.</span>`;
+        } else {
+          delete note.dataset.duplicate;
+          note.textContent = read.length ? `Read from the message: ${read.join(" · ")}. Check it before saving.` : "This message could not be read; type the amount and reference yourself.";
+        }
+        if (!chosen && suggestions.length) {
+          const [top, second] = suggestions;
+          if (top.score >= 60 && (!second || second.score <= top.score - 25)) pick(top);
+          else show(suggestions, "");
+        }
+        checkAmount();
+      } catch (error) {
+        note.textContent = error.message || "Unable to read the message.";
+      }
+    }, 400);
+  });
+
+  // Opened from an installment: that contract and installment are chosen already.
+  if (prefill.contract_id) {
+    api(`/payments/lookup?q=`).then((rows) => {
+      const entry = rows.find((row) => String(row.contract_id) === String(prefill.contract_id));
+      if (!entry) return;
+      pick(entry);
+      if (prefill.debt_id) { $("pay-debt").value = String(prefill.debt_id); $("pay-debt").dispatchEvent(new Event("change")); }
+    }).catch(() => {});
+  } else {
+    setTimeout(() => $("pay-search")?.focus(), 0);
+  }
 }
 
 /** One line on the automatic daily backup: on/off, the last one, and the copy folder. */

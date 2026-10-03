@@ -544,6 +544,10 @@ export async function runMigrations({ seedDemo = process.env.NODE_ENV !== "produ
   await query("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS signed_uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL");
   await query("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS signed_uploaded_at TIMESTAMPTZ");
   await query("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS signed_by_names TEXT");
+  // Who the bank or mobile-money message says paid: the next payment from the
+  // same phone or name is suggested for the same contract.
+  await query("ALTER TABLE payments ADD COLUMN IF NOT EXISTS payer_name TEXT");
+  await query("ALTER TABLE payments ADD COLUMN IF NOT EXISTS payer_phone TEXT");
   await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_by INTEGER REFERENCES users(id) ON DELETE SET NULL");
   // "Mark as done" on an appointment records who confirmed the meeting happened.
   await query("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS completed_by INTEGER REFERENCES users(id) ON DELETE SET NULL");

@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { autoBackupStatus, backupNamePattern, createBackup, listBackups } from "../backups.js";
+import { normalizePhone, parsePaymentMessage } from "../payments/parseMessage.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -59,7 +60,7 @@ import orgRoutes from "./org.js";
 import publicRoutes from "./public.js";
 import { audit } from "../org/audit.js";
 import { requirePermissionForMethod, provisionSystemAdministrator, organizationId, requireAdmin, can as canPermission } from "../org/rbac.js";
-import { accessMiddleware, can, ownershipFields } from "../org/access.js";
+import { accessMiddleware, can, ownershipFields, scopeCondition } from "../org/access.js";
 import {
   CONTRACT_ACTIONS,
   CONTRACT_STATUSES,
@@ -1880,6 +1881,100 @@ router.delete("/debts/:id", route(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ---- Simple payment entry ------------------------------------------------
+// Finance types a few letters of the customer (or pastes the SMS / bank
+// message) and picks the right contract from a short list. The list shows
+// each payable contract with what is still owed and the next installment.
+function requireFinancialAccess(req) {
+  if (!can(req.access, "view_financial")) throw new HttpError(403, "payments are handled by Finance");
+}
+const DAY_MS = 86400000;
+async function payableContracts(req) {
+  const values = [await organizationId()];
+  const scope = scopeCondition("c", "contract", req.access, values, { read: true });
+  const contracts = (await query(`SELECT c.id, c.contract_number, c.client_id, c.client_name, c.client_phone, c.deal_type, c.status, c.payment_mode, c.value, c.end_date,
+        cl.phone AS register_phone, cl.name AS register_name, pr.name AS property_name
+      FROM contracts c LEFT JOIN clients cl ON cl.id=c.client_id LEFT JOIN properties pr ON pr.id=c.property_id
+      WHERE c.organization_id=$1 AND c.status IN ('approved','customer_pending','active') AND ${scope}
+      ORDER BY c.id DESC LIMIT 1000`, values)).rows;
+  if (!contracts.length) return [];
+  const debts = (await query(`SELECT d.id, d.contract_id, d.notes AS label, d.due_date, d.amount,
+        COALESCE((SELECT SUM(pa.amount) FROM payment_allocations pa JOIN payments p ON p.id=pa.payment_id AND p.status='approved' WHERE pa.debt_id=d.id), 0) AS paid
+      FROM debts d WHERE d.contract_id = ANY($1::int[]) ORDER BY d.contract_id, d.due_date NULLS LAST, d.id`, [contracts.map((row) => row.id)])).rows;
+  const byContract = new Map();
+  for (const debt of debts) {
+    if (!byContract.has(debt.contract_id)) byContract.set(debt.contract_id, []);
+    byContract.get(debt.contract_id).push(debt);
+  }
+  const iso = (value) => (value ? new Date(value).toISOString().slice(0, 10) : null);
+  return contracts.map((contract) => {
+    const rows = byContract.get(contract.id) || [];
+    const open = rows.map((debt, index) => {
+      const balance = Math.max(0, Math.round((Number(debt.amount) - Number(debt.paid)) * 100) / 100);
+      // A lease installment pays for a period: from its due date to the day
+      // before the next one (the last runs to the end of the lease).
+      let period = null;
+      if (contract.deal_type === "rent" && debt.due_date) {
+        const next = rows[index + 1]?.due_date;
+        const end = next ? new Date(new Date(next).getTime() - DAY_MS) : (contract.end_date ? new Date(contract.end_date) : null);
+        period = { start: iso(debt.due_date), end: end ? iso(end) : null };
+      }
+      return { debt_id: debt.id, label: debt.label || "Installment", due_date: iso(debt.due_date), amount: Number(debt.amount), balance, period };
+    }).filter((debt) => debt.balance > 0);
+    return {
+      contract_id: contract.id, contract_number: contract.contract_number, client_id: contract.client_id,
+      client_name: contract.client_name || contract.register_name, phones: [contract.client_phone, contract.register_phone].map(normalizePhone).filter(Boolean),
+      deal_type: contract.deal_type, status: contract.status, payment_mode: contract.payment_mode, property_name: contract.property_name,
+      open_balance: Math.round(open.reduce((sum, debt) => sum + debt.balance, 0) * 100) / 100,
+      next_due: open[0] || null, open_debts: open,
+    };
+  });
+}
+const lookupText = (value) => String(value || "").toLowerCase().replace(/\s+/g, " ").trim();
+router.get("/payments/lookup", route(async (req, res) => {
+  requireFinancialAccess(req);
+  const q = lookupText(req.query.q);
+  const digits = q.replace(/\D/g, "");
+  const all = await payableContracts(req);
+  const matches = !q ? all : all.filter((entry) =>
+    lookupText(entry.client_name).includes(q) || lookupText(entry.contract_number).includes(q) || lookupText(entry.property_name).includes(q)
+    || (digits.length >= 4 && entry.phones.some((phone) => phone.includes(normalizePhone(digits) || digits))));
+  matches.sort((a, b) => String(a.next_due?.due_date || "9999").localeCompare(String(b.next_due?.due_date || "9999")));
+  res.json(matches.slice(0, 12));
+}));
+router.post("/payments/parse-message", route(async (req, res) => {
+  requireFinancialAccess(req);
+  const text = optionalText(req.body?.text, "text", 4000) || "";
+  const parsed = parsePaymentMessage(text);
+  const all = await payableContracts(req);
+  // What Finance has linked before: a payer's phone or name seen on an earlier
+  // payment points to the same contract next time.
+  const learned = new Map();
+  if (parsed.payer_phone || parsed.payer_name) {
+    const values = [await organizationId(), parsed.payer_phone, parsed.payer_name];
+    for (const row of (await query("SELECT contract_id, COUNT(*)::int AS n FROM payments WHERE organization_id=$1 AND status<>'reversed' AND ((payer_phone IS NOT NULL AND payer_phone=$2) OR (payer_name IS NOT NULL AND UPPER(payer_name)=UPPER($3))) GROUP BY contract_id", values)).rows) learned.set(row.contract_id, row.n);
+  }
+  const payerWords = lookupText(parsed.payer_name).split(" ").filter((word) => word.length >= 3);
+  const suggestions = all.map((entry) => {
+    let score = 0;
+    const reasons = [];
+    if (parsed.contract_number && entry.contract_number === parsed.contract_number) { score += 100; reasons.push("contract number in the message"); }
+    if (learned.has(entry.contract_id)) { score += 60; reasons.push("this payer paid this contract before"); }
+    if (parsed.payer_phone && entry.phones.includes(parsed.payer_phone)) { score += 50; reasons.push("phone number matches"); }
+    if (payerWords.length) {
+      const name = lookupText(entry.client_name);
+      const hits = payerWords.filter((word) => name.includes(word)).length;
+      if (hits === payerWords.length) { score += 30; reasons.push("name matches"); } else if (hits) { score += 15; reasons.push("name partly matches"); }
+    }
+    if (parsed.amount) {
+      if (entry.next_due && Math.abs(entry.next_due.balance - parsed.amount) < 1) { score += 25; reasons.push("amount equals the next installment"); }
+      else if (entry.open_debts.some((debt) => Math.abs(debt.balance - parsed.amount) < 1)) { score += 15; reasons.push("amount equals an installment"); }
+    }
+    return { ...entry, score, reasons };
+  }).filter((entry) => entry.score > 0).sort((a, b) => b.score - a.score || String(a.next_due?.due_date || "9999").localeCompare(String(b.next_due?.due_date || "9999"))).slice(0, 5);
+  const duplicate = parsed.reference ? await Payment.findByReference(parsed.reference, null) : null;
+  res.json({ parsed, suggestions, duplicate: duplicate ? { id: duplicate.id, client_name: duplicate.client_name, status: duplicate.status } : null });
+}));
 router.get("/payments", route(async (req, res) => {
   const projectId = req.query.project_id === undefined ? null : parseId(req.query.project_id, "project_id");
   const contractId = req.query.contract_id === undefined ? null : parseId(req.query.contract_id, "contract_id");
@@ -1894,6 +1989,7 @@ router.get("/payments", route(async (req, res) => {
 }));
 router.get("/payments/:id", route(async (req, res) => res.json(paymentResponse(requireRecord(await Payment.get(parseId(req.params.id)), "Payment")))));
 router.post("/payments", route(async (req, res) => {
+  await checkApproveNow(req);
   const data = await validatePayment(req.body || {});
   if (!data.evidence_text) {
     throw new HttpError(400, "proof is required: paste the bank or mobile-money message, or record the payment with its receipt file");
@@ -1902,12 +1998,13 @@ router.post("/payments", route(async (req, res) => {
   const result = await Payment.create(data);
   await Payment.syncInstallment(data.debt_id);
   await syncDebtReminderFromDb(data.debt_id);
-  res.status(201).json(paymentResponse(await Payment.get(result.id)));
+  res.status(201).json(await afterPaymentCreated(req, result.id));
 }));
 // Create a payment with an optional receipt file in one request.
 router.post("/payments/upload", uploadDocumentFile, route(async (req, res) => {
   let paymentId = null;
   try {
+    await checkApproveNow(req);
     const data = await validatePayment(req.body || {});
     if (data.debt_id) requireRecord(await Debt.get(data.debt_id), "Debt");
     if (!req.file && !data.evidence_text) {
@@ -1938,7 +2035,7 @@ router.post("/payments/upload", uploadDocumentFile, route(async (req, res) => {
     cleanupUploadedFile(req.file);
     throw error;
   }
-  res.status(201).json(paymentResponse(await Payment.get(paymentId)));
+  res.status(201).json(await afterPaymentCreated(req, paymentId));
 }));
 router.put("/payments/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
@@ -1959,10 +2056,12 @@ router.put("/payments/:id", route(async (req, res) => {
 // be inside their scope and still pending, and nobody approves a payment they
 // recorded themselves (a second Finance person confirms it).
 router.post("/payments/:id/approve", route(async (req, res) => {
+  res.json(await approvePayment(req, parseId(req.params.id)));
+}));
+async function approvePayment(req, id) {
   if (!canPermission(req.access, "validate_finance") || !canPermission(req.access, "view_financial")) {
     throw new HttpError(403, "only Finance can approve payments");
   }
-  const id = parseId(req.params.id);
   const payment = requireRecord(await Payment.get(id), "Payment");
   if (payment.status === "approved") throw new HttpError(409, "this payment is already approved");
   if (payment.status === "reversed") throw new HttpError(409, "a reversed payment cannot be approved");
@@ -1981,8 +2080,31 @@ router.post("/payments/:id/approve", route(async (req, res) => {
   // unpaid installments (surplus onto the next) and they settle now.
   await resyncInstallmentState([payment.debt_id, ...(result.touchedDebts || [])]);
   await audit(req, "payment_approved", "payment", id, { amount: payment.amount, contract_id: payment.contract_id, reference: payment.reference, self_approved: selfApproved });
-  res.json(paymentResponse(await Payment.get(id)));
-}));
+  return paymentResponse(await Payment.get(id));
+}
+
+/**
+ * "Save & approve" is only for a Finance person who may approve their own entry
+ * (MKUYU's single-Finance mode). Checked BEFORE the payment is written, so a
+ * refusal never leaves a half-done request behind.
+ */
+async function checkApproveNow(req) {
+  const body = req.body || {};
+  if (!(body.approve_now === true || body.approve_now === "true" || body.approve_now === "1")) return;
+  if (!canPermission(req.access, "validate_finance") || !canPermission(req.access, "view_financial")) throw new HttpError(403, "only Finance can approve payments");
+  if (await Payment.otherApprovers(req.user.id) > 0) throw new HttpError(403, "another Finance person must approve this payment; save it without approving");
+}
+
+/** After a payment is created: remember who paid, and approve at once when asked. */
+async function afterPaymentCreated(req, paymentId) {
+  const body = req.body || {};
+  const payerName = optionalText(body.payer_name, "payer_name", 120);
+  const payerPhone = normalizePhone(body.payer_phone);
+  if (payerName || payerPhone) await query("UPDATE payments SET payer_name=$1, payer_phone=$2 WHERE id=$3", [payerName ? payerName.toUpperCase() : null, payerPhone, paymentId]);
+  const approveNow = body.approve_now === true || body.approve_now === "true" || body.approve_now === "1";
+  if (approveNow) return approvePayment(req, paymentId);
+  return paymentResponse(await Payment.get(paymentId));
+}
 
 // Reversal: the correction for an approved payment that was wrong (bounced,
 // recorded on the wrong contract, wrong amount). The payment stays in the

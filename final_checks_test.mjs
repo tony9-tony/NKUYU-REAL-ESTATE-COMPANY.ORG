@@ -287,6 +287,43 @@ try {
   const cancelled = cancelledRes.body;
   await query("UPDATE contracts SET status='cancelled' WHERE id=$1", [cancelled.id]);
   check((await upload(sales, cancelled.id, { signed_by: "x" })).status === 409, "a cancelled contract takes no signed copy");
+
+  console.log("\n=== CHECK 15: simple payment entry (find the customer, paste the message) ===");
+  const { parsePaymentMessage } = await import("./backend/src/payments/parseMessage.js");
+  const mpesa = parsePaymentMessage("QJ47XK2P9A Confirmed. Tsh2,000,000.00 received from JOHN MASSAWE 255715908776 on 3/10/26 at 10:15 AM.");
+  check(mpesa.amount === 2000000 && mpesa.reference === "QJ47XK2P9A" && mpesa.paid_at === "2026-10-03" && mpesa.method === "mobile" && mpesa.payer_name === "JOHN MASSAWE" && mpesa.payer_phone === "0715908776", "an M-Pesa message is read (amount, reference, date, payer)");
+  const swahili = parsePaymentMessage("QJ47XK2P9A Imethibitishwa. Umepokea Tsh2,000,000.00 kutoka kwa JOHN MASSAWE 255715908776 tarehe 3/10/26 saa 10:15 AM.");
+  check(swahili.amount === 2000000 && swahili.payer_name === "JOHN MASSAWE", "the Swahili message is read too");
+  const bankMsg = parsePaymentMessage("CRDB: Your account ***4521 has been credited with TZS 22,859,375.00 from NEEMA MOLLEL Ref FT26278431 on 05/10/2026.");
+  check(bankMsg.amount === 22859375 && bankMsg.reference === "FT26278431" && bankMsg.method === "bank" && bankMsg.payer_name === "NEEMA MOLLEL", "a bank alert is read");
+  check(parsePaymentMessage("NMB: A/C credited TZS 6,600,000 narration MK-C-000004 TID NMB2610051234 05-Oct-2026").contract_number === "MK-C-000004", "a contract number in the narration is picked up");
+  check(parsePaymentMessage("hello").amount === null, "an unreadable message fills nothing in");
+
+  const lookup = await call(`/payments/lookup?q=${encodeURIComponent(`Buyer FC ${tag}`)}`, { token: financeB });
+  const entry = (lookup.body || []).find((row) => row.contract_id === deal.body.id);
+  check(lookup.status === 200 && entry && entry.next_due && entry.deal_type === "buy", "Finance finds the customer's contract with its next installment");
+  check((await call(`/payments/lookup?q=${encodeURIComponent(buyerPhone.slice(-6))}`, { token: financeB })).body.some((row) => row.contract_id === deal.body.id), "the customer is found by part of the phone number");
+  check((await call("/payments/lookup?q=x", { token: sales })).status === 403, "Sales cannot use the payment lookup");
+  const sms = `QZ${tag.slice(0, 6).toUpperCase()}X Confirmed. Tsh${entry.next_due.balance.toLocaleString("en-US")}.00 received from BUYER FC ${buyerPhone.replace(/\D/g, "").slice(-12)} on 6/10/26 at 9:00 AM.`;
+  const parsedRes = await call("/payments/parse-message", { method: "POST", token: financeB, body: { text: sms } });
+  check(parsedRes.status === 200 && parsedRes.body.suggestions?.[0]?.contract_id === deal.body.id, `the pasted message suggests the right contract (${parsedRes.body.suggestions?.[0]?.reasons?.join(", ")})`);
+  check((await call("/payments", { method: "POST", token: financeB, body: { contract_id: deal.body.id, debt_id: entry.next_due.debt_id, amount: 1000, paid_at: "2026-10-06", method: "mobile", reference: `NOW-${tag}`, evidence_text: "sms", approve_now: true } })).status === 403, "Save & approve is refused while there are two Finance people");
+  const learned = await call("/payments", { method: "POST", token: financeB, body: { contract_id: deal.body.id, debt_id: entry.next_due.debt_id, amount: 1000, paid_at: "2026-10-06", method: "mobile", reference: `LRN-${tag}`, evidence_text: "sms from someone else", payer_name: "ABC Holdings", payer_phone: "0688123456" } });
+  check(learned.status === 201 && (await query("SELECT payer_name, payer_phone FROM payments WHERE id=$1", [learned.body.id])).rows[0].payer_phone === "0688123456", "who paid is stored with the payment");
+  const nextTime = await call("/payments/parse-message", { method: "POST", token: financeB, body: { text: "XY12345678 Confirmed. Tsh50,000.00 received from ABC HOLDINGS 255688123456 on 7/10/26." } });
+  check(nextTime.body.suggestions?.[0]?.contract_id === deal.body.id && nextTime.body.suggestions[0].reasons.includes("this payer paid this contract before"), "the next payment from the same payer is suggested for the same contract");
+  const dupe = await call("/payments/parse-message", { method: "POST", token: financeB, body: { text: `LRN-${tag} ref LRN-${tag} Tsh1,000 received` } });
+  check(Boolean(dupe.body.duplicate), "a message already recorded is flagged as a duplicate");
+  others.length = 0;
+  for (const row of (await query(`SELECT DISTINCT u.id FROM users u JOIN user_roles ur ON ur.user_id=u.id JOIN role_permissions rp ON rp.role_id=ur.role_id
+      JOIN permissions p ON p.id=rp.permission_id WHERE p.permission_key='validate_finance' AND u.active=TRUE AND u.role<>'admin' AND u.email<>$1`, [`fin.b.${tag}@test.mkuyu.local`])).rows) others.push(row.id);
+  await query("UPDATE users SET active=FALSE WHERE id = ANY($1::int[])", [others]);
+  try {
+    const quick = await call("/payments", { method: "POST", token: financeB, body: { contract_id: deal.body.id, debt_id: entry.next_due.debt_id, amount: 2000, paid_at: "2026-10-06", method: "mobile", reference: `QCK-${tag}`, evidence_text: "sms", approve_now: true } });
+    check(quick.status === 201 && quick.body.status === "approved" && quick.body.self_approved === true && /^RCT-/.test(quick.body.receipt_number || ""), "the only Finance person saves and approves in one step (self-approved, with a receipt)");
+  } finally {
+    await query("UPDATE users SET active=TRUE WHERE id = ANY($1::int[])", [others]);
+  }
   void demoPasswordFor;
 } catch (error) {
   failures += 1;
