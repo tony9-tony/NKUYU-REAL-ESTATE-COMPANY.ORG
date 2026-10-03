@@ -249,6 +249,32 @@ console.log("\n=== dashboard with an empty business workspace ===");
   check(getElement("primary-nav").innerHTML.includes("nav-group-label"), "navigation sections are grouped after RBAC filtering");
 }
 
+// --- "Your work today" for Legal and Customer Service --------------------------
+{
+  const legalProfile = { role: "staff", modules: ["contracts", "documents", "clients", "reports"], me: { permissions: ["view", "create", "edit", "review_legal", "approve_legal", "request_changes", "approve", "view_reports"], financial: false, scope: "department", rank: 45 } };
+  const legalPayload = workspacePayload(legalProfile);
+  legalPayload.summary = { ...(legalPayload.summary || {}), work: { contracts_submitted: 2, contracts_under_review: 1, contracts_to_md: 1, contracts_release: 0, contracts_customer: 1 } };
+  app.currentUser = { role: "staff", display_name: "Legal Officer", email: "legal@mkuyu.local" };
+  app.state.organization.me = legalPayload.me;
+  app.applyWorkspace(legalPayload);
+  app.state.view = "dashboard";
+  app.render();
+  const legalHtml = getElement("content").innerHTML;
+  check(legalHtml.includes("New contracts from Sales") && legalHtml.includes("Record signatures"), "Legal gets \"Your work today\" with its contract steps");
+  const csProfile = { role: "staff", modules: ["clients", "appointments", "leads"], me: { permissions: ["view", "create", "edit"], financial: false, scope: "own", rank: 15 } };
+  const csPayload = workspacePayload(csProfile);
+  csPayload.me.user.roles = [{ name: "Customer Service Officer" }];
+  app.currentUser = { role: "staff", display_name: "CS Officer", email: "cs@mkuyu.local" };
+  app.state.organization.me = csPayload.me;
+  app.state.attention = { total: 3, mine: 3, review: 0 };
+  app.applyWorkspace(csPayload);
+  app.state.attention = { total: 3, mine: 3, review: 0 };
+  app.state.view = "dashboard";
+  app.render();
+  const csHtml = getElement("content").innerHTML;
+  check(csHtml.includes("Customers to contact") && csHtml.includes("Open my tasks"), "Customer Service gets \"Your work today\" with the customers to contact");
+}
+
 // --- Password reset is offered only where the API would accept it ------------
 // The API gates the reset on requireAdmin(), so the button must not be rendered
 // for any non-administrator, however privileged that caller is.
@@ -404,7 +430,7 @@ console.log("\n=== duties view renders the catalogue and the approval path ===")
   }
   // Sales may SEE the whole path - it is reference data - but must be offered no
   // decision on it, and no duty that needs a permission they lack.
-  check(salesHtml.includes("Management approval"), "a sales officer can still read the management approval step");
+  check(salesHtml.includes("Under MD review"), "a sales officer can still read the management approval step");
   const mdYourStages = WORKFLOW_STAGES.filter((entry) => entry.permission === "approve_management");
   check(mdYourStages.length === 1 && stageBlock(mdHtml, mdYourStages[0]).includes("Your decision"), "the MD IS marked as deciding the management approval step");
   // No duty may be marked "yours" unless the caller holds every permission that

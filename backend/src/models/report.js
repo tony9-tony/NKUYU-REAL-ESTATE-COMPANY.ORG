@@ -77,6 +77,10 @@ export const Report = {
     contractAt("contracts_finance_review", eq("c.status", "legal_approved"), raw("c.finance_validated_at IS NULL"));
     contractAt("contracts_management", eq("c.status", "pending_management_approval"));
     contractAt("contracts_customer", eq("c.status", "customer_pending"));
+    contractAt("contracts_submitted", eq("c.status", "submitted"));
+    contractAt("contracts_under_review", eq("c.status", "under_review"));
+    contractAt("contracts_to_md", eq("c.status", "legal_approved"), raw("c.finance_validated_at IS NOT NULL"));
+    contractAt("contracts_release", eq("c.status", "approved"));
     add("requests_new", { table: "leads", alias: "l", entity: "lead", conditions: [raw("l.source IN ('website','website-contact')"), raw("l.task_id IS NULL"), raw("l.client_id IS NULL"), eq("l.status", "new")] });
     add("requests_reported", { table: "leads", alias: "l", entity: "lead", extraFrom: "JOIN tasks t ON t.id=l.task_id", conditions: [raw("l.source IN ('website','website-contact')"), raw("t.status = 'submitted'")] });
 
@@ -128,6 +132,10 @@ export const Report = {
       contracts_finance_review: count("contracts_finance_review"),
       contracts_management: count("contracts_management"),
       contracts_customer: count("contracts_customer"),
+      contracts_submitted: count("contracts_submitted"),
+      contracts_under_review: count("contracts_under_review"),
+      contracts_to_md: count("contracts_to_md"),
+      contracts_release: count("contracts_release"),
       requests_new: count("requests_new"),
       requests_reported: count("requests_reported"),
     };

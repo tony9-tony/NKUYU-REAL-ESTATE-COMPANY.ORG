@@ -147,6 +147,8 @@ export async function startIsolatedServer({ port, label = "test" } = {}) {
       PORT: String(chosen),
       DATABASE_URL: process.env.DATABASE_URL,
       DATA_DIR: dir,
+      // Test servers never make automatic backups.
+      AUTO_BACKUP: "0",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { autoBackupStatus, backupNamePattern, createBackup, listBackups } from "../backups.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -2155,82 +2156,11 @@ router.post("/reminders/:id/acknowledge", route(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// ---- Backups in data/backups ----------------------------------------------
-// Preferred format is a PostgreSQL custom dump. When `pg_dump` is not installed
-// (common on managed/shared hosting and on Windows without the PostgreSQL tools)
-// the backup falls back to a self-contained JSON snapshot so the feature keeps
-// working instead of failing with a 500.
-
-const BACKUP_EXTENSIONS = [".dump", ".json"];
-const backupNamePattern = /^system-[\w-]+\.(dump|json)$/;
-
-function listBackups() {
-  if (!fs.existsSync(backupsDir)) return [];
-  return fs.readdirSync(backupsDir)
-    .filter((name) => BACKUP_EXTENSIONS.some((extension) => name.endsWith(extension)))
-    .map((name) => {
-      const stats = fs.statSync(path.join(backupsDir, name));
-      return { name, size: stats.size, format: name.endsWith(".json") ? "json" : "pgdump", created_at: stats.mtime.toISOString() };
-    })
-    .sort((a, b) => b.created_at.localeCompare(a.created_at));
-}
-
-// Tables captured by the portable snapshot. `org: false` marks the global and
-// join tables, which have no organization_id column.
-const SNAPSHOT_TABLES = [
-  { table: "organizations", org: false },
-  { table: "permissions", org: false },
-  { table: "departments" }, { table: "roles" }, { table: "users" },
-  { table: "user_roles", org: false }, { table: "user_departments", org: false }, { table: "role_permissions", org: false },
-  { table: "projects" }, { table: "clients" }, { table: "contracts" }, { table: "properties" },
-  { table: "appointments" }, { table: "documents" }, { table: "debts" }, { table: "reminders" },
-  { table: "payments" }, { table: "reports" }, { table: "leads" }, { table: "follow_ups" },
-  { table: "approvals" }, { table: "record_shares" }, { table: "property_history" }, { table: "settings" },
-  // Task-assignment workflow, so a portable snapshot carries the assignment
-  // history and its review comments. task_comments has no organization_id, so
-  // it is captured through its task.
-  { table: "tasks" }, { table: "task_comments", org: false, via: "tasks" },
-];
-
-async function writeJsonSnapshot(stamp) {
-  const name = `system-${stamp}.json`;
-  const target = path.join(backupsDir, name);
-  const org = await organizationId();
-  const data = {};
-  for (const { table, org: scoped = true, via } of SNAPSHOT_TABLES) {
-    // Global tables are small by definition; organization tables are filtered.
-    // `via` captures a child table through its parent's ids, because the child
-    // carries no organization column of its own.
-    const result = via
-      ? await query(`SELECT c.* FROM ${table} c WHERE c.${via.replace(/s$/, "")}_id IN (SELECT id FROM ${via} WHERE organization_id = $1)`, [org])
-      : scoped
-        ? await query(`SELECT * FROM ${table} WHERE organization_id = $1`, [org])
-        : await query(`SELECT * FROM ${table}`);
-    data[table] = result.rows;
-  }
-  const payload = { format: "mkuyu-json-snapshot", version: 1, created_at: new Date().toISOString(), organization_id: org, data };
-  fs.writeFileSync(target, JSON.stringify(payload), "utf8");
-  return name;
-}
-
+// ---- Backups in data/backups (see backups.js) ------------------------------
 router.get("/backups", requireAdmin(), route((req, res) => res.json(listBackups())));
+router.get("/backups/status", requireAdmin(), route((req, res) => res.json(autoBackupStatus())));
 router.post("/backups", requireAdmin(), route(async (req, res) => {
-  fs.mkdirSync(backupsDir, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const name = `system-${stamp}.dump`;
-  const pgDumpPath = process.env.PG_DUMP_PATH || "pg_dump";
-  let created;
-  try {
-    await execFileAsync(pgDumpPath, ["--format=custom", `--file=${path.join(backupsDir, name)}`, DATABASE_URL]);
-    created = name;
-  } catch (error) {
-    // No pg_dump (or it failed): fall back to a portable JSON snapshot rather
-    // than leaving the administrator with a broken backup button.
-    console.warn(`pg_dump unavailable (${error.code || error.message}); writing JSON snapshot instead`);
-    try { fs.unlinkSync(path.join(backupsDir, name)); } catch { /* nothing written */ }
-    created = await writeJsonSnapshot(stamp);
-  }
-  res.status(201).json(listBackups().find((entry) => entry.name === created));
+  res.status(201).json(await createBackup());
 }));
 router.get("/backups/:name/download", requireAdmin(), route((req, res) => {
   const name = path.basename(String(req.params.name || ""));

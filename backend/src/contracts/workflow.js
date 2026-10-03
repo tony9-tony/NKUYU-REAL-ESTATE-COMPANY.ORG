@@ -13,20 +13,20 @@ import { query, withTransaction } from "../db.js";
  * CONTRACT_OWNERSHIP reflects that. The UI shows both.
  */
 export const WORKFLOW_STAGES = [
-  { status: "draft", stage: 1, label: "Draft prepared", owner: "SALES, MARKETING & OPERATIONS", actor: "SALES, MARKETING & OPERATIONS", permission: "create", note: "Sales or operations opens the deal and records the commercial terms." },
+  { status: "draft", stage: 1, label: "Under Sales review", owner: "SALES, MARKETING & OPERATIONS", actor: "SALES, MARKETING & OPERATIONS", permission: "create", note: "Sales or operations opens the deal and records the commercial terms." },
   { status: "submitted", stage: 2, label: "Submitted to Legal", owner: "LEGAL", actor: "SALES, MARKETING & OPERATIONS", permission: "submit_contract", note: "Sales hands the deal to Legal. Sales cannot approve its own submission." },
-  { status: "under_review", stage: 3, label: "Under legal review", owner: "LEGAL", actor: "LEGAL", permission: "review_legal", note: "Legal opens the contract, checks the clauses and verifies the parties." },
-  { status: "legal_approved", stage: 4, label: "Legal approved · Finance review", owner: "FINANCE & ACCOUNTS", actor: "LEGAL", permission: "approve_legal", note: "Legal gives legal approval. Finance must then validate the money before Legal can send it to the Managing Director." },
-  { status: "pending_management_approval", stage: 5, label: "Management approval", owner: "MANAGEMENT", actor: "MANAGEMENT", permission: "approve_management", note: "The Managing Director approves on behalf of management, or sends it back." },
-  { status: "approved", stage: 6, label: "Approved for release", owner: "LEGAL", actor: "LEGAL", permission: "approve_legal", note: "Legal releases the approved contract to the customer." },
-  { status: "customer_pending", stage: 7, label: "With the customer", owner: "LEGAL", actor: "LEGAL", permission: "approve_legal", note: "Awaiting the customer's signature." },
+  { status: "under_review", stage: 3, label: "Under Legal review", owner: "LEGAL", actor: "LEGAL", permission: "review_legal", note: "Legal opens the contract, checks the clauses and verifies the parties." },
+  { status: "legal_approved", stage: 4, label: "Under Finance review", owner: "FINANCE & ACCOUNTS", actor: "LEGAL", permission: "approve_legal", note: "Legal gives legal approval. Finance must then validate the money before Legal can send it to the Managing Director." },
+  { status: "pending_management_approval", stage: 5, label: "Under MD review", owner: "MANAGEMENT", actor: "MANAGEMENT", permission: "approve_management", note: "The Managing Director approves on behalf of management, or sends it back." },
+  { status: "approved", stage: 6, label: "MD approved · Legal to send to customer", owner: "LEGAL", actor: "LEGAL", permission: "approve_legal", note: "Legal releases the approved contract to the customer." },
+  { status: "customer_pending", stage: 7, label: "With the customer for signature", owner: "LEGAL", actor: "LEGAL", permission: "approve_legal", note: "Awaiting the customer's signature." },
   { status: "active", stage: 8, label: "Active", owner: "LEGAL", actor: "LEGAL", permission: "approve_legal", note: "The signature is recorded and the contract is in force." },
   { status: "completed", stage: 9, label: "Completed", owner: "LEGAL", actor: "LEGAL", permission: "approve_legal", note: "Handover and obligations are finished." },
 ];
 
 /** States that sit outside the linear pipeline. */
 export const WORKFLOW_EXCEPTIONS = [
-  { status: "changes_requested", label: "Changes requested", note: "Sent back to the originating desk. Any department holding request_changes may raise corrections." },
+  { status: "changes_requested", label: "Under Sales review · changes requested", note: "Sent back to the originating desk. Any department holding request_changes may raise corrections." },
   { status: "rejected", label: "Rejected", note: "The deal is declined. Reached from management rejection or a legal rejection." },
   { status: "cancelled", label: "Cancelled", note: "The deal is withdrawn before completion." },
 ];

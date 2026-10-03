@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runMigrations } from "./migrate.js";
 import { ensureUploadDirs } from "./uploads.js";
+import { startAutoBackups } from "./backups.js";
 import apiRoutes from "./routes/api.js";
 import { isProduction, rateLimit, securityHeaders } from "./security.js";
 
@@ -182,6 +183,8 @@ ensureUploadDirs();
 function startServer(port = PORT) {
   return app.listen(port, () => {
     console.log(`MKUYU — Real Estate Management System running at http://localhost:${port}`);
+    // One automatic database backup a day (see backups.js; AUTO_BACKUP=0 turns it off).
+    startAutoBackups();
   });
 }
 

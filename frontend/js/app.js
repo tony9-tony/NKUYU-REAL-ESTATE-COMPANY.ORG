@@ -293,11 +293,11 @@ const CONTRACT_STATUS_LABELS = {
   draft: "Under Sales review",
   submitted: "Submitted to Legal",
   under_review: "Under Legal review",
-  changes_requested: "Changes requested · back with Sales",
-  legal_approved: "Legal approved",
+  changes_requested: "Under Sales review · changes requested",
+  legal_approved: "Under Finance review / Finance validated",
   pending_management_approval: "Under MD review",
-  approved: "MD approved",
-  customer_pending: "With the customer",
+  approved: "MD approved · Legal to send to customer",
+  customer_pending: "With the customer for signature",
   active: "Active",
   completed: "Completed",
   rejected: "Rejected",
@@ -2388,10 +2388,11 @@ function renderOrganization(section = "staff") {
   // which record, and copies of the whole workspace.
   if (section === "system") {
     const backups = state.backups;
-    const backupRows = (backups?.list || []).slice(0, 10).map((entry) => `<tr><td><strong>${escapeHtml(entry.name)}</strong></td><td>${escapeHtml(entry.format === "json" ? "JSON snapshot" : "PostgreSQL dump")}</td><td>${(Number(entry.size || 0) / 1048576).toFixed(1)} MB</td><td>${formatDateTime(entry.created_at, true)}</td><td class="align-right"><div class="row-actions"><button class="btn btn-soft btn-small" data-action="download-backup" data-name="${escapeHtml(entry.name)}">Download</button><button class="btn btn-danger btn-small" data-action="delete-backup" data-name="${escapeHtml(entry.name)}">Delete</button></div></td></tr>`).join("");
+    const backupRows = (backups?.list || []).slice(0, 10).map((entry) => `<tr><td><strong>${escapeHtml(entry.name)}</strong>${entry.automatic ? ` ${badge("Automatic", "neutral")}` : ""}</td><td>${escapeHtml(entry.format === "json" ? "JSON snapshot" : "PostgreSQL dump")}</td><td>${(Number(entry.size || 0) / 1048576).toFixed(1)} MB</td><td>${formatDateTime(entry.created_at, true)}</td><td class="align-right"><div class="row-actions"><button class="btn btn-soft btn-small" data-action="download-backup" data-name="${escapeHtml(entry.name)}">Download</button><button class="btn btn-danger btn-small" data-action="delete-backup" data-name="${escapeHtml(entry.name)}">Delete</button></div></td></tr>`).join("");
     const fullActivity = (org.audit || []).slice(0, 50).map((entry) => `<tr><td>${escapeHtml(entry.user_name || "System")}</td><td>${escapeHtml(entry.action)}</td><td>${escapeHtml(entry.module)}${entry.record_id ? ` #${escapeHtml(String(entry.record_id))}` : ""}</td><td>${formatDate(entry.created_at, true)}</td></tr>`).join("");
     return `<div class="section-grid org-grid admin-pages">
       <section class="card glass"><div class="section-head"><div><h2 class="section-title">Backups</h2><div class="section-note">${backups?.error ? escapeHtml(backups.error) : `${(backups?.list || []).length} backup${(backups?.list || []).length === 1 ? "" : "s"} kept on the server${(backups?.list || []).length > 10 ? " · the 10 newest are listed" : ""} · make one before any big change`}</div></div><button class="btn btn-primary btn-small" data-action="backup-now">Create backup</button></div>
+        ${autoBackupNote(backups?.status)}
         ${backupRows ? `<div class="table-wrap"><table><thead><tr><th>File</th><th>Type</th><th>Size</th><th>Made</th><th class="align-right">Actions</th></tr></thead><tbody>${backupRows}</tbody></table></div>` : `<div class="empty">${backups ? "No backup yet." : "Loading…"}</div>`}
       </section>
       <section class="card glass"><div class="section-head"><div><h2 class="section-title">Activity log</h2><div class="section-note">The latest 50 recorded actions, newest first · read-only</div></div></div><div class="table-wrap"><table><thead><tr><th>User</th><th>Action</th><th>Module</th><th>When</th></tr></thead><tbody>${fullActivity || `<tr><td colspan="4" class="empty">No activity recorded</td></tr>`}</tbody></table></div></section>
@@ -2974,6 +2975,9 @@ function workspaceRole() {
   if (can("approve_management")) return "md";
   if (can("validate_finance") && canSeeFinancial()) return "finance";
   if (can("submit_contract") && !can("approve_legal") && canModule("contracts")) return "sales";
+  if ((can("approve_legal") || can("review_legal")) && canModule("contracts")) return "legal";
+  const roleNames = (state.organization.me?.user?.roles || []).map((role) => String(role.name || ""));
+  if (roleNames.some((name) => /customer service/i.test(name))) return "cs";
   return null;
 }
 
@@ -2982,11 +2986,17 @@ function workspaceRole() {
 const PAGE_TIPS = {
   finance: {
     debts: "To record money: press “Record payment”, choose the contract, type the reference and attach the receipt or paste the SMS. Then approve it. The installment is marked paid by itself.",
-    contracts: "Your step: open a contract marked “Legal approved”, check the price and plan, then press “Validate financial terms”. The payment plan is created for you.",
+    contracts: "Your step: open a contract marked “Under Finance review”, check the price and plan, then press “Validate financial terms”. The payment plan is created for you.",
   },
   sales: {
-    contracts: "Your step: press “Generate contract”, pick the property and customer, then press “Submit to Legal”. Anything Legal sends back shows as “Changes requested”.",
+    contracts: "Your step: press “Generate contract”, pick the property and customer, then press “Submit to Legal”. Anything Legal sends back shows as “Under Sales review · changes requested”.",
     requests: "Your step: give each new request to Customer Service. When they report back, accept it and the customer becomes a client.",
+  },
+  legal: {
+    contracts: "Your step: press the button on each contract. Submitted → Start legal review → Legal approval. After Finance validates, send it to the MD; after the MD approves, send it to the customer and record the signature.",
+  },
+  cs: {
+    assignments: "Your step: open each task, contact the customer the way they asked (phone, WhatsApp or email), write what was agreed and press Submit.",
   },
   md: {
     contracts: "Your step: open a contract marked “Under MD review”, read it, then press “Management approval” or reject it with a reason.",
@@ -3002,6 +3012,8 @@ const WORK_FLOW = {
   finance: ["Customer pays", "You record it (reference + proof)", "Approve it", "Give the MKUYU receipt", "Follow up the next due date"],
   sales: ["Website request arrives", "Customer Service calls the customer", "You prepare the contract", "Legal → Finance → MD", "Customer signs"],
   md: ["Sales prepares", "Legal reviews", "Finance checks the money", "You approve", "Legal releases to the customer"],
+  legal: ["Sales submits", "You review and approve", "Finance checks the money", "You send it to the MD", "You release it and record the signature"],
+  cs: ["Sales hands you a request", "You contact the customer", "You write a short report", "Sales accepts it", "The customer becomes a client"],
 };
 
 function workTodayPanel(role) {
@@ -3014,7 +3026,7 @@ function workTodayPanel(role) {
   const toView = (view, filters = {}, scroll = "") => ({ view, filters, scroll });
   if (role === "finance") {
     job(n(state.organization.me?.sole_finance_approver ? summary.payments_pending?.count : summary.payments_to_approve), "Payments waiting for your approval", "Check the reference and the proof, then approve. Only approved money counts.", "Approve payments", toView("debts", { paymentStatus: "pending" }, "#payments-section"), "gold");
-    job(n(work.contracts_finance_review), "Contracts to check", "Legal approved them. Check the price and payment plan, then press “Validate financial terms”.", "Check contracts", toView("contracts", { status: "legal_approved" }));
+    job(n(work.contracts_finance_review), "Contracts to check", "Marked Under Finance review. Check the price and payment plan, then press “Validate financial terms”.", "Check contracts", toView("contracts", { status: "legal_approved" }));
     job(null, "Money received?", "Record it with the transaction reference and the receipt or SMS.", "Record a payment", { action: "new-payment" });
     job(n(summary.debts_due_week?.count), "Due in the next 7 days", "Call these customers before the due date.", "See who to call", toView("debts", { debtStatus: "upcoming" }), "amber");
     job(n(summary.debts_overdue?.count), "Overdue installments", "Follow these up today.", "See overdue", toView("debts", { debtStatus: "overdue" }), "red");
@@ -3036,6 +3048,20 @@ function workTodayPanel(role) {
       job(n(summary.debts_overdue?.count), "Overdue installments", summary.debts_overdue?.total ? `${money(summary.debts_overdue.total)} past due. Finance follows up.` : "Finance follows these up.", "See overdue", toView("debts", { debtStatus: "overdue" }), "red");
     }
     if (canModule("reports")) job(null, "How is the business doing?", "Sales, money received and contracts, for any period.", "Open reports", toView("reports"));
+  }
+  if (role === "legal") {
+    job(n(work.contracts_submitted), "New contracts from Sales", "Open each one and press “Start legal review”.", "Start reviews", toView("contracts", { status: "submitted" }), "gold");
+    job(n(work.contracts_under_review), "Contracts you are reviewing", "Check the clauses and the parties, then press “Legal approval” or send it back with a reason.", "Finish reviews", toView("contracts", { status: "under_review" }));
+    job(n(work.contracts_to_md), "Finance has checked the money", "Press “Send for management approval”.", "Send to the MD", toView("contracts", { status: "legal_approved" }));
+    job(n(work.contracts_release), "The MD approved", "Press “Send to customer” so the customer can sign.", "Send to customers", toView("contracts", { status: "approved" }));
+    job(n(work.contracts_customer), "With the customer for signature", "When the customer has signed and the deposit is paid, press “Record customer signature”.", "Record signatures", toView("contracts", { status: "customer_pending" }), "amber");
+  }
+  if (role === "cs") {
+    const attention = state.attention || {};
+    job(n(attention.mine), "Customers to contact", "Sales gave you these. Call or message each customer the way they asked.", "Open my tasks", toView("assignments", { taskBox: "mine" }), "gold");
+    if (n(attention.review)) job(n(attention.review), "Reports to review", "Your team submitted these. Approve them or ask for changes.", "Review reports", toView("assignments", { taskBox: "needs_review" }));
+    if (canModule("appointments")) job(n(summary.appointments_scheduled), "Booked appointments", "Site visits and calls. Remind the customer the day before.", "See appointments", toView("appointments"));
+    if (canModule("clients")) job(null, "Customer details changed?", "Keep the phone number and email correct in the client register.", "Open clients", toView("clients"));
   }
   if (!jobs.length) return "";
   const waiting = jobs.filter((entry) => entry.count > 0).length;
@@ -4329,6 +4355,7 @@ function render() {
   }
   if (state.view === "assignments") {
     content.innerHTML = renderAssignments();
+    addPageTip();
     // Loaded on demand, like the duty catalogue. The guard stops a failed
     // request from retrying on every repaint.
     if (!state.tasks && !state.tasksRequested) loadTasks().then(() => { if (state.view === "assignments") render(); });
@@ -5461,12 +5488,24 @@ async function createBackup() {
   } catch (error) { showToast(error.message || "Backup failed."); }
 }
 
+/** One line on the automatic daily backup: on/off, the last one, and the copy folder. */
+function autoBackupNote(status) {
+  if (!status) return "";
+  if (!status.enabled) return `<div class="page-tip">${icon("alert")}<span>Automatic daily backup is OFF. Remove AUTO_BACKUP=0 from the server settings to turn it on.</span></div>`;
+  const last = status.last_automatic ? `Last one: ${formatDateTime(status.last_automatic.created_at, true)}.` : "The first one is made a few minutes after the server starts.";
+  const copy = status.copy_dir_set
+    ? "Each backup and the uploaded files are also copied to the backup folder set in BACKUP_COPY_DIR."
+    : "Tip: set BACKUP_COPY_DIR to a Google Drive, OneDrive or USB folder so a copy is kept outside this computer.";
+  return `<div class="page-tip">${icon("check")}<span>Automatic daily backup is ON and keeps the last ${Number(status.keep || 14)} days. ${last} ${copy}${status.last_error ? ` Last attempt failed: ${escapeHtml(status.last_error)}` : ""}</span></div>`;
+}
+
 /** The backups kept on the server (System & backups page, administrator only). */
 async function loadBackups() {
   if (!isAdmin()) return;
   state.backupsRequested = true;
   try {
-    state.backups = { list: await api("/backups") };
+    const [list, status] = await Promise.all([api("/backups"), api("/backups/status").catch(() => null)]);
+    state.backups = { list, status };
   } catch (error) {
     state.backups = { list: [], error: error.message || "Unable to load backups." };
   }
@@ -6059,7 +6098,9 @@ document.addEventListener("click", async (event) => {
     if (allowedViewFor(target.dataset.view) !== false) {
       let filters = {};
       try { filters = JSON.parse(target.dataset.filters || "{}"); } catch { filters = {}; }
-      state.filters = { ...state.filters, status: "", debtStatus: "", paymentStatus: "", ...filters };
+      const { taskBox, ...listFilters } = filters;
+      state.filters = { ...state.filters, status: "", debtStatus: "", paymentStatus: "", ...listFilters };
+      if (taskBox) { state.taskBox = taskBox; state.tasks = null; state.tasksRequested = false; }
       state.view = target.dataset.view;
       updateNavigation();
       render();
