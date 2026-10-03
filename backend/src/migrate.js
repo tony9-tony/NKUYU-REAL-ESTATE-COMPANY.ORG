@@ -537,6 +537,13 @@ export async function runMigrations({ seedDemo = process.env.NODE_ENV !== "produ
   // Administrator-approved password reset: while the window is open the staff
   // member sets a new password from "Forgot password?" on the sign-in screen.
   await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMPTZ");
+  // The signed contract made or signed outside the system (a scan or PDF). It
+  // takes the place of the generated agreement as the contract's official copy;
+  // the generated one and every earlier signed copy stay in Documents.
+  await query("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS signed_document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL");
+  await query("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS signed_uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL");
+  await query("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS signed_uploaded_at TIMESTAMPTZ");
+  await query("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS signed_by_names TEXT");
   await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_by INTEGER REFERENCES users(id) ON DELETE SET NULL");
   // "Mark as done" on an appointment records who confirmed the meeting happened.
   await query("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS completed_by INTEGER REFERENCES users(id) ON DELETE SET NULL");

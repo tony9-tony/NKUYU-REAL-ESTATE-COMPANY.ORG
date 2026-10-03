@@ -8,14 +8,16 @@ const ENTITY = "contract";
 // than stored twice: callers get the pricing breakdown, and there is still only
 // one number in the database that defines what the contract is worth.
 const select = `SELECT c.*, c.value AS final_price, p.name AS project_name,cl.name AS linked_client_name,pr.name AS property_name,
-  lr.display_name AS legal_reviewer_name,fv.display_name AS finance_validator_name,ma.display_name AS management_approver_name
+  lr.display_name AS legal_reviewer_name,fv.display_name AS finance_validator_name,ma.display_name AS management_approver_name,su.display_name AS signed_uploaded_by_name,sd.original_filename AS signed_file_name
   FROM contracts c
   LEFT JOIN projects p ON p.id = c.project_id
   LEFT JOIN clients cl ON cl.id=c.client_id
   LEFT JOIN properties pr ON pr.id=c.property_id
   LEFT JOIN users lr ON lr.id=c.legal_reviewed_by
   LEFT JOIN users fv ON fv.id=c.finance_validated_by
-  LEFT JOIN users ma ON ma.id=c.management_approved_by`;
+  LEFT JOIN users ma ON ma.id=c.management_approved_by
+  LEFT JOIN users su ON su.id=c.signed_uploaded_by
+  LEFT JOIN documents sd ON sd.id=c.signed_document_id`;
 
 export const Contract = {
   // How many contracts sit at each point of the workflow, scoped exactly like the

@@ -1674,6 +1674,51 @@ router.get("/contracts/:id/preview", route(async (req, res) => {
   res.json({ contract_id: contract.id, document_id: document.id, title: document.title, original_filename: document.original_filename, contract_number: contract.contract_number, ...preview });
 }));
 
+// ---- Signed contract made outside the system --------------------------------
+// The system-generated agreement carries no signatures. When the contract was
+// signed on paper (or prepared outside the system), Legal or Sales uploads the
+// signed copy here and it becomes the contract's official copy. Nothing is
+// deleted: the generated agreement and any earlier signed copy stay in
+// Documents, and every replacement is in the audit log.
+const SIGNED_COPY_EXTENSIONS = new Set([".pdf", ".png", ".jpg", ".jpeg", ".webp", ".doc", ".docx"]);
+function requireSignedCopyRole(access) {
+  if (!(can(access, "approve_legal") || can(access, "submit_contract") || can(access, "approve_management"))) {
+    throw new HttpError(403, "only Legal, Sales or the Managing Director can attach the signed contract");
+  }
+}
+router.post("/contracts/:id/signed-document", uploadDocumentFile, route(async (req, res) => {
+  try {
+    requireSignedCopyRole(req.access);
+    const contract = requireRecord(await Contract.get(parseId(req.params.id)), "Contract");
+    if (["rejected", "cancelled"].includes(contract.status)) throw new HttpError(409, `this contract is ${contract.status}; a signed copy cannot be attached`);
+    const fileInfo = validateUploadedFile(req.file, SIGNED_COPY_EXTENSIONS);
+    const signedBy = optionalText(req.body?.signed_by, "signed_by", 300);
+    if (!signedBy) throw new HttpError(400, "signed_by is required: write who signed the contract (for example the customer and MKUYU's representative)");
+    const note = optionalText(req.body?.notes, "notes", 1000);
+    const created = await Document.create({
+      project_id: contract.project_id || null, contract_id: contract.id, client_id: contract.client_id || null,
+      title: `${contract.contract_number || `Contract #${contract.id}`} · Signed copy`, category: "agreement", status: "approved",
+      file_reference: null, notes: [`Signed by: ${signedBy}`, note].filter(Boolean).join("\n"),
+      original_filename: fileInfo.displayName, stored_name: fileInfo.storedName, file_size: fileInfo.size, mime_type: fileInfo.mimeType,
+      uploaded_at: new Date().toISOString(),
+    });
+    const previous = contract.signed_document_id || null;
+    await query("UPDATE contracts SET signed_document_id=$1, signed_uploaded_by=$2, signed_uploaded_at=NOW(), signed_by_names=$3 WHERE id=$4", [created.id, req.user.id, signedBy, contract.id]);
+    await audit(req, previous ? "signed_contract_replaced" : "signed_contract_uploaded", "contract", contract.id, { document_id: created.id, replaced_document_id: previous, signed_by: signedBy, file: fileInfo.displayName });
+    res.status(201).json(contractResponse(await Contract.get(contract.id), req));
+  } catch (error) {
+    cleanupUploadedFile(req.file);
+    throw error;
+  }
+}));
+router.get("/contracts/:id/signed-document", route(async (req, res) => {
+  const contract = requireRecord(await Contract.get(parseId(req.params.id)), "Contract");
+  if (!contract.signed_document_id) throw new HttpError(404, "No signed copy has been attached to this contract");
+  const document = requireRecord(await queryOne("SELECT * FROM documents WHERE id=$1", [contract.signed_document_id]), "Signed copy");
+  const fullPath = resolveStoredFile(documentUploadsDir, document.stored_name);
+  if (!fullPath) throw new HttpError(404, "The signed copy file is missing");
+  return sendStoredFile(res, fullPath, document.mime_type, document.original_filename || document.stored_name, req.query.download === "1");
+}));
 router.get("/contract-placeholders", route(async (req, res) => { res.json(CONTRACT_PLACEHOLDERS); }));
 
 router.post("/contracts", route(async (req, res) => {

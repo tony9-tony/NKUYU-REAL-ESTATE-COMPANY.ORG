@@ -2185,3 +2185,7 @@ label.btn { cursor: pointer; }
 /* Contract account tables: keep dates and amounts on one line. */
 #contract-account td, #contract-account th { white-space: nowrap; }
 #contract-account td:nth-child(4) .cell-main, #contract-account .cell-main { white-space: normal; }
+
+/* Contracts with a signed copy attached. */
+.signed-note { display: inline-flex; align-items: center; gap: 4px; color: var(--success); font-weight: 600; }
+.signed-note .icon { width: 13px; height: 13px; }

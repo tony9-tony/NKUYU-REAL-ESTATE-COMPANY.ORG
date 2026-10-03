@@ -137,6 +137,10 @@ Every contract carries a **position** (`GET /contracts` returns it): *Under Sale
 - **Cash or installments** is chosen when the contract is prepared. Rent price = monthly rent × months.
 - When Finance validates, the payment plan (deposit + installments) is created from the contract terms. The customer signature can only be recorded after the deposit is paid and approved.
 
+## Signed contracts made outside the system
+
+The agreement the system generates has no signatures. When a contract is signed on paper, or was prepared outside the system, Legal, Sales or the MD opens the contract and presses **Replace with signed contract**, attaches the scan, photo or PDF and writes who signed it. That file becomes the contract's official copy (**Open signed contract**). Nothing is deleted: the generated agreement and any earlier signed copy stay in Documents, and every upload or replacement is in the audit log. Endpoints: `POST` / `GET /contracts/:id/signed-document`.
+
 ## Payments
 
 There is no bank/mobile-money API: Finance records every payment by hand, with proof.

@@ -259,6 +259,34 @@ try {
   check(Number((await query("SELECT COUNT(*) FROM audit_logs WHERE action IN ('password_reset_opened','password_set_after_reset') AND record_id=$1", [String(csId)])).rows[0].count) === 2, "both steps are in the audit log");
   await query("UPDATE users SET password_reset_expires_at=NOW() - INTERVAL '1 minute' WHERE id=$1", [csId]);
   check((await call("/auth/forgot-password", { method: "POST", body: { email: forgetful } })).body.reset_ready === false, "an expired reset no longer opens the form");
+
+  console.log("\n=== CHECK 14: replace the generated contract with the signed copy ===");
+  const upload = async (token, contractId, fields, file = { name: "signed.pdf", body: "%PDF-1.4 signed copy" }) => {
+    const form = new FormData();
+    if (file) form.append("file", new Blob([file.body], { type: "application/pdf" }), file.name);
+    for (const [key, value] of Object.entries(fields)) form.append(key, value);
+    const response = await fetch(`${base}/contracts/${contractId}/signed-document`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
+    return { status: response.status, body: await response.json().catch(() => ({})) };
+  };
+  check((await upload(financeA, deal.body.id, { signed_by: "x" })).status === 403, "Finance cannot attach the signed contract");
+  check((await upload(legal, deal.body.id, {})).status === 400, "who signed it must be written");
+  check((await upload(legal, deal.body.id, { signed_by: "x" }, null)).status === 400, "a file is required");
+  check((await upload(legal, deal.body.id, { signed_by: "x" }, { name: "virus.exe", body: "MZ" })).status === 400, "only PDF, pictures or Word files are accepted");
+  const first = await upload(legal, deal.body.id, { signed_by: `Buyer FC ${tag} and Legal FC for MKUYU`, notes: "Signed at the office" });
+  check(first.status === 201 && Number(first.body.signed_document_id) > 0 && first.body.signed_by_names?.startsWith("Buyer FC"), "Legal attaches the signed contract; it becomes the official copy");
+  const generatedBefore = (await query("SELECT generated_document_id FROM contracts WHERE id=$1", [deal.body.id])).rows[0].generated_document_id;
+  const second = await upload(sales, deal.body.id, { signed_by: "Corrected scan" }, { name: "signed-v2.pdf", body: "%PDF-1.4 v2" });
+  check(second.status === 201 && Number(second.body.signed_document_id) !== Number(first.body.signed_document_id), "Sales can replace it with a better scan");
+  check(Number((await query("SELECT COUNT(*) FROM documents WHERE id=$1", [first.body.signed_document_id])).rows[0].count) === 1, "the earlier signed copy is kept in Documents");
+  check((await query("SELECT generated_document_id FROM contracts WHERE id=$1", [deal.body.id])).rows[0].generated_document_id === generatedBefore, "the system-generated agreement is not touched");
+  const fetched = await fetch(`${base}/contracts/${deal.body.id}/signed-document`, { headers: { Authorization: `Bearer ${md}` } });
+  check(fetched.status === 200 && (await fetched.text()).includes("v2"), "the official copy opens and is the newest one");
+  check((await call(`/documents/${second.body.signed_document_id}`, { method: "DELETE", token: md })).status === 409, "a signed copy cannot be deleted through Documents");
+  check(Number((await query("SELECT COUNT(*) FROM audit_logs WHERE action IN ('signed_contract_uploaded','signed_contract_replaced') AND record_id=$1", [String(deal.body.id)])).rows[0].count) === 2, "attaching and replacing are in the audit log");
+  const cancelledRes = await call("/contracts", { method: "POST", token: sales, body: { project_id: project.id, client_name: `Cancel FC ${tag}`, contract_type: "new", deal_type: "buy", value: 1000 } });
+  const cancelled = cancelledRes.body;
+  await query("UPDATE contracts SET status='cancelled' WHERE id=$1", [cancelled.id]);
+  check((await upload(sales, cancelled.id, { signed_by: "x" })).status === 409, "a cancelled contract takes no signed copy");
   void demoPasswordFor;
 } catch (error) {
   failures += 1;

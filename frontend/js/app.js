@@ -3054,7 +3054,7 @@ function workTodayPanel(role) {
     job(n(work.contracts_under_review), "Contracts you are reviewing", "Check the clauses and the parties, then press “Legal approval” or send it back with a reason.", "Finish reviews", toView("contracts", { status: "under_review" }));
     job(n(work.contracts_to_md), "Finance has checked the money", "Press “Send for management approval”.", "Send to the MD", toView("contracts", { status: "legal_approved" }));
     job(n(work.contracts_release), "The MD approved", "Press “Send to customer” so the customer can sign.", "Send to customers", toView("contracts", { status: "approved" }));
-    job(n(work.contracts_customer), "With the customer for signature", "When the customer has signed and the deposit is paid, press “Record customer signature”.", "Record signatures", toView("contracts", { status: "customer_pending" }), "amber");
+    job(n(work.contracts_customer), "With the customer for signature", "When the customer has signed and the deposit is paid, attach the signed contract (“Replace with signed contract”) and press “Record customer signature”.", "Record signatures", toView("contracts", { status: "customer_pending" }), "amber");
   }
   if (role === "cs") {
     const attention = state.attention || {};
@@ -3321,7 +3321,7 @@ function renderContracts() {
   // each see only their own steps.
   const workflowButton = (contract, entry, primary) => `<button class="btn ${primary ? "btn-primary" : "btn-soft"} btn-small" data-action="contract-transition" data-id="${contract.id}" data-transition="${escapeHtml(entry.action)}" title="${escapeHtml(entry.label)}">${escapeHtml(entry.label)}</button>`;
   const generatedDocumentAction = (contract) => contract.generated_document_id && canModule("documents")
-    ? `<button class="btn btn-soft btn-small" data-action="view-generated-contract" data-id="${contract.id}">Open contract</button>` : "";
+    ? `<button class="btn btn-soft btn-small" data-action="view-generated-contract" data-id="${contract.id}">${contract.signed_document_id ? "Open system version" : "Open contract"}</button>` : "";
   const rows = state.contracts.filter((contract) => (!filters.project || String(contract.project_id) === filters.project) && (!filters.type || contract.contract_type === filters.type) && (!filters.status || contract.status === filters.status)).map((contract) => {
     const actions = (contract.available_actions || []).filter(Boolean);
     const forward = actions.filter((entry) => isForwardContractStep(entry.action));
@@ -3333,7 +3333,9 @@ function renderContracts() {
     const stage = contractStageInfo(contract.status);
     const menu = rowMenu([
       ...secondary,
+      contract.signed_document_id ? `<button class="btn btn-soft btn-small" data-action="open-signed-contract" data-id="${contract.id}">Open signed contract</button>` : "",
       generatedDocumentAction(contract),
+      maySignedCopy(contract) ? `<button class="btn btn-small" data-action="signed-copy" data-id="${contract.id}">${contract.signed_document_id ? "Replace signed contract" : "Replace with signed contract"}</button>` : "",
       canModule("documents") && can("create") ? `<button class="btn btn-small" data-action="upload-contract-document" data-id="${contract.id}">Upload document</button>` : "",
       `<button class="btn btn-small" data-action="contract-history" data-id="${contract.id}">History</button>`,
       can("edit") && canAuthorContracts() ? `<button class="btn btn-small" data-action="edit-contract" data-id="${contract.id}">Edit details</button>` : "",
@@ -3342,7 +3344,7 @@ function renderContracts() {
     ]);
     return `<tr data-searchable>
       <td><button class="cell-link" data-action="view-contract" data-id="${contract.id}"><span class="cell-main">${escapeHtml(contract.client_name)}</span></button><span class="cell-sub">${escapeHtml(contract.contract_number || "No number yet")}${contract.project_name ? ` · ${escapeHtml(contract.project_name)}` : ""}</span></td>
-      <td>${contractStatusBadge(contract)}${contract.position ? contractPositionNote(contract) : (stage ? `<span class="cell-sub stage-note" title="Department currently holding the contract">Stage ${stage.number} of ${stage.total} · Held by ${escapeHtml(titleCase(stage.owner))}</span>` : "")}${needsPlan ? `<span class="cell-sub plan-missing">No payment plan yet</span>` : ""}${contract.legal_signed_by ? `<span class="cell-sub signed-note">${icon("check")}Signed by Legal</span>` : ""}</td>
+      <td>${contractStatusBadge(contract)}${contract.signed_document_id ? `<span class="cell-sub signed-note">${icon("check")}Signed copy attached</span>` : ""}${contract.position ? contractPositionNote(contract) : (stage ? `<span class="cell-sub stage-note" title="Department currently holding the contract">Stage ${stage.number} of ${stage.total} · Held by ${escapeHtml(titleCase(stage.owner))}</span>` : "")}${needsPlan ? `<span class="cell-sub plan-missing">No payment plan yet</span>` : ""}${contract.legal_signed_by ? `<span class="cell-sub signed-note">${icon("check")}Signed by Legal</span>` : ""}</td>
       <td>${contract.deal_type ? badge(dealTypeLabel(contract.deal_type), "open") : `<span class="muted cell-plain">Not recorded</span>`}<span class="cell-sub">${escapeHtml(humanize(contract.contract_type || ""))}</span></td>
       <td><span class="cell-main cell-plain">${formatDate(contract.start_date)}</span><span class="cell-sub">to ${formatDate(contract.end_date)}</span></td>
       <td class="amount">${money(contract.value)}${Number(contract.discount_pct || 0) > 0 ? `<span class="cell-sub">${numberValue(contract.discount_pct)}% discount</span>` : ""}</td>
@@ -5093,6 +5095,8 @@ function showToast(message) {
 async function handleFormSubmit(event) {
   event.preventDefault();
   const form = event.target;
+  // Forms with their own submit handler (the signed contract upload).
+  if (form.id === "signed-copy-form") return;
   const data = Object.fromEntries(new FormData(form));
   const type = modal.dataset.type;
   const id = form.dataset.id;
@@ -5758,6 +5762,60 @@ document.getElementById("primary-nav").addEventListener("click", (event) => {
  * no button was rendered. The modal is read-only — opening a contract from
  * Finance must not offer the edit controls the Contracts screen shows.
  */
+/** Legal, Sales and the MD may attach the signed copy (the server checks again). */
+function maySignedCopy(contract) {
+  if (!contract || ["rejected", "cancelled"].includes(contract.status)) return false;
+  return can("approve_legal") || can("submit_contract") || can("approve_management");
+}
+
+/** The contract's document: the signed copy when there is one, else the generated agreement. */
+function contractDocumentBlock(contract) {
+  const signed = contract.signed_document_id
+    ? `<div class="page-tip">${icon("check")}<span><strong>Signed contract attached</strong>${contract.signed_by_names ? ` · signed by ${escapeHtml(contract.signed_by_names)}` : ""}${contract.signed_uploaded_by_name ? ` · uploaded by ${escapeHtml(contract.signed_uploaded_by_name)}` : ""}${contract.signed_uploaded_at ? ` on ${formatDate(contract.signed_uploaded_at)}` : ""}. This is the official copy.</span></div>`
+    : `<div class="page-tip">${icon("alert")}<span>${contract.generated_document_id ? "The contract made by the system has no signatures." : "No contract document yet."} When the contract is signed, or if it was prepared outside the system, use “Replace with signed contract” to attach the signed copy.</span></div>`;
+  const buttons = [
+    contract.signed_document_id ? `<button type="button" class="btn btn-primary btn-small" data-action="open-signed-contract" data-id="${contract.id}">Open signed contract</button>` : "",
+    maySignedCopy(contract) ? `<button type="button" class="btn btn-soft btn-small" data-action="signed-copy" data-id="${contract.id}">${contract.signed_document_id ? "Replace signed contract" : "Replace with signed contract"}</button>` : "",
+  ].filter(Boolean).join("");
+  return `<div class="section"><div class="section-head"><div><h2 class="section-title">Contract document</h2></div>${buttons ? `<div class="row-actions">${buttons}</div>` : ""}</div>${signed}</div>`;
+}
+
+/** Upload form for the signed contract (scan, photo or PDF made outside the system). */
+function openSignedCopyForm(contractId) {
+  const contract = (state.contracts || []).find((item) => String(item.id) === String(contractId));
+  if (!contract) { showToast("That contract is not available to you."); return; }
+  modal.dataset.type = "signed-copy";
+  const replacing = Boolean(contract.signed_document_id);
+  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">${replacing ? "Replace signed contract" : "Replace with signed contract"}</h2><p class="modal-sub">${escapeHtml(contract.contract_number || `Contract #${contract.id}`)} · ${escapeHtml(contract.client_name || "")}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
+    <form id="signed-copy-form" class="form-grid" data-id="${contract.id}">
+      <div class="field full"><label for="signed-file">Signed contract file <span class="req">*</span></label><input id="signed-file" name="file" type="file" required accept=".pdf,.png,.jpg,.jpeg,.webp,.doc,.docx"><div class="field-help">A scan, a clear photo or a PDF of the signed contract, including contracts prepared outside the system.</div></div>
+      <div class="field full"><label for="signed-by">Signed by <span class="req">*</span></label><input id="signed-by" name="signed_by" required maxlength="300" placeholder="e.g. Johnny Anthony Frederick (buyer) and Fatuma Juma for MKUYU"></div>
+      <div class="field full"><label for="signed-notes">Notes</label><textarea id="signed-notes" name="notes" rows="2" maxlength="1000" placeholder="Optional, e.g. signed at the MKUYU office on 3 October"></textarea></div>
+      <div class="field full"><div class="field-help">${replacing ? "The current signed copy stays in Documents; the new file becomes the official copy." : "The contract made by the system stays in Documents; this signed copy becomes the official copy."} The change is recorded in the contract history.</div></div>
+    </form>
+    <div class="form-actions"><button type="button" class="btn" data-action="close-modal">Cancel</button><button type="submit" form="signed-copy-form" class="btn btn-primary">Save signed contract</button></div>`;
+  modalBackdrop.hidden = false;
+}
+
+document.addEventListener("submit", async (event) => {
+  if (event.target.id !== "signed-copy-form") return;
+  event.preventDefault();
+  const form = event.target;
+  const id = form.dataset.id;
+  const button = modal.querySelector('button[form="signed-copy-form"]');
+  if (button) button.disabled = true;
+  try {
+    const updated = await api(`/contracts/${id}/signed-document`, { method: "POST", form: true, body: new FormData(form) });
+    state.contracts = (state.contracts || []).map((item) => (String(item.id) === String(id) ? { ...item, ...updated } : item));
+    closeModal();
+    showToast("Signed contract saved. It is now the official copy.");
+    render();
+  } catch (error) {
+    showToast(error.message || "Unable to save the signed contract.");
+    if (button) button.disabled = false;
+  }
+});
+
 function viewContract(contractId) {
   if (!canModule("contracts")) { showToast("You do not have access to the contract register."); return; }
   const contract = state.contracts.find((item) => String(item.id) === String(contractId));
@@ -5787,6 +5845,7 @@ function viewContract(contractId) {
       ${Number(contract.discount_pct || 0) > 0 ? `<div class="field"><span class="muted">Original price</span><div class="amount">${money(contract.original_price)}</div></div><div class="field"><span class="muted">Discount</span><div class="amount">${escapeHtml(String(contract.discount_pct))}% (− ${money(contract.discount_amount)})</div></div><div class="field"><span class="muted">Final price</span><div class="amount">${money(contract.final_price ?? contract.value)}</div></div>` : ""}
       ${financial ? "" : `<div class="field"><span class="muted">Collected</span><div class="amount">${money(paidTotal)}</div></div>`}
     </div>
+    ${contractDocumentBlock(contract)}
     ${financial ? `<div id="contract-account" class="section"><p class="muted">Loading the contract account…</p></div>` : ""}
     ${!financial && installmentRows ? `<div class="section"><div class="section-head"><div><h2 class="section-title">Installments</h2><div class="section-note">Payment plan attached to this contract</div></div></div><div class="table-wrap"><table><thead><tr><th>Installment</th><th>Due</th><th>State</th><th class="align-right">Amount</th></tr></thead><tbody>${installmentRows}</tbody></table></div></div>` : ""}
     <div class="form-actions">
@@ -6015,6 +6074,8 @@ document.addEventListener("click", async (event) => {
     openModal("document", { prefill: true, contract_id: id, project_id: contract?.project_id, client_id: contract?.client_id, category: "agreement", title: contract ? `${contract.contract_number || "Contract"} · ` : "" });
   }
   if (action === "view-contract") viewContract(id);
+  if (action === "signed-copy") { closeModal(); openSignedCopyForm(id); }
+  if (action === "open-signed-contract") openFileInTab(`/contracts/${id}/signed-document`).catch((error) => showToast(error.message || "Unable to open the signed contract."));
   if (action === "edit-contract-from-view") {
     // Resolved by id: the contract being viewed may not be on the current page.
     closeModal();
