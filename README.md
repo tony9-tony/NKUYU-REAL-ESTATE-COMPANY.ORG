@@ -162,6 +162,16 @@ Without a reset from the administrator, saving the form only says "Contact your 
 
 Finance, Sales and the Managing Director open on a simple home: a short numbered list of the jobs waiting for them, one sentence each and one button that opens the job already filtered (for example *Payments waiting for your approval*). A strip under it shows how their work moves, and their main pages carry a one-line tip saying what their step is. The menus, permissions and screens are unchanged.
 
+## Backups
+
+The server makes **one automatic database backup a day** (a PostgreSQL dump, or a JSON snapshot of every table when `pg_dump` is not installed) in `data/backups`, named `system-auto-…`. The newest 14 automatic backups are kept; backups made by hand from **System & backups** are never removed automatically. Settings in `.env`:
+
+- `BACKUP_COPY_DIR=` a folder outside this computer's disk, for example a Google Drive or OneDrive synced folder or a USB drive. Every backup is copied there and the uploaded files (receipts, contracts, photos) are mirrored there.
+- `AUTO_BACKUP_KEEP=14` how many daily backups to keep.
+- `AUTO_BACKUP=0` turns automatic backups off.
+
+The System & backups page shows whether automatic backups are on and when the last one was made.
+
 ## Tests
 
 Tests never touch the live database: `test_support/guard.mjs` derives a separate test database from `.env` (override with `MKUYU_TEST_DB`).
