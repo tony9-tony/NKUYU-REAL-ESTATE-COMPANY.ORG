@@ -85,7 +85,10 @@ function toPublicProperty(row, photos) {
     },
     location: row.location,
     // A project is a category; the property carries its name.
-    project: row.project_id ? { slug: String(row.project_id), name: row.project_name } : null,
+    project: row.project_id ? { slug: String(row.project_id), name: row.project_name, kind: row.project_kind || "estate" } : null,
+    // A unit in a building: floor (0 = ground) and its unit number.
+    floor: row.floor === null || row.floor === undefined ? null : Number(row.floor),
+    unit: row.unit_number || null,
     bedrooms: Number(row.bedrooms) || 0,
     bathrooms: Number(row.bathrooms) || 0,
     area: Number(row.area) || 0,
@@ -99,7 +102,7 @@ function toPublicProperty(row, photos) {
 
 const propertySelect = `SELECT p.id, p.name, p.property_type, p.status, p.sale_status, p.rent_status, p.price, p.rent_price, p.rent_period,
     p.offer_rent, p.offer_buy, p.location, p.area, p.bedrooms, p.bathrooms, p.description, p.summary,
-    p.features, p.featured, p.project_id, pr.name AS project_name
+    p.features, p.featured, p.project_id, p.floor, p.unit_number, pr.name AS project_name, pr.kind AS project_kind
   FROM properties p LEFT JOIN projects pr ON pr.id = p.project_id`;
 
 // Listed = published and offered for at least one service. Sold and rented
@@ -140,35 +143,67 @@ router.get("/properties/:id", route(async (req, res) => {
   res.json(toPublicProperty(row, photos));
 }));
 
-// Projects are categories of properties FOR SALE: renting is about a single
-// property, so a project never appears on the Rent side. A project shows while
-// it has homes for sale on the website, with a cover photo from one of them.
+// A project shows while it has units open to a visitor: an estate or a
+// building whose units are offered to buy, to rent, or both. Its services are
+// the ones its open units are offered for, so a building with flats to rent
+// appears on the Rent side and one with flats for sale on the Buy side.
+const projectSelect = `SELECT pr.id, pr.name, pr.kind, pr.location AS project_location,
+    string_agg(DISTINCT p.location, ' · ') AS locations,
+    bool_or(p.offer_buy AND COALESCE(p.sale_status,'available') <> 'sold') AS has_buy,
+    bool_or(p.offer_rent AND COALESCE(p.rent_status,'available') <> 'rented') AS has_rent,
+    COUNT(*)::int AS unit_count,
+    COUNT(DISTINCT p.floor)::int AS floor_count,
+    array_agg(p.id ORDER BY p.featured DESC, p.id) AS property_ids
+  FROM properties p JOIN projects pr ON pr.id = p.project_id`;
+
+async function projectRows(req, extra = [], values = []) {
+  const conditions = [...LISTED, OPEN, "p.project_id IS NOT NULL", "pr.status = 'active'", ...extra];
+  return (await query(`${projectSelect} WHERE ${conditions.join(" AND ")} GROUP BY pr.id, pr.name, pr.kind, pr.location ORDER BY pr.name`, [await organizationId(), ...values])).rows;
+}
+
+function toPublicProject(row, photos) {
+  const services = [row.has_buy ? "buy" : null, row.has_rent ? "rent" : null].filter(Boolean);
+  const cover = row.property_ids.map((id) => (photos.get(id) || [])[0]).find(Boolean);
+  return {
+    slug: String(row.id),
+    name: row.name,
+    kind: row.kind || "estate",
+    location: row.project_location || row.locations || "",
+    summary: "",
+    status: "",
+    services,
+    units: row.unit_count,
+    floors: row.kind === "building" ? row.floor_count : 0,
+    photos: cover ? [{ ...cover, alt: row.name }] : [],
+  };
+}
+
 router.get("/projects", route(async (req, res) => {
   const filter = serviceFilter(req, res);
   if (filter === false) return;
   res.set("Cache-Control", "public, max-age=60");
-  if (req.query.service === "rent") return res.json([]);
-  const conditions = [...LISTED, OPEN, "p.offer_buy", "p.project_id IS NOT NULL", "pr.status = 'active'"];
-  const rows = (await query(
-    `SELECT pr.id, pr.name, string_agg(DISTINCT p.location, ' · ') AS locations, array_agg(p.id ORDER BY p.featured DESC, p.id) AS property_ids
-       FROM properties p JOIN projects pr ON pr.id = p.project_id
-      WHERE ${conditions.join(" AND ")}
-      GROUP BY pr.id, pr.name ORDER BY pr.name`,
-    [await organizationId()],
-  )).rows;
+  const rows = await projectRows(req);
   const photos = await photosFor(req, rows.flatMap((r) => r.property_ids));
-  res.json(rows.map((row) => {
-    const cover = row.property_ids.map((id) => (photos.get(id) || [])[0]).find(Boolean);
-    return {
-      slug: String(row.id),
-      name: row.name,
-      location: row.locations || "",
-      summary: "",
-      status: "",
-      services: ["buy"],
-      photos: cover ? [{ ...cover, alt: row.name }] : [],
-    };
-  }));
+  const projects = rows.map((row) => toPublicProject(row, photos));
+  res.json(req.query.service ? projects.filter((project) => project.services.includes(req.query.service)) : projects);
+}));
+
+// One project with all its published units (sold and rented ones too, marked),
+// ordered by floor and unit number so the website can show a building floor
+// by floor.
+router.get("/projects/:id", route(async (req, res) => {
+  const id = parseId(req.params.id);
+  if (!id) return notFound(res, "Project");
+  const [row] = await projectRows(req, ["pr.id = $2"], [id]);
+  if (!row) return notFound(res, "Project");
+  const units = (await query(
+    `${propertySelect} WHERE ${[...LISTED, "p.project_id = $2"].join(" AND ")}
+      ORDER BY p.floor NULLS LAST, length(COALESCE(p.unit_number, '')), p.unit_number, p.id`,
+    [await organizationId(), id],
+  )).rows;
+  const photos = await photosFor(req, [...new Set([...row.property_ids, ...units.map((u) => u.id)])]);
+  res.set("Cache-Control", "public, max-age=60");
+  res.json({ ...toPublicProject(row, photos), properties: units.map((unit) => toPublicProperty(unit, photos)) });
 }));
 
 /** A picture is public only while its property is published. */
@@ -213,6 +248,13 @@ function tooMany(keys, limit, windowMs = 60 * 60 * 1000) {
   return blocked;
 }
 
+/** "Unit 304 · Floor 3 · Mkuyu Tower" for a unit in a building, so Sales sees which unit. */
+function unitLine(property) {
+  if (!property.unit_number && (property.floor === null || property.floor === undefined)) return "";
+  const floor = property.floor === null || property.floor === undefined ? "" : Number(property.floor) === 0 ? "Ground floor" : `Floor ${property.floor}`;
+  return [property.unit_number ? `Unit ${property.unit_number}` : "", floor, property.project_name || ""].filter(Boolean).join(" · ");
+}
+
 /** Validates the visitor's details; returns { value } or { error }. */
 function contactDetails(body) {
   const name = typeof body.name === "string" ? body.name.trim() : "";
@@ -251,7 +293,7 @@ router.post("/requests", route(async (req, res) => {
   const propertyId = parseId(body.property);
   const org = await organizationId();
   const property = propertyId && await queryOne(
-    "SELECT id, name, status, sale_status, rent_status, offer_rent, offer_buy FROM properties WHERE id = $1 AND organization_id = $2 AND public_listing AND public_listing_status = 'approved'",
+    "SELECT p.id, p.name, p.status, p.sale_status, p.rent_status, p.offer_rent, p.offer_buy, p.floor, p.unit_number, pr.name AS project_name FROM properties p LEFT JOIN projects pr ON pr.id = p.project_id WHERE p.id = $1 AND p.organization_id = $2 AND p.public_listing AND p.public_listing_status = 'approved'",
     [propertyId, org],
   );
   if (!property) return notFound(res, "Property");
@@ -265,7 +307,7 @@ router.post("/requests", route(async (req, res) => {
   const lead = await createLead(org, {
     ...details.value,
     source: "website",
-    notes: [`Website request to ${service} "${property.name}".`, details.value.message].filter(Boolean).join("\n\n"),
+    notes: [`Website request to ${service} "${property.name}".`, unitLine(property), details.value.message].filter(Boolean).join("\n\n"),
     budget,
     service,
     property_id: property.id,
@@ -362,7 +404,7 @@ async function publishedForAssistant(req) {
   const rows = (await query(`${propertySelect} WHERE ${[...LISTED, OPEN].join(" AND ")} ORDER BY p.featured DESC, p.created_at DESC, p.id DESC LIMIT 30`, [org])).rows;
   const projects = (await query(
     `SELECT pr.name, string_agg(DISTINCT p.location, ' · ') AS location FROM properties p JOIN projects pr ON pr.id = p.project_id
-      WHERE ${[...LISTED, OPEN, "p.offer_buy", "pr.status = 'active'"].join(" AND ")} GROUP BY pr.name ORDER BY pr.name`, [org])).rows;
+      WHERE ${[...LISTED, OPEN, "pr.status = 'active'"].join(" AND ")} GROUP BY pr.name ORDER BY pr.name`, [org])).rows;
   const text = listingLines(rows.map((row) => toPublicProperty(row, new Map())), projects);
   listingCache = { text, at: Date.now() };
   return text;

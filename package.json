@@ -38,7 +38,8 @@
     "test": "npm run test:unit && npm run test:access && npm run test:frontend && npm run test:e2e",
     "test:backup": "node --import ./test_support/guard.mjs backup_test.mjs",
     "test:mail": "node --import ./test_support/guard.mjs mail_test.mjs",
-    "test:assistant": "node --import ./test_support/guard.mjs assistant_test.mjs"
+    "test:assistant": "node --import ./test_support/guard.mjs assistant_test.mjs",
+    "test:buildings": "node --import ./test_support/guard.mjs building_test.mjs"
   },
   "engines": {
     "node": ">=20"

@@ -559,6 +559,17 @@ export async function runMigrations({ seedDemo = process.env.NODE_ENV !== "produ
     status TEXT NOT NULL, error TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
   await query("CREATE INDEX IF NOT EXISTS email_log_debt_idx ON email_log (kind, debt_id)");
   await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_by INTEGER REFERENCES users(id) ON DELETE SET NULL");
+  // Buildings: a project can be an estate (separate homes or plots) or one
+  // building with floors. Each unit records its floor and the unit number the
+  // staff gives it; a number is used once per project. A unit is offered to
+  // rent, to buy, or both, like any property.
+  await query("ALTER TABLE projects ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'estate'");
+  await query("ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_kind_check");
+  await query("ALTER TABLE projects ADD CONSTRAINT projects_kind_check CHECK (kind IN ('estate','building'))");
+  await query("ALTER TABLE projects ADD COLUMN IF NOT EXISTS location TEXT");
+  await query("ALTER TABLE properties ADD COLUMN IF NOT EXISTS floor INTEGER");
+  await query("ALTER TABLE properties ADD COLUMN IF NOT EXISTS unit_number TEXT");
+  await query("CREATE UNIQUE INDEX IF NOT EXISTS idx_properties_project_unit ON properties (project_id, lower(unit_number)) WHERE project_id IS NOT NULL AND unit_number IS NOT NULL");
   // "Mark as done" on an appointment records who confirmed the meeting happened.
   await query("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS completed_by INTEGER REFERENCES users(id) ON DELETE SET NULL");
   await query("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ");

@@ -78,6 +78,7 @@ const money = (n) => `TSh ${Math.round(Number(n) || 0).toLocaleString("en-US")}`
 export function listingLines(properties = [], projects = []) {
   const homes = properties.slice(0, 30).map((p) => {
     const parts = [p.title, p.type, p.location];
+    if (p.unit) parts.push(`unit ${p.unit}${p.floor !== null && p.floor !== undefined ? `, floor ${p.floor === 0 ? "ground" : p.floor}` : ""}`);
     if (p.bedrooms) parts.push(`${p.bedrooms} bedrooms`);
     if (p.availability?.buy) parts.push(`to buy: ${p.price?.sale ? money(p.price.sale) : "price on request"} (${p.availability.buy})`);
     if (p.availability?.rent) parts.push(`to rent: ${p.price?.rent ? `${money(p.price.rent.amount)} per ${p.price.rent.period}` : "price on request"} (${p.availability.rent})`);

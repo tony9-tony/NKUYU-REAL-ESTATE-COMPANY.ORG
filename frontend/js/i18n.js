@@ -1847,11 +1847,25 @@
 "e.g. Property Management": "k.m. Usimamizi wa Mali",
 "Your step: press the button on each contract. Submitted → Start legal review → Legal approval. After Finance validates, send it to the MD; after the MD approves, send it to the customer and record the signature.": "Hatua yako: bonyeza kitufe kwenye kila mkataba. Imewasilishwa → Anza mapitio ya kisheria → Idhini ya Legal. Finance wakishahakiki, utume kwa MD; MD akishaidhinisha, mtumie mteja na urekodi sahihi.",
 "Settings": "Mipangilio",
-"Staff & Admin access only": "Wafanyakazi na Wasimamizi pekee"
+"Staff & Admin access only": "Wafanyakazi na Wasimamizi pekee",
+"Floor": "Ghorofa",
+"Unit number": "Namba ya chumba (unit)",
+"0 is the ground floor.": "0 ni ghorofa ya chini.",
+"Used once in this project.": "Inatumika mara moja tu kwenye project hii.",
+"Kind of project": "Aina ya project",
+"Estate · separate homes or plots": "Estate · nyumba au viwanja tofauti",
+"Building · floors and numbered units": "Jengo · ghorofa na vyumba vyenye namba",
+"Units in either kind can be offered to rent, to buy, or both.": "Units za aina zote zinaweza kupangishwa, kuuzwa, au vyote viwili.",
+"Building": "Jengo",
+"Estate": "Estate",
+"Ground floor": "Ghorofa ya chini"
 };
 
   // Text that carries a value (a name, a number, a date) is matched by pattern.
   const PATTERNS = [
+    [/^Floor (-?\d+)$/, "Ghorofa $1"],
+    [/^Unit (.+)$/, "Unit $1"],
+    [/^Created (\d{1,2} [A-Z][a-z]+ \d{4})$/, "Imeundwa $1"],
     [/^Message for Customer Service \((\d+)\)$/, "Ujumbe kwa Huduma kwa Wateja ($1)"],
     [/^Signed by: (.+) \(buyer\) and (.+) for MKUYU$/, "Imesainiwa na: $1 (mnunuzi) na $2 kwa niaba ya MKUYU"],
     [/^Signed by: (.+) \(tenant\) and (.+) for MKUYU$/, "Imesainiwa na: $1 (mpangaji) na $2 kwa niaba ya MKUYU"],
@@ -1914,7 +1928,11 @@
     // "For sale · Available": translate each part that is known.
     if (text.includes(" · ")) {
       const parts = text.split(" · ");
-      const done = parts.map((part) => (typeof SW[part] === "string" ? SW[part] : part));
+      const done = parts.map((part) => {
+        if (typeof SW[part] === "string") return SW[part];
+        const rule = PATTERNS.find(([pattern]) => pattern.test(part));
+        return rule ? part.replace(rule[0], rule[1]) : part;
+      });
       if (done.some((part, index) => part !== parts[index])) return done.join(" · ");
     }
     return null;

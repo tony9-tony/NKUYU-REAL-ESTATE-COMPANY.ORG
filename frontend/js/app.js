@@ -3320,7 +3320,7 @@ function renderProjects() {
     const edit = canChange("projects", "edit") ? `<button class="btn btn-small" data-action="edit-project" data-id="${project.id}">Edit</button>` : "";
     const remove = canChange("projects", "delete") ? `<button class="btn btn-small btn-danger-ghost" data-action="delete-project" data-id="${project.id}" title="Delete project">Delete project</button>` : "";
     return `<article class="project-card" data-searchable>
-      <div class="project-card-head"><span class="project-icon">${icon("building")}</span><div class="project-title"><strong>${escapeHtml(project.name)}</strong><span>Created ${formatDate(project.created_at)}</span></div>${badge(project.status)}</div>
+      <div class="project-card-head"><span class="project-icon">${icon("building")}</span><div class="project-title"><strong>${escapeHtml(project.name)}</strong><span>${project.kind === "building" ? "Building" : "Estate"}${project.location ? ` · ${escapeHtml(project.location)}` : ""} · Created ${formatDate(project.created_at)}</span></div>${badge(project.status)}</div>
       <dl class="project-stats">
         <div><dt>Properties</dt><dd>${properties}</dd></div>
         <div><dt>Clients</dt><dd>${clients}</dd></div>
@@ -3720,7 +3720,7 @@ function renderProperties() {
           <div class="property-name" title="${escapeHtml(property.name)}">${escapeHtml(property.name)}</div>
           <span class="property-number">${number}</span>
         </div>
-        <div class="property-sub">${escapeHtml(property.project_name || "No project")} · ${escapeHtml(humanize(property.property_type))}</div>
+        <div class="property-sub">${escapeHtml(property.project_name || "No project")}${unitLabel(property) ? ` · ${escapeHtml(unitLabel(property))}` : ""} · ${escapeHtml(humanize(property.property_type))}</div>
         ${property.location ? `<div class="property-location">${icon("pin")}<span>${escapeHtml(property.location)}</span></div>` : ""}
         ${facts.length ? `<div class="property-facts">${facts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}</div>` : ""}
       </div>
@@ -4800,7 +4800,31 @@ function propertyTypeInfo(type) {
   return PROPERTY_TYPE_INFO[type] || PROPERTY_TYPE_INFO.house;
 }
 /** Shows bedrooms/bathrooms only for property types that have them. */
+/** True when the project is a building (floors and numbered units). */
+function projectIsBuilding(projectId) {
+  return Boolean(projectId) && state.projects.some((project) => String(project.id) === String(projectId) && project.kind === "building");
+}
+
+/** "Floor 3 · Unit 304" for a unit in a building, or "". */
+function unitLabel(property) {
+  const parts = [];
+  if (property?.floor !== null && property?.floor !== undefined && property?.floor !== "") parts.push(Number(property.floor) === 0 ? "Ground floor" : `Floor ${property.floor}`);
+  if (property?.unit_number) parts.push(`Unit ${property.unit_number}`);
+  return parts.join(" · ");
+}
+
 function wirePropertyTypeFields(container) {
+  const project = container.querySelector("#field-project");
+  if (project && container.querySelector("[data-unit-field]")) {
+    project.addEventListener("change", () => {
+      const show = projectIsBuilding(project.value) || Boolean(container.querySelector("#field-unit-number")?.value);
+      container.querySelectorAll("[data-unit-field]").forEach((field) => { field.hidden = !show; });
+      // A unit takes its building's address unless one is already typed.
+      const chosen = state.projects.find((entry) => String(entry.id) === String(project.value));
+      const location = container.querySelector("#field-location");
+      if (chosen?.location && location && !location.value.trim()) location.value = chosen.location;
+    });
+  }
   const select = container.querySelector("#field-property-type");
   if (!select) return;
   select.addEventListener("change", () => {
@@ -4823,7 +4847,7 @@ function openModal(type, record = null) {
   if (type === "project") {
     title = record ? "Edit project" : "New project";
     subtitle = record ? "Update this development." : "Create a development portfolio.";
-    body = `<div class="form-grid"><div class="field full"><label for="field-name">Project name</label><input id="field-name" name="name" required maxlength="120" value="${escapeHtml(record?.name || "")}" placeholder="e.g. Riverside Heights"></div><div class="field"><label for="field-status">Status</label><select id="field-status" name="status"><option value="active" ${record?.status !== "archived" ? "selected" : ""}>Active</option><option value="archived" ${record?.status === "archived" ? "selected" : ""}>Archived</option></select></div></div>`;
+    body = `<div class="form-grid"><div class="field full"><label for="field-name">Project name</label><input id="field-name" name="name" required maxlength="120" value="${escapeHtml(record?.name || "")}" placeholder="e.g. Riverside Heights"></div><div class="field"><label for="field-status">Status</label><select id="field-status" name="status"><option value="active" ${record?.status !== "archived" ? "selected" : ""}>Active</option><option value="archived" ${record?.status === "archived" ? "selected" : ""}>Archived</option></select></div><div class="field"><label for="field-project-kind">Kind of project</label><select id="field-project-kind" name="kind"><option value="estate" ${record?.kind !== "building" ? "selected" : ""}>Estate · separate homes or plots</option><option value="building" ${record?.kind === "building" ? "selected" : ""}>Building · floors and numbered units</option></select><div class="field-help">Units in either kind can be offered to rent, to buy, or both.</div></div><div class="field full"><label for="field-project-location">Location <span class="muted">(optional)</span></label><input id="field-project-location" name="location" maxlength="160" value="${escapeHtml(record?.location || "")}" placeholder="e.g. Kigamboni, Dar es Salaam"></div></div>`;
   }
   if (type === "contract") {
     title = record ? "Edit contract" : "New contract";
@@ -4909,6 +4933,8 @@ function openModal(type, record = null) {
       ${formSection("Property details")}
       <div class="field full"><label for="field-name">Property name</label><input id="field-name" name="name" required maxlength="120" value="${escapeHtml(record?.name || "")}" placeholder="e.g. Signature Residence · Phase 1"></div>
       <div class="field full"><label for="field-project">Project</label><select id="field-project" name="project_id"><option value="">Select project</option>${projectOptions(record?.project_id)}</select></div>
+      <div class="field" data-unit-field${projectIsBuilding(record?.project_id) || record?.unit_number ? "" : " hidden"}><label for="field-floor">Floor</label><input id="field-floor" name="floor" type="number" min="-5" max="200" step="1" value="${escapeHtml(record?.floor ?? "")}" placeholder="e.g. 3"><div class="field-help">0 is the ground floor.</div></div>
+      <div class="field" data-unit-field${projectIsBuilding(record?.project_id) || record?.unit_number ? "" : " hidden"}><label for="field-unit-number">Unit number</label><input id="field-unit-number" name="unit_number" maxlength="20" value="${escapeHtml(record?.unit_number || "")}" placeholder="e.g. 304"><div class="field-help">Used once in this project.</div></div>
       <div class="field"><label for="field-location">Location</label><input id="field-location" name="location" required maxlength="120" value="${escapeHtml(record?.location || "")}" placeholder="City or area"></div>
       <div class="field"><label for="field-property-type">Type</label><select id="field-property-type" name="property_type">${PROPERTY_TYPES.map(([value, label]) => `<option value="${value}" ${(record?.property_type || "land") === value ? "selected" : ""}>${label}</option>`).join("")}</select><div class="field-help" data-type-help>${escapeHtml(propertyTypeInfo(record?.property_type || "land").help)}</div></div>
       <div class="field"><label for="field-property-status">Status</label><select id="field-property-status" name="status"><option value="available" ${record?.status === "available" ? "selected" : ""}>Available</option><option value="reserved" ${record?.status === "reserved" ? "selected" : ""}>Reserved</option><option value="sold" ${record?.status === "sold" ? "selected" : ""}>Sold</option><option value="leased" ${record?.status === "leased" ? "selected" : ""}>Leased</option></select></div>
@@ -5306,6 +5332,8 @@ async function handleFormSubmit(event) {
       showToast(id ? "Debt updated." : "Debt created.");
     } else if (type === "property") {
       data.project_id = data.project_id ? Number(data.project_id) : null;
+      data.floor = data.floor === "" || data.floor === undefined ? null : Number(data.floor);
+      data.unit_number = String(data.unit_number || "").trim() || null;
       data.price = numberValue(data.price);
       data.area = numberValue(data.area);
       data.bedrooms = numberValue(data.bedrooms, 0);

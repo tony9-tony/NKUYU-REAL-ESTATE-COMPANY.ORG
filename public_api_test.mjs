@@ -90,9 +90,9 @@ try {
   console.log("\n=== projects are categories derived from their homes ===");
   const projects = (await call("/public/projects", { auth: false })).body;
   const publicProject = projects.find((p) => p.slug === String(project.body.id));
-  // Projects are for sale only: renting is about a single property.
-  check(Boolean(publicProject) && JSON.stringify(publicProject.services) === JSON.stringify(["buy"]), "the project appears once it has a home for sale, as a sale project");
-  check((await call("/public/projects?service=rent", { auth: false })).body.length === 0, "no project is listed for rent");
+  // A project offers what its open homes offer: this home is to rent and to buy.
+  check(Boolean(publicProject) && JSON.stringify(publicProject.services) === JSON.stringify(["buy", "rent"]), "the project appears with the services its homes are offered for");
+  check((await call("/public/projects?service=rent", { auth: false })).body.some((p) => p.slug === String(project.body.id)), "a project with a home to rent is listed for rent");
   check(publicProject?.location === "Dar es Salaam" && publicProject?.photos?.length === 1, "location and cover photo come from its homes");
   check((await call("/projects/1/images", { auth: true })).status === 404, "projects have no photo endpoints of their own");
 

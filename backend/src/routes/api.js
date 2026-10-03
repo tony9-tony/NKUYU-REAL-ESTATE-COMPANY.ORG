@@ -200,10 +200,15 @@ function validEmail(value, field = "email") {
   return value.trim();
 }
 
+const projectKinds = new Set(["estate", "building"]);
 function validateProject(body, current = {}) {
   return {
     name: requiredText(body.name ?? current.name, "name"),
     status: enumValue(body.status ?? current.status, projectStatuses, "active", "status"),
+    // "building": one block of floors and numbered units; "estate": separate
+    // homes or plots. Either can have units to rent, to buy, or both.
+    kind: enumValue(body.kind ?? current.kind, projectKinds, "estate", "kind"),
+    location: optionalText(body.location ?? current.location, "location", 160),
   };
 }
 
@@ -490,7 +495,34 @@ function validateProperty(body, current = {}) {
     bathrooms: rooms ? nonNegativeInteger(body.bathrooms ?? current.bathrooms, "bathrooms") : 0,
     description: optionalText(body.description ?? current.description, "description"),
     featured: Boolean(body.featured ?? current.featured),
+    // A unit in a building: its floor (0 = ground, negative = basement) and the
+    // unit number the staff gives it. Both optional.
+    floor: optionalFloor(body.floor === undefined ? current.floor : body.floor),
+    unit_number: optionalUnitNumber(body.unit_number === undefined ? current.unit_number : body.unit_number),
   };
+}
+
+function optionalUnitNumber(value) {
+  const text = optionalText(typeof value === "number" ? String(value) : value, "unit_number", 20);
+  if (text && !/^[\p{L}\p{N}][\p{L}\p{N} ./-]*$/u.test(text)) throw new HttpError(400, "unit_number may use letters, numbers, spaces, '.', '/' and '-' (for example 304 or B-12)");
+  return text || null;
+}
+
+function optionalFloor(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < -5 || n > 200) throw new HttpError(400, "floor must be a whole number from -5 to 200 (0 is the ground floor)");
+  return n;
+}
+
+/** A unit number is used once per project. */
+async function assertUnitNumberFree(data, exceptId = null) {
+  if (!data.project_id || !data.unit_number) return;
+  const taken = await queryOne(
+    "SELECT p.id, p.name FROM properties p WHERE p.project_id=$1 AND lower(p.unit_number)=lower($2) AND ($3::int IS NULL OR p.id<>$3) LIMIT 1",
+    [data.project_id, data.unit_number, exceptId],
+  );
+  if (taken) throw new HttpError(409, `Unit ${data.unit_number} already exists in this project (${taken.name}). Use another unit number.`);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1092,14 +1124,14 @@ router.get("/projects", route(async (req, res) => {
 router.get("/projects/:id", route(async (req, res) => res.json(requireRecord(await Project.get(parseId(req.params.id)), "Project"))));
 router.post("/projects", route(async (req, res) => {
   const data = validateProject(req.body || {});
-  const result = await Project.create(data.name, data.status);
+  const result = await Project.create(data.name, data.status, data);
   res.status(201).json(await Project.get(result.id));
 }));
 router.put("/projects/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   const current = requireRecord(await Project.get(id), "Project");
   const data = validateProject(req.body || {}, current);
-  await Project.update(id, data.name, data.status);
+  await Project.update(id, data.name, data.status, data);
   res.json(await Project.get(id));
 }));
 router.delete("/projects/:id", route(async (req, res) => {
@@ -2405,6 +2437,7 @@ router.get("/properties", route(async (req, res) => {
 router.get("/properties/:id", route(async (req, res) => res.json(requireRecord(await Property.get(parseId(req.params.id)), "Property"))));
 router.post("/properties", route(async (req, res) => {
   const data = validateProperty(req.body || {});
+  await assertUnitNumberFree(data);
   const listing = validatePropertyListing(req.body || {}, {}, data.price);
   const result = await Property.create(data);
   const propertyId = result.id;
@@ -2417,6 +2450,7 @@ router.put("/properties/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
   const current = requireRecord(await Property.get(id), "Property");
   const data = validateProperty(req.body || {}, current);
+  await assertUnitNumberFree(data, id);
   const listing = validatePropertyListing(req.body || {}, current, data.price);
   await Property.update(id, data);
   await Property.setListing(id, listing);

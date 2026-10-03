@@ -39,7 +39,7 @@ async function withAvailableImages(propertyRows) {
   return propertyRows;
 }
 
-const propertySelect = `SELECT p.*,pr.name AS project_name,(SELECT COUNT(*)::int FROM property_images pi WHERE pi.property_id=p.id) AS image_count,(SELECT id FROM property_images pi WHERE pi.property_id=p.id ORDER BY pi.id LIMIT 1) AS cover_image_id FROM properties p LEFT JOIN projects pr ON pr.id=p.project_id`;
+const propertySelect = `SELECT p.*,pr.name AS project_name,(SELECT COUNT(*)::int FROM property_images pi WHERE pi.property_id=p.id) AS image_count,(SELECT id FROM property_images pi WHERE pi.property_id=p.id ORDER BY pi.id LIMIT 1) AS cover_image_id,pr.kind AS project_kind FROM properties p LEFT JOIN projects pr ON pr.id=p.project_id`;
 const clientSelect = "SELECT c.*,pr.name AS project_name FROM clients c LEFT JOIN projects pr ON pr.id=c.project_id";
 const appointmentSelect = "SELECT a.*,c.name AS client_name,c.phone AS client_phone,p.name AS property_name,pr.name AS project_name,cb.display_name AS completed_by_name FROM appointments a JOIN clients c ON c.id=a.client_id LEFT JOIN properties p ON p.id=a.property_id LEFT JOIN projects pr ON pr.id=a.project_id LEFT JOIN users cb ON cb.id=a.completed_by";
 const documentSelect = "SELECT d.*,c.name AS client_name,co.client_name AS contract_client,pr.name AS project_name,ub.display_name AS uploaded_by_name FROM documents d LEFT JOIN clients c ON c.id=d.client_id LEFT JOIN contracts co ON co.id=d.contract_id LEFT JOIN projects pr ON pr.id=d.project_id LEFT JOIN users ub ON ub.id=COALESCE(d.created_by,d.owner_id)";
@@ -174,8 +174,8 @@ export const Property = {
     };
   },
   async get(id) { return withAvailableImages(await get(propertySelect, "p", "property", id)); },
-  create(data) { return create(`INSERT INTO properties(organization_id,project_id,name,property_type,status,price,location,area,bedrooms,bathrooms,description,featured,${OWNERSHIP_COLUMNS}) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`, [data.project_id || null, data.name, data.property_type, data.status, data.price, data.location, data.area, data.bedrooms || 0, data.bathrooms || 0, data.description || null, Boolean(data.featured)]); },
-  update(id, data) { return update("property", "properties", id, "UPDATE properties SET project_id=$1,name=$2,property_type=$3,status=$4,price=$5,location=$6,area=$7,bedrooms=$8,bathrooms=$9,description=$10,featured=$11", [data.project_id || null, data.name, data.property_type, data.status, data.price, data.location, data.area, data.bedrooms || 0, data.bathrooms || 0, data.description || null, Boolean(data.featured)]); },
+  create(data) { return create(`INSERT INTO properties(organization_id,project_id,name,property_type,status,price,location,area,bedrooms,bathrooms,description,featured,floor,unit_number,${OWNERSHIP_COLUMNS}) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`, [data.project_id || null, data.name, data.property_type, data.status, data.price, data.location, data.area, data.bedrooms || 0, data.bathrooms || 0, data.description || null, Boolean(data.featured), data.floor ?? null, data.unit_number || null]); },
+  update(id, data) { return update("property", "properties", id, "UPDATE properties SET project_id=$1,name=$2,property_type=$3,status=$4,price=$5,location=$6,area=$7,bedrooms=$8,bathrooms=$9,description=$10,featured=$11,floor=$12,unit_number=$13", [data.project_id || null, data.name, data.property_type, data.status, data.price, data.location, data.area, data.bedrooms || 0, data.bathrooms || 0, data.description || null, Boolean(data.featured), data.floor ?? null, data.unit_number || null]); },
   remove(id) { return remove("property", "properties", id); },
   /** Public-website listing fields. The route has already scope-checked `id`. */
   async setListing(id, listing) {

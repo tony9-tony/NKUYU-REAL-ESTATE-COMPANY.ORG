@@ -208,6 +208,14 @@ The "Ask MKUYU" chat on the public website answers free questions with a local A
 - To change what it knows, edit `assistant-knowledge.md` (public facts only) and restart the server. Settings: `ASSISTANT_AI`, `OLLAMA_URL`, `OLLAMA_MODEL` in `.env`.
 - Ollama must be running on the same computer as this server (`ollama serve`; check with `ollama list`). On a hosting server it needs its own Ollama and enough memory (about 8 GB for a 7B model).
 
+## Buildings, floors and units
+
+A project is an **Estate** (separate homes or plots) or a **Building** (floors and numbered units), chosen on the project form.
+
+- Each unit is a property in that project with a **Floor** (0 = ground floor) and a **Unit number** typed by the staff (for example 304 or B-12). A unit number is used once per project; a second unit with the same number is refused.
+- Every unit is offered to **rent, buy or both**, with its own price and state, like any property. A building can therefore have flats to rent and flats for sale at the same time.
+- On the website, a building appears on the Rent and Buy pages as **one card**. Opening it shows the building floor by floor (`projects.html?p=<id>`); the visitor chooses a unit, opens it and presses Request. The request reaches Sales under Requests & leads with the unit, floor and building named.
+
 ## Fonts without internet
 
 The interface fonts can be served by MKUYU itself: on a computer with internet, double-click `fetch-fonts.bat` (or `node tools/fetch_fonts.mjs`) once. The files land in `frontend/fonts`; until then Google Fonts is used.

@@ -303,9 +303,9 @@ try {
   check((await call("/contracts", { token: sales })).body.some((c) => c.id === leaseNoProject.body.contract?.id), "a contract without a project still shows in the register");
   check((await call("/contracts/generate", { method: "POST", token: sales, body: { property_id: both.body.id, client_name: "Buyer NP", deal_type: "buy", original_price: 1000, start_date: "2026-11-01", agreement_duration: 12 } })).status === 400, "a Sale still needs its project");
   const rentProjects = await call("/public/projects?service=rent", { headers: { Origin: "http://localhost:5500" } });
-  check(rentProjects.status === 200 && rentProjects.body.length === 0, "the website lists no projects for rent");
+  check(rentProjects.status === 200 && rentProjects.body.every((p) => p.services.includes("rent")), "projects listed for rent all have a home to rent");
   const allProjects = (await call("/public/projects", { headers: { Origin: "http://localhost:5500" } })).body;
-  check(allProjects.every((p) => p.services.length === 1 && p.services[0] === "buy"), "projects on the website are for sale only");
+  check(allProjects.every((p) => p.services.length >= 1 && p.services.every((s) => ["buy", "rent"].includes(s))), "every project on the website says whether it is to rent, to buy or both");
 
   console.log("\n=== CHECK 11: changes reach open screens live ===");
   const listen = async (token, ms = 4000) => {

@@ -10,7 +10,7 @@ export const Project = {
     const values = [await organizationId()];
     const access = await currentAccess();
     const scope = scopeCondition("p", ENTITY, access, values);
-    return (await query(`SELECT p.* FROM projects p WHERE p.organization_id=$1 AND ${scope} ORDER BY p.created_at DESC LIMIT ${UNPAGED_LIMIT}`, values)).rows;
+    return (await query(`SELECT p.*, (SELECT COUNT(*)::int FROM properties u WHERE u.project_id=p.id) AS unit_count FROM projects p WHERE p.organization_id=$1 AND ${scope} ORDER BY p.created_at DESC LIMIT ${UNPAGED_LIMIT}`, values)).rows;
   },
   // Paginated twin of `all`. The count reuses the same `scope` fragment, so it can
   // never report projects the caller is not allowed to see.
@@ -25,7 +25,7 @@ export const Project = {
     }
     const where = ` WHERE ${conditions.join(" AND ")}`;
     return {
-      sql: `SELECT p.* FROM projects p${where} ORDER BY p.created_at DESC, p.id DESC`,
+      sql: `SELECT p.*, (SELECT COUNT(*)::int FROM properties u WHERE u.project_id=p.id) AS unit_count FROM projects p${where} ORDER BY p.created_at DESC, p.id DESC`,
       countSql: `SELECT COUNT(*)::int AS total FROM projects p${where}`,
       values,
     };
@@ -36,17 +36,17 @@ export const Project = {
     const scope = scopeCondition("p", ENTITY, access, values);
     return queryOne(`SELECT p.* FROM projects p WHERE p.id=$1 AND p.organization_id=$2 AND ${scope}`, values);
   },
-  async create(name, status = "active") {
+  async create(name, status = "active", { kind = "estate", location = null } = {}) {
     const access = await currentAccess();
-    const values = [await organizationId(), name, status];
+    const values = [await organizationId(), name, status, kind, location];
     ownershipValues(values, access);
-    return queryOne(`INSERT INTO projects (organization_id,name,status,${OWNERSHIP_COLUMNS}) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`, values);
+    return queryOne(`INSERT INTO projects (organization_id,name,status,kind,location,${OWNERSHIP_COLUMNS}) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, values);
   },
-  async update(id, name, status) {
-    const values = [name, status, id, await organizationId()];
+  async update(id, name, status, { kind = "estate", location = null } = {}) {
+    const values = [name, status, kind, location, id, await organizationId()];
     const access = await currentAccess();
     const scope = scopeCondition("p", ENTITY, access, values);
-    return query(`UPDATE projects p SET name=$1,status=$2 WHERE p.id=$3 AND p.organization_id=$4 AND ${scope}`, values);
+    return query(`UPDATE projects p SET name=$1,status=$2,kind=$3,location=$4 WHERE p.id=$5 AND p.organization_id=$6 AND ${scope}`, values);
   },
   async remove(id) {
     const values = [id, await organizationId()];
