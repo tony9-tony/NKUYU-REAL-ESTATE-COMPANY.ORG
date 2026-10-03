@@ -19,6 +19,7 @@ import { query, queryOne } from "../db.js";
 import { organizationId } from "../org/rbac.js";
 import { propertyUploadsDir, resolveStoredFile, storedFileExists } from "../uploads.js";
 import { askAssistant, assistantSettings, listingLines } from "../public/assistant.js";
+import { openToBuy } from "../models/propertyStatus.js";
 
 const router = Router();
 const route = (fn) => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
@@ -31,6 +32,9 @@ const parseId = (value) => {
 };
 
 // Public vocabulary: the website says "rented", the internal system "leased".
+// A rented home leaves the Buy side while the tenant is in (see propertyStatus.js).
+// A sold one stays listed as SOLD, like any sold home.
+const BUY_OPEN = "(p.offer_buy AND NOT (p.offer_rent AND COALESCE(p.rent_status, 'available') = 'rented' AND COALESCE(p.sale_status, 'available') <> 'sold'))";
 const PUBLIC_STATUS = { available: "available", reserved: "reserved", leased: "rented", sold: "sold" };
 const titleCase = (value) => String(value || "").replace(/^\w/, (c) => c.toUpperCase());
 // Picture links are absolute (the website lives on another origin). When
@@ -61,13 +65,13 @@ async function photosFor(req, ids) {
   return map;
 }
 
-const serviceList = (row) => [row.offer_rent ? "rent" : null, row.offer_buy ? "buy" : null].filter(Boolean);
+const serviceList = (row) => [row.offer_rent ? "rent" : null, openToBuy(row) ? "buy" : null].filter(Boolean);
 
 function toPublicProperty(row, photos) {
   // Per category, so the Buy page can say "Sold" while the Rent page still
   // takes requests (or the other way round).
   const availability = {
-    buy: row.offer_buy ? (row.sale_status || "available") : null,
+    buy: openToBuy(row) ? (row.sale_status || "available") : null,
     rent: row.offer_rent ? (row.rent_status === "rented" ? "rented" : row.rent_status || "available") : null,
   };
   return {
@@ -80,7 +84,7 @@ function toPublicProperty(row, photos) {
     availability,
     currency: "TZS",
     price: {
-      sale: row.offer_buy ? Number(row.price) || 0 : 0,
+      sale: openToBuy(row) ? Number(row.price) || 0 : 0,
       rent: row.offer_rent && Number(row.rent_price) > 0 ? { amount: Number(row.rent_price), period: row.rent_period || "month" } : null,
     },
     location: row.location,
@@ -119,7 +123,7 @@ const OPEN_FIRST = "CASE WHEN p.status IN ('available','reserved') THEN 0 ELSE 1
 function serviceFilter(req, res) {
   const service = req.query.service;
   if (service !== undefined && !["rent", "buy"].includes(service)) { bad(res, "service must be rent or buy"); return false; }
-  return service === "rent" ? "p.offer_rent" : service === "buy" ? "p.offer_buy" : null;
+  return service === "rent" ? "p.offer_rent" : service === "buy" ? BUY_OPEN : null;
 }
 
 router.get("/properties", route(async (req, res) => {
@@ -149,7 +153,7 @@ router.get("/properties/:id", route(async (req, res) => {
 // appears on the Rent side and one with flats for sale on the Buy side.
 const projectSelect = `SELECT pr.id, pr.name, pr.kind, pr.location AS project_location,
     string_agg(DISTINCT p.location, ' · ') AS locations,
-    bool_or(p.offer_buy AND COALESCE(p.sale_status,'available') <> 'sold') AS has_buy,
+    bool_or(${BUY_OPEN} AND COALESCE(p.sale_status,'available') <> 'sold') AS has_buy,
     bool_or(p.offer_rent AND COALESCE(p.rent_status,'available') <> 'rented') AS has_rent,
     COUNT(*)::int AS unit_count,
     COUNT(DISTINCT p.floor)::int AS floor_count,
@@ -297,7 +301,7 @@ router.post("/requests", route(async (req, res) => {
     [propertyId, org],
   );
   if (!property) return notFound(res, "Property");
-  const offered = service === "rent" ? property.offer_rent : property.offer_buy;
+  const offered = service === "rent" ? property.offer_rent : openToBuy(property);
   // Each category is open or closed on its own: a rented house can still be for sale.
   const categoryState = service === "rent" ? property.rent_status : property.sale_status;
   if (!offered || (categoryState || "available") !== "available") return res.status(409).json({ error: `This property is no longer open to ${service === "rent" ? "rent" : "buy"}.` });

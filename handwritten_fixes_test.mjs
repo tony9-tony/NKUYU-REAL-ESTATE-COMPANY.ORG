@@ -269,14 +269,14 @@ try {
   check(both.status === 201 && both.body.sale_status === "available" && both.body.rent_status === "available", "a property offered for sale and rent starts open in both");
   const pub = async (service) => (await call(`/public/properties${service ? `?service=${service}` : ""}`, { headers: { Origin: "http://localhost:5500" } })).body.find((p) => p.id === both.body.id);
   const rented = await call(`/properties/${both.body.id}`, { method: "PUT", token: sales, body: { rent_status: "rented" } });
-  check(rented.status === 200 && rented.body.rent_status === "rented" && rented.body.sale_status === "available" && rented.body.status === "available", "marked rented: closed for rent, still for sale");
+  check(rented.status === 200 && rented.body.rent_status === "rented" && rented.body.sale_status === "available" && rented.body.status === "leased", "marked rented: closed for rent, sale paused (overall Rented)");
   const onRent = await pub("rent");
   const onBuy = await pub("buy");
   check(onRent?.availability?.rent === "rented", "the website's Rent page lists it as RENTED");
-  check(onBuy?.availability?.buy === "available", "the website's Buy page still offers it for sale");
+  check(!onBuy, "while rented it leaves the website's Buy page");
   const req = (service) => call("/public/requests", { method: "POST", body: { property: both.body.id, service, name: "Visitor Both", phone: `+255 74${String(Date.now()).slice(-7)}`, budget: 1000, preferred_contact: "phone" }, headers: { Origin: "http://localhost:5500" } });
   check((await req("rent")).status === 409, "a rent request is refused while it is rented");
-  check((await req("buy")).status === 201, "a buy request is still accepted");
+  check((await req("buy")).status === 409, "a buy request is refused while it is rented");
   const sold = await call(`/properties/${both.body.id}`, { method: "PUT", token: sales, body: { sale_status: "sold" } });
   check(sold.body.sale_status === "sold" && sold.body.status === "sold", "then sold too: closed in both, overall Sold");
   check((await pub("buy"))?.availability?.buy === "sold", "the Buy page lists it as SOLD (it stays on the page)");

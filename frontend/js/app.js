@@ -3639,7 +3639,11 @@ function propertyCategories(property) {
 function propertyStateBadges(property) {
   const categories = propertyCategories(property);
   if (!categories.length) return badge(property.status);
-  return categories.map((category) => badgeVariant(`${category.label} · ${STATE_WORD[category.state]}`, STATE_BADGE[category.state])).join("");
+  // While rented, a home is not offered to buy; it returns to sale when the rent ends.
+  const rented = categories.some((category) => category.key === "rent" && category.state === "rented");
+  return categories.map((category) => (rented && category.key === "sale" && category.state !== "sold"
+    ? badgeVariant(`${category.label} · Paused while rented`, "neutral")
+    : badgeVariant(`${category.label} · ${STATE_WORD[category.state]}`, STATE_BADGE[category.state]))).join("");
 }
 /** The "⋯" menu's status choices, according to how the property is offered. */
 function propertyStatusActions(property) {

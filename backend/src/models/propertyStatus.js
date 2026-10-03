@@ -11,6 +11,9 @@
 // as the OVERALL state, derived from the two, because reports, filters and
 // contracts read it:
 //   * every offered category closed -> sold (if the sale closed) or leased
+//   * rented (when offered for rent)  -> leased: a rented home is not sold
+//                                        while the tenant is in, so it leaves
+//                                        the Buy side until the rent ends
 //   * any offered category available -> available
 //   * otherwise                       -> reserved
 // A property offered for neither keeps the status it was given.
@@ -27,6 +30,8 @@ export function overallStatus({ offer_buy, offer_rent, sale_status, rent_status 
   if (!states.length) return fallback;
   const closed = (state) => state === "sold" || state === "rented";
   if (states.every(closed)) return sale === "sold" ? "sold" : "leased";
+  if (sale === "sold") return "sold";
+  if (rent === "rented") return "leased";
   if (states.includes("available")) return "available";
   return "reserved";
 }
@@ -39,4 +44,9 @@ export function categoryStatusesFrom(status, current = {}) {
     case "reserved": return { sale_status: "reserved", rent_status: "reserved" };
     default: return { sale_status: "available", rent_status: "available" };
   }
+}
+
+/** While a home is rented it is not offered to buy (it returns when the rent ends). */
+export function openToBuy({ offer_buy, offer_rent, rent_status, sale_status }) {
+  return Boolean(offer_buy) && !(offer_rent && rent_status === "rented" && sale_status !== "sold");
 }

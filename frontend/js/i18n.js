@@ -1858,7 +1858,8 @@
 "Units in either kind can be offered to rent, to buy, or both.": "Units za aina zote zinaweza kupangishwa, kuuzwa, au vyote viwili.",
 "Building": "Jengo",
 "Estate": "Estate",
-"Ground floor": "Ghorofa ya chini"
+"Ground floor": "Ghorofa ya chini",
+"For sale · Paused while rented": "Inauzwa · Imesimamishwa ikiwa imepangishwa"
 };
 
   // Text that carries a value (a name, a number, a date) is matched by pattern.

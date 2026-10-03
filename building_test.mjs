@@ -52,6 +52,19 @@ try {
   check(detail.body.properties.every((u) => "unit" in u && "floor" in u) && !JSON.stringify(detail.body).includes("owner_id"), "units carry floor and unit number, and nothing internal");
   check((await call("/public/projects/999999")).status === 404, "an unknown project is not found");
 
+  // A unit offered for both, once rented, leaves the Buy side until the rent ends.
+  await call(`/properties/${u101.body.id}`, { token: sales, method: "PUT", body: { rent_status: "rented" } });
+  const buySide = (await call("/public/properties?service=buy")).body;
+  check(!buySide.some((p) => p.id === u101.body.id), "a rented unit is not listed to buy");
+  const rentedUnit = (await call(`/public/projects/${pid}`)).body.properties.find((p) => p.id === u101.body.id);
+  check(rentedUnit && JSON.stringify(rentedUnit.services) === JSON.stringify(["rent"]) && rentedUnit.availability.buy === null && rentedUnit.availability.rent === "rented", "the rented unit shows as rented, with no sale offer");
+  const buyRequest = await call("/public/requests", { method: "POST", body: { property: String(u101.body.id), service: "buy", name: "Late Buyer", phone: "+255700111222", budget: 150000000, preferred_contact: "phone" } });
+  check(buyRequest.status === 409, "a buy request for a rented unit is refused");
+  const staffView = (await call(`/properties/${u101.body.id}`, { token: sales })).body;
+  check(staffView.status === "leased" && staffView.sale_status === "available", "staff see it as rented; its sale state is kept for later");
+  await call(`/properties/${u101.body.id}`, { token: sales, method: "PUT", body: { rent_status: "available" } });
+  check((await call("/public/properties?service=buy")).body.some((p) => p.id === u101.body.id), "when the rent ends the unit is back on the Buy side");
+
   // A visitor picks a unit and sends a request: Sales sees which unit.
   const phone = `+2557${String(Date.now()).slice(-8)}`;
   const request = await call("/public/requests", { method: "POST", body: { property: String(u101.body.id), service: "rent", name: "Unit Tester", phone, email: "", preferred_contact: "phone", budget: 1500000, message: "I like this one" } });
