@@ -198,6 +198,16 @@ MAIL_FROM="MKUYU Real Estate <payments@yourcompany.co.tz>"
 
 Each person picks the language in **My profile → Settings → Language · Lugha**, or with the English / Kiswahili switch on the sign-in page. The choice is kept on that computer (browser). `frontend/js/i18n.js` holds the Kiswahili wording; the interface is written in English and shown in Kiswahili as it appears. Names, numbers, references, what people typed and the contract documents are never translated. To fix a word, change its line in `i18n.js`.
 
+## Website AI assistant (Qwen through Ollama)
+
+The "Ask MKUYU" chat on the public website answers free questions with a local AI model (Ollama, the first installed Qwen model by default). The website sends the question to this server (`POST /api/v1/public/chat`), never to Ollama directly.
+
+- The model is given **public information only**: `backend/src/public/assistant-knowledge.md` and the homes published on the website. It has no database access, so it cannot reveal staff, customers, contracts, payments or reports.
+- Questions about internal matters (passwords, staff, contracts, payments, "ignore your rules") are refused before the model is asked. Invented phone numbers, e-mails and links are removed from every reply.
+- Searches for homes and projects are still answered from the live listings. If Ollama is off or slow, the website uses its built-in answers.
+- To change what it knows, edit `assistant-knowledge.md` (public facts only) and restart the server. Settings: `ASSISTANT_AI`, `OLLAMA_URL`, `OLLAMA_MODEL` in `.env`.
+- Ollama must be running on the same computer as this server (`ollama serve`; check with `ollama list`). On a hosting server it needs its own Ollama and enough memory (about 8 GB for a 7B model).
+
 ## Fonts without internet
 
 The interface fonts can be served by MKUYU itself: on a computer with internet, double-click `fetch-fonts.bat` (or `node tools/fetch_fonts.mjs`) once. The files land in `frontend/fonts`; until then Google Fonts is used.

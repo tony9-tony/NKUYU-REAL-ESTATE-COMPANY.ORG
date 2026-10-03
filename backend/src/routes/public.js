@@ -18,6 +18,7 @@ import { Router } from "express";
 import { query, queryOne } from "../db.js";
 import { organizationId } from "../org/rbac.js";
 import { propertyUploadsDir, resolveStoredFile, storedFileExists } from "../uploads.js";
+import { askAssistant, assistantSettings, listingLines } from "../public/assistant.js";
 
 const router = Router();
 const route = (fn) => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
@@ -346,6 +347,50 @@ router.post("/enquiries", route(async (req, res) => {
     [lead.id, org],
   );
   res.status(201).json({ reference: `W-${lead.id}` });
+}));
+
+/* ---------------------------------------------------------------------------
+   AI assistant ("Ask MKUYU" on the website)
+   The model only ever sees the public facts and what is published here; see
+   ../public/assistant.js. When it is off or unavailable the website answers
+   with its own built-in replies, so a visitor always gets an answer.
+   --------------------------------------------------------------------------- */
+let listingCache = { text: "", at: 0 };
+async function publishedForAssistant(req) {
+  if (Date.now() - listingCache.at < 60 * 1000) return listingCache.text;
+  const org = await organizationId();
+  const rows = (await query(`${propertySelect} WHERE ${[...LISTED, OPEN].join(" AND ")} ORDER BY p.featured DESC, p.created_at DESC, p.id DESC LIMIT 30`, [org])).rows;
+  const projects = (await query(
+    `SELECT pr.name, string_agg(DISTINCT p.location, ' · ') AS location FROM properties p JOIN projects pr ON pr.id = p.project_id
+      WHERE ${[...LISTED, OPEN, "p.offer_buy", "pr.status = 'active'"].join(" AND ")} GROUP BY pr.name ORDER BY pr.name`, [org])).rows;
+  const text = listingLines(rows.map((row) => toPublicProperty(row, new Map())), projects);
+  listingCache = { text, at: Date.now() };
+  return text;
+}
+
+router.get("/chat/status", (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.json({ ai: assistantSettings().enabled });
+});
+
+router.post("/chat", route(async (req, res) => {
+  const body = req.body || {};
+  const message = typeof body.message === "string" ? body.message.replace(/\s+/g, " ").trim() : "";
+  if (!message) return bad(res, "Write your question.");
+  if (message.length > 500) return bad(res, "Please keep the question under 500 characters.");
+  const lang = body.lang === "sw" ? "sw" : "en";
+  const history = (Array.isArray(body.history) ? body.history : [])
+    .filter((turn) => turn && typeof turn.content === "string" && ["user", "assistant"].includes(turn.role))
+    .slice(-6);
+  if (tooMany([`chat:${req.ip}`], Number(process.env.ASSISTANT_PER_HOUR || 60))) return res.status(429).json({ error: "Too many questions. Please try again later.", fallback: true });
+  try {
+    const result = await askAssistant({ message, history, lang, listings: await publishedForAssistant(req) });
+    res.set("Cache-Control", "no-store");
+    res.json({ reply: result.reply, refused: Boolean(result.refused) });
+  } catch (error) {
+    if (error.code !== "off") console.warn(`website assistant: ${error.message}`);
+    res.status(503).json({ error: "The assistant is not available right now.", fallback: true });
+  }
 }));
 
 export default router;

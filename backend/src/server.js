@@ -85,7 +85,7 @@ app.use(cors((request, callback) => {
   // Only its own origins are allowed, and never with credentials.
   const url = String(request.originalUrl || request.url);
   const publicRead = ["GET", "HEAD", "OPTIONS"].includes(request.method) && url.startsWith("/api/v1/public/");
-  const publicWrite = request.method === "POST" && /^\/api\/v1\/public\/(requests|enquiries|sell)(\?|$)/.test(url);
+  const publicWrite = request.method === "POST" && /^\/api\/v1\/public\/(requests|enquiries|sell|chat)(\?|$)/.test(url);
   if ((publicRead || publicWrite) && publicSiteOrigins.includes(origin)) {
     return callback(null, { origin: true, credentials: false });
   }
