@@ -5,7 +5,7 @@
 // The choice is kept in this browser (localStorage).
 (function () {
   "use strict";
-  const KEY = "mkuyu.lang";
+  const KEY = "mkuyu.language"; // English unless the person chooses Kiswahili
   let lang = "en";
   try { lang = window.localStorage.getItem(KEY) === "sw" ? "sw" : "en"; } catch { lang = "en"; }
   document.documentElement.lang = lang;
