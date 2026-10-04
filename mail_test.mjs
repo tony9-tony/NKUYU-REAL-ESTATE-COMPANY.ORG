@@ -50,6 +50,16 @@ try {
   const receipt = await emailReceipt(payment.id);
   const mail = received[received.length - 1] || "";
   check(receipt.sent && received.length === before + 1 && mail.includes("To: buyer@example.test") && mail.includes("application/pdf") && mail.includes("JVBERi"), "the customer receives the receipt with the PDF attached");
+  {
+    // The receipt says which installments the money went to, and what is left.
+    const { receiptCoverage } = await import("./backend/src/payments/notices.js");
+    const coverage = await receiptCoverage(payment.id);
+    const amount = Number((await query("SELECT amount FROM payments WHERE id=$1", [payment.id])).rows[0].amount);
+    const applied = (coverage?.items || []).reduce((total, row) => total + row.applied, 0);
+    check(coverage && Math.abs(applied + coverage.credit - amount) < 0.01 && coverage.balance !== null
+      && coverage.items.every((row) => row.left_after >= 0 && row.left_after <= row.installment_amount),
+      "the receipt lists every installment the payment covered, the credit and the balance");
+  }
   check((await emailReceipt(payment.id)).sent === false && received.length === before + 1, "a receipt is e-mailed only once");
 
   const contract = (await query("SELECT id, organization_id, client_name FROM contracts WHERE status='active' ORDER BY id DESC LIMIT 1")).rows[0];

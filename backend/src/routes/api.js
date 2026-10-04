@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { autoBackupStatus, backupNamePattern, createBackup, listBackups } from "../backups.js";
 import { normalizePhone, parsePaymentMessage } from "../payments/parseMessage.js";
-import { emailReceipt, writeReceiptPdf } from "../payments/notices.js";
+import { emailReceipt, receiptCoverage, writeReceiptPdf } from "../payments/notices.js";
 import { parseStatement } from "../payments/statement.js";
 import multer from "multer";
 import { mailConfigured } from "../mail.js";
@@ -2323,7 +2323,7 @@ router.get("/payments/:id/mkuyu-receipt", route(async (req, res) => {
   res.set("Content-Type", "application/pdf");
   res.set("Content-Disposition", `${req.query.download === "1" ? "attachment" : "inline"}; filename="${payment.receipt_number}.pdf"`);
   doc.pipe(res);
-  writeReceiptPdf(doc, payment, contract, org?.name);
+  writeReceiptPdf(doc, payment, contract, org?.name, await receiptCoverage(payment.id));
   doc.end();
 }));
 
