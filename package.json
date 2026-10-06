@@ -39,7 +39,11 @@
     "test:backup": "node --import ./test_support/guard.mjs backup_test.mjs",
     "test:mail": "node --import ./test_support/guard.mjs mail_test.mjs",
     "test:assistant": "node --import ./test_support/guard.mjs assistant_test.mjs",
-    "test:buildings": "node --import ./test_support/guard.mjs building_test.mjs"
+    "test:buildings": "node --import ./test_support/guard.mjs building_test.mjs",
+    "test:notices": "node notifications_test.mjs",
+    "test:notices:db": "node --import ./test_support/guard.mjs notifications_db_test.mjs",
+    "test:customer-portal": "node --import ./test_support/guard.mjs customer_portal_test.mjs",
+    "test:diaspora-desk": "node --import ./test_support/guard.mjs diaspora_desk_test.mjs"
   },
   "engines": {
     "node": ">=20"

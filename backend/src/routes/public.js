@@ -304,9 +304,9 @@ const isBot = (body) => typeof body.website === "string" && body.website.trim() 
 
 async function createLead(org, fields) {
   return queryOne(
-    `INSERT INTO leads (organization_id, name, email, phone, source, status, notes, budget, service, property_id, preferred_contact)
-     VALUES ($1,$2,$3,$4,$5,'new',$6,$7,$8,$9,$10) RETURNING id`,
-    [org, fields.name, fields.email, fields.phone, fields.source, fields.notes, fields.budget, fields.service, fields.property_id, fields.preferred_contact],
+    `INSERT INTO leads (organization_id, name, email, phone, source, status, notes, budget, service, property_id, preferred_contact, marketing_opt_in, marketing_opt_in_at)
+     VALUES ($1,$2,$3,$4,$5,'new',$6,$7,$8,$9,$10,$11,CASE WHEN $11 THEN NOW() END) RETURNING id`,
+    [org, fields.name, fields.email, fields.phone, fields.source, fields.notes, fields.budget, fields.service, fields.property_id, fields.preferred_contact, fields.marketing_opt_in === true],
   );
 }
 
@@ -344,6 +344,8 @@ router.post("/requests", route(async (req, res) => {
     service,
     property_id: property.id,
     preferred_contact: preferred,
+    // The website's "send me new properties" tick (unticked unless chosen).
+    marketing_opt_in: body.marketing_opt_in === true || body.marketing_opt_in === "1" || body.marketing_opt_in === "on",
   });
   res.status(201).json({ reference: `W-${lead.id}` });
 }));
@@ -414,6 +416,7 @@ router.post("/enquiries", route(async (req, res) => {
     service: ["rent", "buy"].includes(body.topic) ? body.topic : null,
     property_id: null,
     preferred_contact: CONTACT_METHODS.has(body.preferred_contact) ? body.preferred_contact : "phone",
+    marketing_opt_in: body.marketing_opt_in === true || body.marketing_opt_in === "1" || body.marketing_opt_in === "on",
   });
   await query(
     `UPDATE leads SET department_id = (SELECT id FROM departments WHERE organization_id = $2 AND name = 'CUSTOMER SERVICE' LIMIT 1), visibility = 'department'

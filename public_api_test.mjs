@@ -171,7 +171,7 @@ try {
   check(Array.isArray(requests) && requests.some((r) => r.id === leadId), "the website request is listed under Requests");
   // Requests holds website requests and Contact-page messages (the latter for
   // Customer Service to answer), never leads typed in by staff.
-  check(requests.every((r) => ["website", "website-contact"].includes(r.source)), "Requests holds only website requests and Contact-page messages");
+  check(requests.every((r) => ["website", "website-contact", "website-signup", "diaspora-portal"].includes(r.source)), "Requests holds only website, Contact-page, sign-up and diaspora-portal requests");
   check((await stageOf())?.property_name === `Villa ${tag}` && !(await stageOf())?.task_id, "it names the property and has no hand-off yet");
   const officerId = created.body.id;
   const task = await call("/org/tasks", { method: "POST", as: officer, body: { title: "Contact Asha Test (buy request)", assigned_to: csId, reviewer_id: officerId, priority: "high" } });

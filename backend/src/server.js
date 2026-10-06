@@ -8,6 +8,7 @@ import { runMigrations } from "./migrate.js";
 import { ensureUploadDirs } from "./uploads.js";
 import { startAutoBackups } from "./backups.js";
 import { startDueReminders } from "./payments/notices.js";
+import { startCustomerNotices } from "./notify/customerNotices.js";
 import apiRoutes from "./routes/api.js";
 import { isProduction, rateLimit, securityHeaders } from "./security.js";
 
@@ -84,6 +85,12 @@ app.use(cors((request, callback) => {
   // has published and send a visitor's request, enquiry or sell submission.
   // Only its own origins are allowed, and never with credentials.
   const url = String(request.originalUrl || request.url);
+  // The diaspora customer portal on the public website: its own cookie
+  // session, so it is the one public path allowed WITH credentials, and only
+  // from the website's own origins.
+  if (url.startsWith("/api/v1/customer/") && publicSiteOrigins.includes(origin)) {
+    return callback(null, { origin: true, credentials: true });
+  }
   const publicRead = ["GET", "HEAD", "OPTIONS"].includes(request.method) && url.startsWith("/api/v1/public/");
   const publicWrite = request.method === "POST" && /^\/api\/v1\/public\/(requests|enquiries|sell|chat)(\?|$)/.test(url);
   if ((publicRead || publicWrite) && publicSiteOrigins.includes(origin)) {
@@ -96,6 +103,7 @@ app.use(cors((request, callback) => {
 // Abuse protection for the public API as a whole (per client address); the
 // request/enquiry/sell routes add their own tighter per-phone limits.
 app.use("/api/v1/public", rateLimit({ name: "public", limit: 300, windowMs: 60 * 1000 }));
+app.use("/api/v1/customer", rateLimit({ name: "customer", limit: 120, windowMs: 60 * 1000 }));
 // Load: a ceiling for the staff API per client address, far above normal use
 // (a busy screen makes a few requests a second) but enough to stop a runaway
 // script or a stuck browser tab from flooding the server.
@@ -188,6 +196,8 @@ function startServer(port = PORT) {
     startAutoBackups();
     // Payment reminders by e-mail (see payments/notices.js; needs SMTP in .env).
     startDueReminders();
+    // Customer SMS: installment reminders and overdue notices (notify/customerNotices.js).
+    startCustomerNotices();
   });
 }
 

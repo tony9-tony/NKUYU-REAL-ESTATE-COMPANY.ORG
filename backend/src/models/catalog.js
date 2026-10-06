@@ -40,7 +40,7 @@ async function withAvailableImages(propertyRows) {
 }
 
 const propertySelect = `SELECT p.*,pr.name AS project_name,(SELECT COUNT(*)::int FROM property_images pi WHERE pi.property_id=p.id) AS image_count,(SELECT id FROM property_images pi WHERE pi.property_id=p.id ORDER BY pi.id LIMIT 1) AS cover_image_id,pr.kind AS project_kind FROM properties p LEFT JOIN projects pr ON pr.id=p.project_id`;
-const clientSelect = "SELECT c.*,pr.name AS project_name FROM clients c LEFT JOIN projects pr ON pr.id=c.project_id";
+const clientSelect = "SELECT c.*,pr.name AS project_name,(SELECT ca.status FROM customer_accounts ca WHERE ca.client_id=c.id) AS portal_status,(SELECT u.display_name FROM users u WHERE u.id=c.diaspora_officer_id) AS officer_name FROM clients c LEFT JOIN projects pr ON pr.id=c.project_id";
 const appointmentSelect = "SELECT a.*,c.name AS client_name,c.phone AS client_phone,p.name AS property_name,pr.name AS project_name,cb.display_name AS completed_by_name FROM appointments a JOIN clients c ON c.id=a.client_id LEFT JOIN properties p ON p.id=a.property_id LEFT JOIN projects pr ON pr.id=a.project_id LEFT JOIN users cb ON cb.id=a.completed_by";
 const documentSelect = "SELECT d.*,c.name AS client_name,co.client_name AS contract_client,pr.name AS project_name,ub.display_name AS uploaded_by_name FROM documents d LEFT JOIN clients c ON c.id=d.client_id LEFT JOIN contracts co ON co.id=d.contract_id LEFT JOIN projects pr ON pr.id=d.project_id LEFT JOIN users ub ON ub.id=COALESCE(d.created_by,d.owner_id)";
 
@@ -198,9 +198,10 @@ export const PropertyImage = {
 };
 
 export const Client = {
-  all(projectId = null, status = null) { const v = [], c = []; if (projectId) { v.push(projectId); c.push(`c.project_id=$${v.length + 1}`); } if (status) { v.push(status); c.push(`c.status=$${v.length + 1}`); } return list(clientSelect, "c", "client", v, c, " ORDER BY c.created_at DESC"); },
-  paged(projectId = null, status = null, search = null) {
+  all(projectId = null, status = null, segment = null) { const v = [], c = []; if (projectId) { v.push(projectId); c.push(`c.project_id=$${v.length + 1}`); } if (status) { v.push(status); c.push(`c.status=$${v.length + 1}`); } if (segment) c.push(segment === "diaspora" ? "c.is_diaspora=TRUE" : "c.is_diaspora=FALSE"); return list(clientSelect, "c", "client", v, c, " ORDER BY c.created_at DESC"); },
+  paged(projectId = null, status = null, search = null, segment = null) {
     const v = [], c = [];
+    if (segment) c.push(segment === "diaspora" ? "c.is_diaspora=TRUE" : "c.is_diaspora=FALSE");
     if (projectId) { v.push(projectId); c.push(`c.project_id=$${v.length + 1}`); }
     if (status) { v.push(status); c.push(`c.status=$${v.length + 1}`); }
     return buildPaged(clientSelect, "clients", "c", "client", v, c, " ORDER BY c.created_at DESC, c.id DESC", search, ["c.name", "c.email", "c.phone", "c.notes"]);

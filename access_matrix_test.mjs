@@ -468,7 +468,8 @@ async function main() {
   res = await call("/org/access-matrix", { token: sessions.admin });
   check(res.status === 200 && Array.isArray(res.payload.roles), "the administrator can read the access matrix");
   const matrix = res.payload;
-  check(matrix.departments.length === 6, `the organization has exactly six departments (got ${matrix.departments.length})`);
+  // Seven since the DIASPORA DESK was added for customers living abroad.
+  check(matrix.departments.length === 7, `the organization has exactly seven departments (got ${matrix.departments.length})`);
   check(matrix.roles.every((role) => Array.isArray(role.duties) && role.duties.length >= 2), "every role declares at least two duties");
   check(matrix.audit.dutyProblems.length === 0, `no duty/permission mismatch: ${JSON.stringify(matrix.audit.dutyProblems).slice(0, 200)}`);
   check(matrix.audit.contractOwnershipViolations.length === 0, `contract lifecycle is owned by one department: ${JSON.stringify(matrix.audit.contractOwnershipViolations).slice(0, 200)}`);

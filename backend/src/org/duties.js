@@ -28,9 +28,9 @@ export const SYSTEM_PERMISSIONS = new Set([
  * gets is `approve_legal`, `validate_finance` and `approve_management`.
  */
 export const CONTRACT_OWNERSHIP = {
-  submit_contract: ["SALES, MARKETING & OPERATIONS"],
+  submit_contract: ["SALES, MARKETING & OPERATIONS", "DIASPORA DESK"],
   review_legal: ["LEGAL"],
-  request_changes: ["LEGAL", "FINANCE & ACCOUNTS", "SALES, MARKETING & OPERATIONS", "MANAGEMENT"],
+  request_changes: ["LEGAL", "FINANCE & ACCOUNTS", "SALES, MARKETING & OPERATIONS", "MANAGEMENT", "DIASPORA DESK"],
   approve_legal: ["LEGAL"],
   validate_finance: ["FINANCE & ACCOUNTS"],
   approve_management: ["MANAGEMENT"],
@@ -60,6 +60,8 @@ export const ROLE_HOME_DEPARTMENT = {
   "Property Officer": "SALES, MARKETING & OPERATIONS",
   "Customer Service Manager": "CUSTOMER SERVICE",
   "Customer Service Officer": "CUSTOMER SERVICE",
+  "Diaspora Desk Manager": "DIASPORA DESK",
+  "Diaspora Desk Officer": "DIASPORA DESK",
   "Staff Member": "CUSTOMER SERVICE",
   "Sales & Marketing Officer": "SALES, MARKETING & OPERATIONS",
   Accountant: "FINANCE & ACCOUNTS",
@@ -78,6 +80,7 @@ export const DEPARTMENT_DEFAULT_ROLE = {
   "FINANCE & ACCOUNTS": "Finance Officer",
   "SALES, MARKETING & OPERATIONS": "Sales, Marketing & Operations Officer",
   "CUSTOMER SERVICE": "Customer Service Officer",
+  "DIASPORA DESK": "Diaspora Desk Officer",
   MANAGEMENT: null,
 };
 export const DEFAULT_STAFF_ROLE = "Staff Member";
@@ -223,6 +226,24 @@ export const ROLE_DUTIES = {
     { key: "property_enquiry", label: "Handle property enquiries", description: "Answers availability and viewing questions on estate. Sees properties read-only.", permissions: ["view_properties", "view"] },
     { key: "service_reporting", label: "Report on service activity", description: "Reports enquiry volume and follow-up completion to the desk manager.", permissions: ["access_reports", "view_reports"] },
   ],
+  "Diaspora Desk Manager": [
+    { key: "diaspora_contracts", label: "Prepare diaspora contracts", description: "Prepares the Diaspora Sale or Lease Agreement for a verified customer and submits it to Legal; answers Legal's corrections. Never approves it.", permissions: ["submit_contract", "access_contracts", "request_changes"] },
+    { key: "diaspora_desk_leadership", label: "Run the diaspora desk", description: "Keeps the shared queue of diaspora customers moving: who is waiting, what is overdue, who follows up.", permissions: ["access_clients", "access_leads", "view", "create", "edit", "approve"] },
+    { key: "work_assignment", label: "Assign work within the desk", description: "Hands work to desk officers and reviews it. The desk is one shared queue; assignment is for follow-up, not ownership.", permissions: ["assign_tasks", "review_tasks"] },
+    { key: "diaspora_records_quality", label: "Keep diaspora records correct", description: "Corrects or removes wrong customer records, requests and follow-ups.", permissions: ["delete", "edit", "view"] },
+    { key: "diaspora_document_check", label: "First check of identity documents", description: "Checks that the passport and proof of residence match what the customer declared, before Legal verifies citizenship.", permissions: ["access_documents", "access_clients", "view", "edit"] },
+    { key: "diaspora_meetings", label: "Arrange calls and viewings", description: "Books calls (by the customer's time zone) and viewings for family or agents on site.", permissions: ["access_appointments", "access_follow_ups", "view", "create", "edit"] },
+    { key: "diaspora_property_answers", label: "Answer property questions", description: "Sees projects and properties read-only to answer availability and construction questions.", permissions: ["view_properties", "view_projects", "view"] },
+    { key: "diaspora_reporting", label: "Report on the diaspora desk", description: "Reports sign-ups, requests, verification and conversion to management.", permissions: ["access_reports", "view_reports", "export"] },
+  ],
+  "Diaspora Desk Officer": [
+    { key: "diaspora_contracts", label: "Prepare diaspora contracts", description: "Prepares the Diaspora Sale or Lease Agreement for a verified customer and submits it to Legal; answers Legal's corrections. Never approves it.", permissions: ["submit_contract", "access_contracts", "request_changes"] },
+    { key: "diaspora_customer_service", label: "Serve diaspora customers", description: "Works the shared queue: answers sign-ups and portal requests by the customer's chosen channel.", permissions: ["access_clients", "access_leads", "view", "create", "edit"] },
+    { key: "diaspora_document_check", label: "First check of identity documents", description: "Checks that the passport and proof of residence match what the customer declared, before Legal verifies citizenship.", permissions: ["access_documents", "access_clients", "view", "edit"] },
+    { key: "diaspora_meetings", label: "Arrange calls and viewings", description: "Books calls (by the customer's time zone) and viewings for family or agents on site.", permissions: ["access_appointments", "access_follow_ups", "view", "create", "edit"] },
+    { key: "diaspora_property_answers", label: "Answer property questions", description: "Sees projects and properties read-only to answer availability and construction questions.", permissions: ["view_properties", "view_projects", "view"] },
+    { key: "diaspora_reporting", label: "Report desk activity", description: "Reports their follow-ups to the desk manager.", permissions: ["access_reports", "view_reports"] },
+  ],
   "Staff Member": [
     { key: "customer_records", label: "Maintain customer records", description: "Keeps basic contact and relationship data accurate.", permissions: ["access_clients", "view", "create", "edit"] },
     { key: "appointment_coordination", label: "Coordinate appointments", description: "Books and confirms appointments on behalf of the office.", permissions: ["access_appointments", "view", "create", "edit"] },
@@ -291,7 +312,7 @@ export function departmentDutyTree(permissionLabels = new Map()) {
     entry.dutyCount += duties.length;
   }
   // Highest authority first, so MANAGEMENT leads and ICT & ADMINISTRATION trails.
-  const order = ["MANAGEMENT", "FINANCE & ACCOUNTS", "SALES, MARKETING & OPERATIONS", "LEGAL", "CUSTOMER SERVICE", "ICT & ADMINISTRATION"];
+  const order = ["MANAGEMENT", "FINANCE & ACCOUNTS", "SALES, MARKETING & OPERATIONS", "DIASPORA DESK", "LEGAL", "CUSTOMER SERVICE", "ICT & ADMINISTRATION"];
   return [...departments.values()]
     .sort((a, b) => {
       const left = order.indexOf(a.name);

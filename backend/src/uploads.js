@@ -20,6 +20,8 @@ export const reportUploadsDir = path.join(uploadsRoot, "reports");
 export const propertyUploadsDir = path.join(uploadsRoot, "properties");
 // Staff profile photos and lawyers' signature images.
 export const profileUploadsDir = path.join(uploadsRoot, "profiles");
+// Construction progress photos shown to customers in their portal.
+export const progressUploadsDir = path.join(uploadsRoot, "progress");
 export const backupsDir = path.join(runtimeDataRoot, "backups");
 
 export const documentExtensions = new Set([
@@ -53,6 +55,7 @@ export function ensureUploadDirs() {
   fs.mkdirSync(reportUploadsDir, { recursive: true });
   fs.mkdirSync(propertyUploadsDir, { recursive: true });
   fs.mkdirSync(profileUploadsDir, { recursive: true });
+  fs.mkdirSync(progressUploadsDir, { recursive: true });
 }
 
 export function safeExtension(originalName) {
@@ -129,6 +132,31 @@ export const uploadDocumentFile = makeUploader(documentUploadsDir, documentExten
 export const uploadReportFile = makeUploader(reportUploadsDir, reportExtensions);
 export const uploadPropertyImageFile = makeUploader(propertyUploadsDir, propertyImageExtensions);
 export const uploadProfileImageFile = makeUploader(profileUploadsDir, profileImageExtensions);
+
+/** Up to 8 construction photos in one form ("photos"). Same checks as one file. */
+export const MAX_PROGRESS_PHOTOS = 8;
+export function uploadProgressImages(req, res, cb) {
+  const upload = multer({
+    storage: storageFor(progressUploadsDir),
+    limits: { fileSize: MAX_UPLOAD_BYTES, files: MAX_PROGRESS_PHOTOS, fields: 24 },
+    fileFilter(request, file, done) {
+      const ext = safeExtension(file.originalname);
+      if (!ext || !propertyImageExtensions.has(ext) || !mimeMatchesExtension(ext, file.mimetype)) {
+        const error = new Error(`Unsupported file type. Allowed: ${[...propertyImageExtensions].join(", ")}`);
+        error.status = 400;
+        return done(error);
+      }
+      done(null, true);
+    },
+  });
+  upload.array("photos", MAX_PROGRESS_PHOTOS)(req, res, (error) => {
+    if (!error) return cb(null);
+    const wrapped = new Error(error.code === "LIMIT_FILE_SIZE" ? `A photo is too large. Maximum size is ${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.`
+      : error.code === "LIMIT_FILE_COUNT" || error.code === "LIMIT_UNEXPECTED_FILE" ? `At most ${MAX_PROGRESS_PHOTOS} photos per update.` : error.message || "Upload failed.");
+    wrapped.status = 400;
+    cb(wrapped);
+  });
+}
 
 export function validateUploadedFile(file, allowedExtensions) {
   if (!file) {

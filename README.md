@@ -110,7 +110,7 @@ Only `frontend/` holds the live interface; the server serves that directory and 
 The **Duties & approvals** view (`GET /org/duties`) publishes two things that previously existed only in code:
 
 - **The approval path** — all nine pipeline stages in the order a contract actually moves through them, each with the department that holds the contract at that step, the department that moves it there, and the permission that permits the move. The three off-pipeline states (changes requested, rejected, cancelled) are listed separately.
-- **Every duty on every department** — 6 departments, 16 roles and 78 duties, each duty carrying its description and the permissions granted to perform it.
+- **Every duty on every department** — 7 departments, 18 roles and 90 duties, each duty carrying its description and the permissions granted to perform it.
 
 The stage data is derived from `CONTRACT_ACTIONS` in `backend/src/contracts/workflow.js` rather than written by hand, so the diagram cannot drift from the state machine the server enforces. `tools/verify_duties.mjs` asserts that every stage's acting department is one `CONTRACT_OWNERSHIP` really grants that permission, and that the Sales handover to Legal happens at step 2.
 
@@ -193,6 +193,63 @@ MAIL_FROM="MKUYU Real Estate <payments@yourcompany.co.tz>"
 ```
 
 `MAIL_RECEIPTS=0` / `MAIL_REMINDERS=0` turn either off and `MAIL_REMINDER_DAYS` changes the 3 days. Every e-mail is logged (`email_log`); the System & backups page shows whether e-mail is on and the last one sent. No extra package is used (a small SMTP client in `backend/src/mail.js`).
+
+## Diaspora Desk
+
+A department (**DIASPORA DESK**: *Diaspora Desk Manager*, *Diaspora Desk Officer*) that serves every customer who lives abroad. Each member signs in with their own account; the desk works as **one shared queue** (department scope), so several members can serve the same customers at the same time. Every diaspora customer also has a *contact person* on the desk (the member with the fewest customers when they signed up), for reference only.
+
+- **Self sign-up** (website → *Diaspora login* → *Create a diaspora account*): full name, e-mail, phone with country code, country of residence, nationality, password, and consent. A 6-digit code is e-mailed; nothing is created until it is entered.
+  - Lives **in Tanzania** → a lead for **Sales** (source `website-signup`); no account.
+  - Lives **abroad** → a diaspora client on the **Diaspora Desk**, signed straight in. The phone's country is compared with the declared country; a mismatch is flagged *ask the customer* for the desk.
+- **Sign-in**: e-mail + password; *Forgot password* and *Sign in with a code* use a code sent to the e-mail. The code only ever goes by e-mail.
+- **Verification** (menu **Diaspora verification**): the customer uploads a passport/NIDA and proof of residence abroad → the **Desk** checks they match → **Legal** confirms nationality (it decides the contract MKUYU may offer) → the customer's contracts, payments and receipts open in the portal. Desk or Legal can send it back with a note the customer reads. Before verification the customer can still browse and request. Clients added by staff are trusted and need no verification.
+- **Two sides everywhere**: *Clients* and *Requests* have **Ndani ya nchi / Diaspora** tabs; Sales do not see diaspora customers, the desk opens on the Diaspora side.
+- **Admin logs**: System & backups → *Activity log* → choose *Diaspora Desk (all members)* or one person to see their sign-ins and every action.
+
+### Diaspora contracts
+
+A contract for a diaspora client (Buy or Rent; a Sell mandate stays with Sales) gets its own wording and its own path:
+
+- **Wording**: the **Diaspora Sale Agreement** (26 clauses and 3 schedules: identity and form of ownership by nationality, payments only to MKUYU's Official Accounts, late payment, termination and refunds, construction updates and delay, handover, title transfer, taxes, representative in Tanzania by power of attorney, electronic signature, source of funds, personal data, disputes) or the **Diaspora Lease Agreement** (the lease plus Diaspora Terms). Text: `backend/src/contracts/agreements.js`. **It must be reviewed by MKUYU's Legal Department before real use**, in particular clause 4 (non-citizens) and the rates in clauses 8 to 10; Legal completes Schedule 3 on each contract.
+- **Path**: Diaspora Desk prepares → (customer must be verified) → Legal → Finance → **MD (always)** → Legal sends → the customer **reads and signs in the portal** → Finance confirms the deposit → Legal presses *Record customer signature* → active.
+- **Signing in the portal**: the button opens only after the whole text has been scrolled; the customer ticks five confirmations, types their full name and enters their password. The system keeps the exact signed text, its SHA-256 fingerprint, the time, the internet address and the browser, e-mails a confirmation, and records it in the audit log. If the text changes after it was opened, the signature is refused.
+
+### Sign-in
+
+Customers sign in with their **username or e-mail and password**. The e-mailed code is used only to sign up and to reset (or, when invited by staff, first set) a password; there is no sign-in by code. The sign-up form adapts: the country where you live fills the phone's country code (+1, +254…), a phone typed with a code picks the country, and a non-Tanzanian nationality suggests the same country of residence. Nationality is never guessed from the phone.
+
+`npm run test:diaspora-desk` runs 14 checks of this flow, including the full contract path.
+
+## Diaspora customer portal
+
+Customers who live abroad (Miliki Ardhi Diaspora) can follow their property online on the public website (**Diaspora login**). Customers in Tanzania have no account and see no change.
+
+1. **Sales** opens the client, ticks **Diaspora client (lives abroad)**, makes sure the e-mail is right, saves, and presses **Invite to the portal**. The client gets an e-mail (when e-mail is set up) telling them how to sign in.
+2. **The client** opens the website → *Diaspora login*, types their e-mail and receives a **6-digit code** (valid 10 minutes, 5 tries). No password.
+3. **They see only their own contracts**: status in four simple steps, total / paid / balance, every installment (paid, pending, overdue), payment history with **receipt PDFs**, the **signed agreement** once Legal attaches it, and **construction progress**.
+4. **Construction progress**: on *Projects*, **Construction updates** → title, date, a short note and up to 8 photos. Every diaspora customer with a contract in that project sees it at once.
+
+Safety: customer accounts and sessions are separate from staff ones (a customer cookie opens nothing in the staff system and a staff token opens no portal); every receipt, document and photo is checked against the signed-in customer; the sign-in form answers the same for any address; un-ticking *Diaspora* or pressing **Disable portal** signs the client out at once. `PUBLIC_SITE_URL` (link in the invitation), `MKUYU_CONTACT_EMAIL`, `CUSTOMER_SESSION_HOURS` (default 24) are optional settings. The sign-in code is sent ONLY by e-mail (never shown on screen or in the server window), so SMTP must be set in `.env`; without it the server window says the code was not sent. `npm run test:customer-portal` runs the 11 security and flow checks.
+
+## Customer SMS notices
+
+The system tells customers by SMS (Kiswahili by default) when something happens on their account:
+
+| Notice | When | Also by e-mail |
+|---|---|---|
+| **Payment received** | Finance approves a payment: amount, receipt number, balance and the next installment | (the PDF receipt e-mail, as before) |
+| **Fully paid** | the approved payment that clears the contract | yes |
+| **Installment reminder** | 7, 3 and 0 days before an installment is due (`SMS_DUE_DAYS`) | (the 3-day e-mail reminder, as before) |
+| **Overdue** | 1, 7, 14 and 30 days after the oldest unpaid installment was due, then every 30 days (`SMS_OVERDUE_DAYS`); one SMS per contract with the total late | yes |
+| **New property** | a property is published, or becomes available again after a cancelled sale/rent, to clients and leads who **agreed** to receive offers | yes |
+
+- **Consent.** New-property messages go only to clients with *Agrees to receive SMS / e-mail about new properties* ticked on the client form, and website leads who ticked the same box (`marketing_opt_in` on `POST /public/requests` and `/public/enquiries`). Payment and installment messages go to every customer, because they are about their own contract.
+- **Sent once.** Every notice is written to `notification_log` under a unique key *before* it is sent, so a restart, a second server or a retry never sends it twice. A failed one is retried on the next hourly pass.
+- **Test mode first.** Until an SMS account is in `.env`, nothing leaves the server: each message appears in **System & backups → Customer notices** marked *Test (not sent)*, so the wording and the timing can be checked on real data. Then set `SMS_PROVIDER=nextsms` (or `beem`) with its credentials and `SMS_SENDER_ID`, and restart.
+- **No SMS at night.** The hourly reminder pass skips 20:00–08:00 (`SMS_QUIET_HOURS`). Payment SMS go at once, when Finance approves.
+- **Buttons.** *Send test SMS* sends one message to a number you type; *Check reminders now* runs the hourly pass immediately. Both are administrator-only and recorded in the audit log.
+
+All settings are listed in `.env.example`. Code: `backend/src/notify/` (`messages.js` the wording, `sms.js` the gateway, `customerNotices.js` the rules). `npm run test:notices` checks the wording and the rules without a database; `npm run test:notices:db` runs every notice against the isolated test database.
 
 ## Language (English / Kiswahili)
 

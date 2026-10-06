@@ -268,6 +268,7 @@ const viewMeta = {
   projects: ["Projects", "Developments and the properties, clients and contracts in each"],
   properties: ["Properties", "The property portfolio: status, price, location and photos"],
   clients: ["Clients", "People and companies, from first enquiry to signed agreement"],
+  verification: ["Diaspora verification", "Diaspora sign-ups prove who they are: the Diaspora Desk verifies them, Legal then confirms nationality"],
   contracts: ["Contracts", "Every agreement and where it sits in the approval workflow"],
   debts: ["Payments & debts", "Installments, balances, recorded payments and reminders"],
   reminders: ["Reminders", "Installments due now and falling due soon, so no payment date is missed"],
@@ -917,6 +918,8 @@ async function refresh() {
   refreshAttention();
   // Payments falling due soon feed the Reminders badge and the bell.
   loadUpcomingReminders().then(() => { updateNavigation(); updateNotificationDot(); if (state.view === "reminders") render(); });
+  // The Diaspora verification badge: customers waiting for this person.
+  if (canSeeVerification()) loadVerification({ quiet: true }).then(() => { updateNavigation(); if (["verification", "dashboard"].includes(state.view) && modalBackdrop.hidden) render(); });
   // Keeps the Requests count in the navigation current.
   if (canModule("leads") && can("view")) reloadRequests().then(() => { updateNavigation(); if (state.view === "requests") render(); });
 }
@@ -1066,6 +1069,8 @@ const NAV_ITEMS = [
   // Website Buy/Rent requests, followed from arrival to client. Same module
   // and permission as Leads: it is a narrower view of the same records.
   { view: "requests", label: "Requests & leads", icon: "inbox", module: "leads", permission: "view", group: "Business" },
+  // Identity checks of diaspora sign-ups: the Diaspora Desk checks, Legal verifies.
+  { view: "verification", label: "Diaspora verification", icon: "shield", group: "Business", diasporaVerification: true },
   // Leads live under "Requests & leads" (a tab there), not as a second menu entry.
   { view: "leads", label: "Leads", icon: "spark", module: "leads", permission: "view", group: "Business", mergedInto: "requests" },
   { view: "appointments", label: "Appointments", icon: "calendar", module: "appointments", permission: "view", group: "Business" },
@@ -1098,6 +1103,7 @@ function canSeeNavItem(item) {
   // no separate admin overview.
   if (isSystemAdminOnly() && (item.view === "dashboard" || item.view === "admin-dashboard")) return false;
   if (item.adminOnly) return isAdmin();
+  if (item.diasporaVerification) return inDiasporaDesk() || can("approve_legal") || can("approve_management");
   if (item.anyOf) return item.anyOf.some((permission) => can(permission));
   if (!item.module) return item.permission ? can(item.permission) : true;
   return canModule(item.module) && can(item.permission);
@@ -1173,6 +1179,8 @@ function navSources() {
     // New requests and reports waiting for this person; a request that moves to
     // a new stage counts again.
     requests: (state.requests || []).filter(requestNeedsMe).map((row) => `${row.id}:${requestStage(row)}`),
+    // Diaspora customers waiting for this person (documents in, or nationality to confirm).
+    verification: verificationsNeedingMe().map((row) => `${row.id}:${row.verification_status}:${row.citizenship_confirmed_at ? 1 : 0}`),
   };
 }
 
@@ -1210,7 +1218,7 @@ function updateNavigation() {
     // waiting on this person, which already falls as they act, so it stays
     // until the work is done rather than clearing on sight.
     const sources = navSources();
-    const live = new Set(["assignments"]);
+    const live = new Set(["assignments", "verification"]);
     if (sources[activeView] !== undefined && !live.has(activeView)) markSeen(`nav:${activeView}`, sources[activeView]);
     let lastGroup = null;
     nav.innerHTML = allowed.map((item) => {
@@ -1745,7 +1753,7 @@ function handOffLead(leadId) {
   openTaskModal({
     // Buy/Rent/Sell requests and Contact-page messages are both followed under
     // Requests, so both are tied to the task and its report comes back there.
-    requestId: ["website", "website-contact"].includes(lead.source) ? lead.id : null,
+    requestId: ["website", "website-contact", "diaspora-portal", "website-signup"].includes(lead.source) ? lead.id : null,
     department: "CUSTOMER SERVICE",
     heading: "Hand to Customer Service",
     title: `Contact ${lead.name}${lead.service ? ` (${SERVICE_LABELS[lead.service]?.toLowerCase() || lead.service} request)` : ""}`,
@@ -2339,7 +2347,7 @@ function renderOrganization(section = "staff") {
   const canManageAccount = (user) => (isAdmin() && user.id !== org.me?.user?.id) || (user.role !== "admin" && user.id !== org.me?.user?.id
     && Math.max(0, ...(user.roles || []).map((role) => Number(role.rank || 0))) <= Number(org.me?.rank || 0));
   const meId = org.me?.user?.id;
-  const userRow = (user) => `<tr><td><strong>${escapeHtml(user.display_name)}</strong>${user.id === meId ? ` ${badge("You", "open")}` : ""}<div class="table-sub">${escapeHtml(user.email)}${(user.departments || []).length ? ` · ${escapeHtml((user.departments || []).map((d) => titleCase(d.name)).join(", "))}` : ""}</div></td><td>${user.roles?.map((role) => badge(role.name)).join(" ") || "No role"}</td><td>${user.active ? badge("Active", "approved") : badge("Inactive", "archived")}${user.password_reset_pending ? `<div class="table-sub">Password reset: waiting for them to choose a new one</div>` : ""}</td><td><div class="row-actions">${user.id === meId && isAdmin() ? `<button class="btn btn-gold btn-small" data-action="change-my-password" title="Change the administrator's own sign-in password">Change my password</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="reset-password" data-id="${user.id}" title="Set a new sign-in password without changing the account">Reset password</button>` : ""}${canManageAccount(user) || user.id === meId ? `<button class="btn btn-soft btn-small" data-action="change-staff-department" data-id="${user.id}" title="Move to another department">Move department</button><button class="btn btn-soft btn-small" data-action="change-staff-role" data-id="${user.id}" title="Give a different role">Change role</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="toggle-user" data-id="${user.id}" data-active="${user.active ? 0 : 1}">${user.active ? "Deactivate" : "Activate"}</button>` : ""}</div></td></tr>`;
+  const userRow = (user) => `<tr data-searchable><td><strong>${escapeHtml(user.display_name)}</strong>${user.id === meId ? ` ${badge("You", "open")}` : ""}<div class="table-sub">${escapeHtml(user.email)}${(user.departments || []).length ? ` · ${escapeHtml((user.departments || []).map((d) => titleCase(d.name)).join(", "))}` : ""}</div></td><td>${user.roles?.map((role) => badge(role.name)).join(" ") || "No role"}</td><td>${user.active ? badge("Active", "approved") : badge("Inactive", "archived")}${user.password_reset_pending ? `<div class="table-sub">Password reset: waiting for them to choose a new one</div>` : ""}</td><td><div class="row-actions">${user.id === meId && isAdmin() ? `<button class="btn btn-gold btn-small" data-action="change-my-password" title="Change the administrator's own sign-in password">Change my password</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="reset-password" data-id="${user.id}" title="Set a new sign-in password without changing the account">Reset password</button>` : ""}${canManageAccount(user) || user.id === meId ? `<button class="btn btn-soft btn-small" data-action="change-staff-department" data-id="${user.id}" title="Move to another department">Move department</button><button class="btn btn-soft btn-small" data-action="change-staff-role" data-id="${user.id}" title="Give a different role">Change role</button>` : ""}${canManageAccount(user) ? `<button class="btn btn-soft btn-small" data-action="toggle-user" data-id="${user.id}" data-active="${user.active ? 0 : 1}">${user.active ? "Deactivate" : "Activate"}</button>` : ""}</div></td></tr>`;
 
   const usersByDepartment = new Map(DEPARTMENT_ORDER.map((name) => [name, []]));
   const unassigned = [];
@@ -2422,14 +2430,22 @@ function renderOrganization(section = "staff") {
   if (section === "system") {
     const backups = state.backups;
     const backupRows = (backups?.list || []).slice(0, 10).map((entry) => `<tr><td><strong>${escapeHtml(entry.name)}</strong>${entry.automatic ? ` ${badge("Automatic", "neutral")}` : ""}</td><td>${escapeHtml(entry.format === "json" ? "JSON snapshot" : "PostgreSQL dump")}</td><td>${(Number(entry.size || 0) / 1048576).toFixed(1)} MB</td><td>${formatDateTime(entry.created_at, true)}</td><td class="align-right"><div class="row-actions"><button class="btn btn-soft btn-small" data-action="download-backup" data-name="${escapeHtml(entry.name)}">Download</button><button class="btn btn-danger btn-small" data-action="delete-backup" data-name="${escapeHtml(entry.name)}">Delete</button></div></td></tr>`).join("");
-    const fullActivity = (org.audit || []).slice(0, 50).map((entry) => `<tr><td>${escapeHtml(entry.user_name || "System")}</td><td>${escapeHtml(entry.action)}</td><td>${escapeHtml(entry.module)}${entry.record_id ? ` #${escapeHtml(String(entry.record_id))}` : ""}</td><td>${formatDate(entry.created_at, true)}</td></tr>`).join("");
+    const activitySource = state.staffActivity?.rows || org.audit || [];
+    const fullActivity = activitySource.slice(0, state.staffActivity ? 300 : 50).map((entry) => `<tr><td>${escapeHtml(entry.user_name || "System")}</td><td>${escapeHtml(entry.action)}</td><td>${escapeHtml(entry.module)}${entry.record_id ? ` #${escapeHtml(String(entry.record_id))}` : ""}</td><td>${formatDate(entry.created_at, true)}</td></tr>`).join("");
     return `<div class="section-grid org-grid admin-pages">
       <section class="card glass"><div class="section-head"><div><h2 class="section-title">Backups</h2><div class="section-note">${backups?.error ? escapeHtml(backups.error) : `${(backups?.list || []).length} backup${(backups?.list || []).length === 1 ? "" : "s"} kept on the server${(backups?.list || []).length > 10 ? " · the 10 newest are listed" : ""} · make one before any big change`}</div></div><button class="btn btn-primary btn-small" data-action="backup-now">Create backup</button></div>
         ${autoBackupNote(backups?.status)}
         ${emailStatusNote(backups?.email)}
+        ${smsStatusNote(backups?.sms)}
         ${backupRows ? `<div class="table-wrap"><table><thead><tr><th>File</th><th>Type</th><th>Size</th><th>Made</th><th class="align-right">Actions</th></tr></thead><tbody>${backupRows}</tbody></table></div>` : `<div class="empty">${backups ? "No backup yet." : "Loading…"}</div>`}
       </section>
-      <section class="card glass"><div class="section-head"><div><h2 class="section-title">Activity log</h2><div class="section-note">The latest 50 recorded actions, newest first · read-only</div></div></div><div class="table-wrap"><table><thead><tr><th>User</th><th>Action</th><th>Module</th><th>When</th></tr></thead><tbody>${fullActivity || `<tr><td colspan="4" class="empty">No activity recorded</td></tr>`}</tbody></table></div></section>
+      ${renderCustomerNotices(backups?.sms)}
+      <section class="card glass"><div class="section-head"><div><h2 class="section-title">Activity log</h2><div class="section-note">${state.staffActivity ? `${escapeHtml(state.staffActivity.label)} · up to 300 actions, sign-ins included` : "The latest 50 recorded actions, newest first"} · read-only</div></div>
+        <div class="row-actions"><select class="filter-input" data-action-change="activity-filter" aria-label="Whose activity">
+          <option value="">Everyone (latest 50)</option>
+          <option value="dept:DIASPORA DESK" ${state.staffActivity?.key === "dept:DIASPORA DESK" ? "selected" : ""}>Diaspora Desk (all members)</option>
+          ${(org.users || []).filter((u) => u.active !== false).map((u) => `<option value="user:${u.id}" ${state.staffActivity?.key === `user:${u.id}` ? "selected" : ""}>${escapeHtml(u.display_name || u.email)}</option>`).join("")}
+        </select></div></div><div class="table-wrap"><table><thead><tr><th>User</th><th>Action</th><th>Module</th><th>When</th></tr></thead><tbody>${fullActivity || `<tr><td colspan="4" class="empty">No activity recorded</td></tr>`}</tbody></table></div></section>
       <section class="card glass"><div class="section-head"><div><h2 class="section-title">Record ownership</h2><div class="section-note">Records from before ownership existed: give each an owner and a department so the right people see it</div></div><button class="btn btn-soft btn-small" data-action="reload-allocation">${state.allocationUnassigned === false ? "Unassigned only" : "Show all"}</button></div>${renderAllocation(state.allocationEntity || "client")}</section>
     </div>`;
   }
@@ -2470,12 +2486,25 @@ function renderAdminConsole(org, { canManage, canAddStaff, canAddToDepartment = 
   // A to Z: staff by name, departments by name.
   const byName = (a, b) => String(a.display_name).localeCompare(String(b.display_name));
   const staffTable = (list) => `<div class="table-wrap" style="margin-top:10px"><table><thead><tr><th>Name</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead><tbody>${list.slice().sort(byName).map(userRow).join("")}</tbody></table></div>`;
+  // The search box at the top finds people (name, e-mail, role, department) and
+  // departments: matching departments open by themselves and show only the
+  // matching people; the rest are hidden.
+  const term = (globalSearch?.value || "").trim().toLowerCase();
+  const words = term.split(/\s+/).filter(Boolean);
+  const hit = (text) => words.every((w) => String(text || "").toLowerCase().includes(w));
+  const userText = (u) => [u.display_name, u.email, ...(u.roles || []).map((r) => r.name), ...(u.departments || []).map((x) => x.name)].join(" ");
+  let shownBlocks = 0;
   const blocks = (org.departments || []).slice()
     .sort((a, b) => String(a.name).localeCompare(String(b.name)))
     .map((d) => {
-      const people = members(d);
-      const active = people.filter((u) => u.active).length;
-      const isOpen = open.has(Number(d.id));
+      const everyone = members(d);
+      const deptHit = words.length && hit(`${d.name} ${titleCase(d.name)}`);
+      const peopleHit = words.length ? everyone.filter((u) => hit(userText(u))) : everyone;
+      if (words.length && !deptHit && !peopleHit.length) return "";
+      shownBlocks += 1;
+      const people = words.length && !deptHit ? peopleHit : everyone;
+      const active = everyone.filter((u) => u.active).length;
+      const isOpen = open.has(Number(d.id)) || Boolean(words.length && !deptHit && peopleHit.length);
       const deptActions = !canManage || d.core ? "" : [
         `<button class="btn btn-soft btn-small" data-action="rename-department" data-id="${d.id}">Rename</button>`,
         d.active === false
@@ -2491,19 +2520,22 @@ function renderAdminConsole(org, { canManage, canAddStaff, canAddToDepartment = 
           <span class="dept-group-name">${escapeHtml(titleCase(d.name))}</span>
           ${d.core ? badge("Core", "neutral") : ""}${d.active === false ? badge("Inactive", "archived") : ""}
           <span class="dept-group-count">${active} staff · ${Number(d.client_count || 0)} client${Number(d.client_count || 0) === 1 ? "" : "s"}</span>
-          <span class="row-actions" style="margin-left:auto">${addStaff}${deptActions}<button class="btn btn-small${isOpen ? "" : " btn-primary"}" data-action="toggle-dept-staff" data-id="${d.id}" aria-expanded="${isOpen}">${isOpen ? "Hide staff" : `Show staff (${people.length})`}</button></span>
+          <span class="row-actions" style="margin-left:auto">${addStaff}${deptActions}<button class="btn btn-small${isOpen ? "" : " btn-primary"}" data-action="toggle-dept-staff" data-id="${d.id}" aria-expanded="${isOpen}">${isOpen ? "Hide staff" : `Show staff (${everyone.length})`}</button></span>
         </div>
         ${isOpen ? (people.length ? staffTable(people) : `<p class="muted" style="margin:.5rem 0 0">No staff yet. ${d.default_role ? "Press Add staff above." : "Add one on the Staff page and choose this department."}</p>`) : ""}
       </div>`;
     }).join("");
-  const loose = org.users.filter((u) => !(u.departments || []).length);
+  const looseAll = org.users.filter((u) => !(u.departments || []).length);
+  const loose = words.length ? looseAll.filter((u) => hit(userText(u))) : looseAll;
+  const noMatch = words.length && !shownBlocks && !loose.length
+    ? `<div class="empty" data-dept-search>No staff member or department matches “${escapeHtml(term)}”. Try a first name, an e-mail or a role.</div>` : "";
   const looseBlock = loose.length ? `<div class="dept-group"><div class="dept-group-head"><span class="dept-group-name">No department</span><span class="dept-group-count">${loose.length} to place</span></div>${staffTable(loose)}</div>` : "";
   return `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Departments</h2><div class="section-note">${(org.departments || []).filter((d) => d.active !== false).length} departments · ${org.users.filter((u) => u.active).length} active staff · A to Z · press Show staff to see who is in each</div></div></div>
     <div class="form-grid">
       ${canManage ? `<div class="field"><label for="dept-new-name">New department</label><input id="dept-new-name" data-org-field="department" maxlength="80" placeholder="e.g. Property Management"></div><button class="btn btn-primary" data-action="create-department">Create department</button>` : ""}
     </div>
     ${canAddStaff ? `<details class="panel add-panel" style="margin-top:14px"><summary>${icon("plus")}Add a staff member</summary>${staffForm}</details>` : ""}
-    <div style="margin-top:16px">${blocks}${looseBlock}</div>
+    <div style="margin-top:16px">${noMatch}${blocks}${looseBlock}</div>
   </section>`;
 }
 
@@ -3054,6 +3086,7 @@ const WORK_FLOW = {
   sales: ["Website request arrives", "Customer Service calls the customer", "You prepare the contract", "Legal → Finance → MD", "Customer signs"],
   md: ["Sales prepares", "Legal reviews", "Finance checks the money", "You approve", "Legal releases to the customer"],
   legal: ["Sales submits", "You review and approve", "Finance checks the money", "You send it to the MD", "You release it and record the signature"],
+  desk: ["Diaspora customer signs up or asks in the portal", "You check their documents", "Legal verifies them", "You prepare the diaspora contract", "Customer signs in the portal"],
   cs: ["Sales hands you a request", "You contact the customer", "You write a short report", "Sales accepts it", "The customer becomes a client"],
 };
 
@@ -3073,7 +3106,14 @@ function workTodayPanel(role) {
     job(n(summary.debts_due_week?.count), "Due in the next 7 days", "Call these customers before the due date.", "See who to call", toView("debts", { debtStatus: "upcoming" }), "amber");
     job(n(summary.debts_overdue?.count), "Overdue installments", "Follow these up today.", "See overdue", toView("debts", { debtStatus: "overdue" }), "red");
   }
-  if (role === "sales") {
+  if (role === "sales" && diasporaDeskOnly()) {
+    // The Diaspora Desk: diaspora customers only, end to end.
+    if (canModule("leads")) job((state.requests || []).filter(requestNeedsMe).length, "New diaspora requests", "Requests sent from the diaspora portal. Contact the customer and follow up.", "Open requests", toView("requests"), "gold");
+    job(verificationsNeedingMe().length, "Customers to verify", "Passport and proof of residence sent by diaspora customers. Check them and press “Verify customer”: they get the Verified badge and can request properties.", "Open verification", toView("verification"));
+    job(n(work.contracts_changes), "Contracts sent back to you", "Fix what Legal asked for, then submit again.", "Fix contracts", toView("contracts", { status: "changes_requested" }), "amber");
+    job(n(work.contracts_draft), "Drafts not yet sent to Legal", "Check the draft and press “Submit to Legal”.", "Submit drafts", toView("contracts", { status: "draft" }));
+    job(null, "Verified customer ready to buy or rent?", "The system writes the diaspora contract, price and payment plan for you.", "Prepare a contract", { action: "generate-contract" });
+  } else if (role === "sales") {
     if (canModule("leads")) {
       job(n(work.requests_new), "New website requests", "Give each one to Customer Service to call the customer.", "Open requests", toView("requests"), "gold");
       job(n(work.requests_reported), "Customer Service reported back", "Read what the customer said, then accept or send back.", "Read reports", toView("requests"));
@@ -3096,6 +3136,7 @@ function workTodayPanel(role) {
     job(n(work.contracts_under_review), "Contracts you are reviewing", "Check the clauses and the parties, then press “Legal approval” or send it back with a reason.", "Finish reviews", toView("contracts", { status: "under_review" }));
     job(n(work.contracts_to_md), "Finance has checked the money", "Press “Send for management approval”.", "Send to the MD", toView("contracts", { status: "legal_approved" }));
     job(n(work.contracts_release), "The MD approved", "Press “Send to customer” so the customer can sign.", "Send to customers", toView("contracts", { status: "approved" }));
+    job(verificationsNeedingMe().filter((row) => row.verification_status === "verified").length, "Diaspora nationality to confirm", "The Diaspora Desk has verified these customers. Confirm their nationality before they can sign an agreement.", "Open verification", toView("verification"));
     job(n(work.contracts_customer), "With the customer for signature", "When the customer has signed and the deposit is paid, attach the signed contract (“Replace with signed contract”) and press “Record customer signature”.", "Record signatures", toView("contracts", { status: "customer_pending" }), "amber");
   }
   if (role === "cs") {
@@ -3117,7 +3158,7 @@ function workTodayPanel(role) {
       : idle ? `<span class="work-count work-count-done">${icon("check")}</span>` : `<span class="work-count ${entry.tone ? `work-${entry.tone}` : ""}">${entry.count > 99 ? "99+" : entry.count}</span>`;
     return `<li class="work-card${idle ? " work-card-idle" : ""}"><span class="work-num">${index + 1}</span>${badgeHtml}<div class="work-copy"><strong>${escapeHtml(entry.title)}</strong><span>${escapeHtml(idle ? "Nothing waiting. Well done." : entry.help)}</span></div><button class="btn ${idle ? "btn-soft" : "btn-primary"} btn-small" ${attrs}>${escapeHtml(entry.label)}${icon("arrow")}</button></li>`;
   }).join("");
-  const flow = (WORK_FLOW[role] || []).map((step, index) => `<li class="work-step"><span>${index + 1}</span>${escapeHtml(step)}</li>`).join("");
+  const flow = (WORK_FLOW[diasporaDeskOnly() ? "desk" : role] || []).map((step, index) => `<li class="work-step"><span>${index + 1}</span>${escapeHtml(step)}</li>`).join("");
   return `<article class="panel work-panel">
     <div class="panel-head"><div><h2 class="panel-title">Your work today</h2><div class="panel-note">${waiting ? `${waiting} thing${waiting === 1 ? "" : "s"} waiting for you. Start at number 1.` : "Nothing is waiting for you right now."}</div></div></div>
     <div class="panel-body">
@@ -3318,6 +3359,8 @@ function renderProjects() {
     const properties = report ? Number(report.properties || 0) : 0;
     const clients = report ? Number(report.clients || 0) : 0;
     const edit = canChange("projects", "edit") ? `<button class="btn btn-small" data-action="edit-project" data-id="${project.id}">Edit</button>` : "";
+    // Construction updates for diaspora customers: anyone who works on projects can open them.
+    const progressButton = `<button class="btn btn-ghost btn-small" data-action="project-progress" data-id="${project.id}">Construction updates</button>`;
     const remove = canChange("projects", "delete") ? `<button class="btn btn-small btn-danger-ghost" data-action="delete-project" data-id="${project.id}" title="Delete project">Delete project</button>` : "";
     return `<article class="project-card" data-searchable>
       <div class="project-card-head"><span class="project-icon">${icon("building")}</span><div class="project-title"><strong>${escapeHtml(project.name)}</strong><span>${project.kind === "building" ? "Building" : "Estate"}${project.location ? ` · ${escapeHtml(project.location)}` : ""} · Created ${formatDate(project.created_at)}</span></div>${badge(project.status)}</div>
@@ -3327,7 +3370,7 @@ function renderProjects() {
         <div><dt>Contracts</dt><dd>${contracts}</dd></div>
         <div><dt>Contract value</dt><dd class="amount">${money(value)}</dd></div>
       </dl>
-      ${edit || remove ? `<div class="card-actions">${canModule("properties") ? `<button class="btn btn-ghost btn-small" data-action="project-properties" data-id="${project.id}">View properties</button>` : ""}<span class="spacer"></span>${edit}${rowMenu([remove])}</div>` : (canModule("properties") ? `<div class="card-actions"><button class="btn btn-ghost btn-small" data-action="project-properties" data-id="${project.id}">View properties</button></div>` : "")}
+      ${edit || remove ? `<div class="card-actions">${canModule("properties") ? `<button class="btn btn-ghost btn-small" data-action="project-properties" data-id="${project.id}">View properties</button>` : ""}${progressButton}<span class="spacer"></span>${edit}${rowMenu([remove])}</div>` : (canModule("properties") ? `<div class="card-actions"><button class="btn btn-ghost btn-small" data-action="project-properties" data-id="${project.id}">View properties</button>${progressButton}</div>` : "")}
     </article>`;
   }).join("");
   // `projects` is still delivered complete, so `.length` is a true count here.
@@ -3386,7 +3429,7 @@ function renderContracts() {
     ]);
     return `<tr data-searchable>
       <td><button class="cell-link" data-action="view-contract" data-id="${contract.id}"><span class="cell-main">${escapeHtml(contract.client_name)}</span></button><span class="cell-sub">${escapeHtml(contract.contract_number || "No number yet")}${contract.project_name ? ` · ${escapeHtml(contract.project_name)}` : ""}</span></td>
-      <td>${contractStatusBadge(contract)}${contract.signed_document_id ? `<span class="cell-sub signed-note">${icon("check")}Signed copy attached</span>` : ""}${contract.position ? contractPositionNote(contract) : (stage ? `<span class="cell-sub stage-note" title="Department currently holding the contract">Stage ${stage.number} of ${stage.total} · Held by ${escapeHtml(titleCase(stage.owner))}</span>` : "")}${needsPlan ? `<span class="cell-sub plan-missing">No payment plan yet</span>` : ""}${contract.legal_signed_by ? `<span class="cell-sub signed-note">${icon("check")}Signed by Legal</span>` : ""}</td>
+      <td>${contractStatusBadge(contract)}${contract.channel === "diaspora" ? `<span class="cell-sub">${badge("Diaspora", "featured")}${contract.customer_accepted_at ? ` Customer signed online ${formatDate(contract.customer_accepted_at)}` : contract.status === "customer_pending" ? " Waiting for the customer to sign in the portal" : ""}</span>` : ""}${contract.signed_document_id ? `<span class="cell-sub signed-note">${icon("check")}Signed copy attached</span>` : ""}${contract.position ? contractPositionNote(contract) : (stage ? `<span class="cell-sub stage-note" title="Department currently holding the contract">Stage ${stage.number} of ${stage.total} · Held by ${escapeHtml(titleCase(stage.owner))}</span>` : "")}${needsPlan ? `<span class="cell-sub plan-missing">No payment plan yet</span>` : ""}${contract.legal_signed_by ? `<span class="cell-sub signed-note">${icon("check")}Signed by Legal</span>` : ""}</td>
       <td>${contract.deal_type ? badge(dealTypeLabel(contract.deal_type), "open") : `<span class="muted cell-plain">Not recorded</span>`}<span class="cell-sub">${escapeHtml(humanize(contract.contract_type || ""))}</span></td>
       <td><span class="cell-main cell-plain">${formatDate(contract.start_date)}</span><span class="cell-sub">to ${formatDate(contract.end_date)}</span></td>
       <td class="amount">${money(contract.value)}${Number(contract.discount_pct || 0) > 0 ? `<span class="cell-sub">${numberValue(contract.discount_pct)}% discount</span>` : ""}</td>
@@ -3772,20 +3815,28 @@ function renderProperties() {
 
 function renderClients() {
   const filters = state.filters;
+  // A Diaspora Desk member only ever receives diaspora clients from the server.
+  const segment = diasporaDeskOnly() ? "" : (state.clientSegment ?? (inDiasporaDesk() ? "diaspora" : ""));
   const rows = (state.clients || []).filter((client) =>
+    (!segment || (segment === "diaspora" ? client.is_diaspora : !client.is_diaspora)) &&
     (!filters.project || String(client.project_id) === filters.project) &&
     (!filters.clientStatus || client.status === filters.clientStatus)
   );
   const list = rows.map((client) => {
     const initials = String(client.name || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
+    const view = `<button class="btn btn-small btn-primary" data-action="view-client" data-id="${client.id}">View</button>`;
     const edit = can("edit") ? `<button class="btn btn-small" data-action="edit-client" data-id="${client.id}">Edit</button>` : "";
+    // A diaspora customer's passport and proof of residence, for the Desk / Legal / MD.
+    const kycDocs = client.is_diaspora && ["submitted", "desk_checked", "verified", "rejected"].includes(client.verification_status) && canSeeVerification()
+      ? `<button class="btn btn-small" data-action="kyc-doc" data-id="${client.id}">Identity documents</button>` : "";
     const remove = can("delete") ? `<button class="btn btn-small btn-danger-ghost" data-action="delete-client" data-id="${client.id}" title="Delete client">Delete client</button>` : "";
     return `<article class="client-card" data-searchable>
       <div class="client-head">
         <span class="avatar" aria-hidden="true">${escapeHtml(initials || "?")}</span>
-        <div class="client-title"><div class="client-name">${escapeHtml(client.name)}</div><div class="client-type">${escapeHtml(humanize(client.client_type))}${client.project_name ? ` · ${escapeHtml(client.project_name)}` : ""}</div></div>
+        <div class="client-title"><div class="client-name"><button type="button" class="cell-link client-open" data-action="view-client" data-id="${client.id}">${escapeHtml(client.name)}</button></div><div class="client-type">${escapeHtml(humanize(client.client_type))}${client.project_name ? ` · ${escapeHtml(client.project_name)}` : ""}</div></div>
         ${badge(client.status === "lead" ? "Lead / prospect" : client.status, client.status)}
       </div>
+      ${client.is_diaspora ? `<div class="client-diaspora">${badge("Diaspora", "featured")} ${verifiedBadge(client)} <span>${escapeHtml(client.country || "Abroad")}</span>${client.officer_name ? ` · Contact: ${escapeHtml(client.officer_name)}` : ""}</div>` : ""}
       <div class="client-meta">
         ${client.email ? `<a class="contact-line" href="mailto:${escapeHtml(client.email)}">${icon("mail")}<span>${escapeHtml(client.email)}</span></a>` : ""}
         ${client.phone ? `<a class="contact-line" href="tel:${escapeHtml(String(client.phone).replace(/\s+/g, ""))}">${icon("phone")}<span>${escapeHtml(client.phone)}</span></a>` : ""}
@@ -3794,13 +3845,17 @@ function renderClients() {
       </div>
       <div class="client-foot">
         <span class="muted">Added ${formatDate(client.created_at)}</span>
-        <div class="row-actions">${edit}${rowMenu([remove])}</div>
+        <div class="row-actions">${view}${rowMenu([edit, kycDocs, remove])}</div>
       </div>
     </article>`;
   }).join("");
   const mayCreate = canModule("clients") && can("create");
   const filtered = Boolean(filters.project || filters.clientStatus);
+  const all = state.clients || [];
+  const segTabs = [["", "All", all.length], ["local", "Ndani ya nchi", all.filter((c) => !c.is_diaspora).length], ["diaspora", "Diaspora", all.filter((c) => c.is_diaspora).length]]
+    .map(([key, label, n]) => `<button class="seg-btn${segment === key ? " active" : ""}" data-action="client-segment" data-segment="${key}" aria-pressed="${segment === key}">${escapeHtml(label)} (${n})</button>`).join("");
   content.innerHTML = `
+    ${diasporaDeskOnly() ? `<p class="muted notice-text">Diaspora Desk: you see diaspora customers only.</p>` : `<div class="toolbar"><div class="toolbar-filters"><div class="segmented" role="group" aria-label="Client type">${segTabs}</div></div></div>`}
     <div class="toolbar">
       <div class="toolbar-filters">
         <span class="toolbar-label">${icon("search")}Filter</span>
@@ -3829,7 +3884,7 @@ function renderClients() {
 // authorized here - the view is only offered to holders of the leads module.
 function renderLeads() {
   // Website Buy/Rent requests have their own view (Requests).
-  const leads = (state.organization.leads || []).filter((lead) => !["website", "website-contact"].includes(lead.source));
+  const leads = (state.organization.leads || []).filter((lead) => !["website", "website-contact", "diaspora-portal", "website-signup"].includes(lead.source));
   const status = state.filters.status || "";
   const statuses = [...new Set(leads.map((lead) => lead.status).filter(Boolean))].sort();
   const rows = leads.filter((lead) => !status || lead.status === status);
@@ -3916,7 +3971,9 @@ function requestStage(row) {
     return "message";
   }
   if (row.appointment_id) return "appointment";
-  if (row.client_id) return "client";
+  // A diaspora request is from an existing client and still follows the full
+  // request flow (Customer Service contacts them, Sales arranges the next step).
+  if (row.client_id && row.source !== "diaspora-portal") return "client";
   if (!row.task_id || row.task_status === "cancelled") return row.existing_client_id ? "existing" : "new";
   if (["submitted", "under_review"].includes(row.task_status)) return "reported";
   if (["approved", "completed"].includes(row.task_status)) {
@@ -4022,7 +4079,10 @@ function requestProgress(row, key) {
 
 function renderRequests() {
   if (!state.requests) { content.innerHTML = `<div class="panel">${emptyState("Loading requests", "", { iconName: "inbox", compact: true })}</div>`; return; }
-  const all = state.requests;
+  // Ndani ya nchi / Diaspora: each desk works its own side.
+  const segment = diasporaDeskOnly() ? "" : (state.requestSegment ?? (inDiasporaDesk() ? "diaspora" : ""));
+  const everything = state.requests;
+  const all = everything.filter((row) => !segment || (segment === "diaspora" ? row.source === "diaspora-portal" : row.source !== "diaspora-portal"));
   const stage = state.requestStage || "";
   const rows = all.filter((row) => !stage || requestStage(row) === stage);
   // Only Sales hands requests to Customer Service; the MD follows, read only.
@@ -4096,7 +4156,7 @@ function renderRequests() {
       : `${row.service ? badge(SERVICE_LABELS[row.service] || row.service, "open") : ""}<span class="cell-sub">${escapeHtml(row.service === "sell" ? `Their property: ${sellSummary(row.sell_details)}` : (row.property_name || "Property no longer listed"))}</span>`;
     const answeredNote = isContactMessage(row) && row.outcome_note ? `<span class="cell-sub">Reply: ${escapeHtml(row.outcome_note)}</span>` : "";
     return `<tr data-searchable>
-      <td><span class="cell-main">${escapeHtml(row.name)}</span><span class="cell-sub">${escapeHtml([row.phone, row.email].filter(Boolean).join(" · ") || "No contact details")}</span><span class="cell-sub">W-${row.id}</span></td>
+      <td><span class="cell-main">${escapeHtml(row.name)}${row.source === "diaspora-portal" ? ` ${badge("Diaspora", "featured")}` : ""}</span><span class="cell-sub">${escapeHtml([row.phone, row.email].filter(Boolean).join(" · ") || "No contact details")}</span><span class="cell-sub">${row.source === "diaspora-portal" ? `D-${row.id} · existing client, from the diaspora portal` : `W-${row.id}`}</span></td>
       <td>${wants}</td>
       <td>${row.budget ? `${row.service === "sell" ? "Asking " : ""}TZS ${escapeHtml(Number(row.budget).toLocaleString("en-US"))}` : (row.service === "sell" ? "No asking price" : "—")}<span class="cell-sub">Contact by ${escapeHtml(means[row.preferred_contact] || "Phone")}</span></td>
       <td>${formatDate(row.created_at)}</td>
@@ -4105,7 +4165,10 @@ function renderRequests() {
       <td class="align-right"><div class="row-actions">${next}</div></td>
     </tr>`;
   }).join("");
+  const segTabs = [["", "All", everything.length], ["local", "Ndani ya nchi", everything.filter((r) => r.source !== "diaspora-portal").length], ["diaspora", "Diaspora", everything.filter((r) => r.source === "diaspora-portal").length]]
+    .map(([key, label, n]) => `<button class="seg-btn${segment === key ? " active" : ""}" data-action="request-segment" data-segment="${key}" aria-pressed="${segment === key}">${escapeHtml(label)} (${n})</button>`).join("");
   content.innerHTML = `
+    ${diasporaDeskOnly() ? `<p class="muted notice-text">Diaspora Desk: you see diaspora requests only.</p>` : `<div class="toolbar"><div class="toolbar-filters"><div class="segmented" role="group" aria-label="Customer type">${segTabs}</div></div></div>`}
     <div class="toolbar"><div class="toolbar-filters"><div class="segmented" role="group" aria-label="Request stages">${tabs}</div></div><div class="toolbar-end"><span class="toolbar-count">${rows.length} request${rows.length === 1 ? "" : "s"}</span></div></div>
     ${rows.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Customer</th><th>Wants</th><th>Budget</th><th>Received</th><th>Stage</th><th>Message</th><th class="align-right">Next step</th></tr></thead><tbody>${list}</tbody></table></div>`
       : `<div class="panel">${emptyState(stage ? "No requests at this stage" : "No requests yet", stage ? "Try another stage." : "When a visitor asks to buy, rent or sell on the website, or writes on the Contact page, it arrives here.", { iconName: "inbox" })}</div>`}`;
@@ -4387,6 +4450,10 @@ function render() {
   if (state.view === "leads") renderLeads();
   addRequestTabs();
   addPageTip();
+  if (state.view === "verification") {
+    renderVerification();
+    if (!state.verificationRequested || Date.now() - (state.verificationAt || 0) > 10000) loadVerification();
+  }
   if (state.view === "requests") {
     renderRequests();
     addRequestTabs();
@@ -4471,6 +4538,14 @@ function applySearch() {
       searchTimer = null;
       loadList(kind, { page: 1, search: raw, force: true });
     }, 250);
+    return;
+  }
+  // Departments page: staff sit inside folded departments, so the page is drawn
+  // again with the matching departments opened (only when the term changes).
+  if (content.querySelector(".dept-group, [data-dept-search]") && state.lastDeptSearch !== term) {
+    state.lastDeptSearch = term;
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { searchTimer = null; render(); }, 200);
     return;
   }
   // Dashboard / Administration: hide non-matching rows in place. Everything on
@@ -4566,6 +4641,7 @@ async function refreshLive() {
     loadUpcomingReminders(),
     canModule("leads") && can("view") ? loadRequests() : null,
     state.view === "assignments" || state.tasks ? loadTasks() : null,
+    canSeeVerification() ? loadVerification({ quiet: true }) : null,
     state.view === "templates" ? (state.templatesLoaded = false, state.templatesRequested = false, null) : null,
   ]);
   updateNavigation();
@@ -4965,6 +5041,11 @@ function openModal(type, record = null) {
       ${formSection("Contact")}
       <div class="field"><label for="field-email">Email</label><input id="field-email" name="email" type="email" maxlength="120" value="${escapeHtml(record?.email || "")}" placeholder="contact@example.com"></div>
       <div class="field"><label for="field-phone">Phone</label><input id="field-phone" name="phone" maxlength="120" value="${escapeHtml(record?.phone || "")}" placeholder="+255 700 000 000"></div>
+      ${formSection("Diaspora portal", "A client living abroad can follow their contract, payments and construction photos online.")}
+      <div class="field"><label class="checkbox-field"><input type="checkbox" name="is_diaspora" ${record?.is_diaspora || diasporaDeskOnly() ? "checked" : ""} ${diasporaDeskOnly() ? "disabled" : ""}><span>Diaspora client (lives abroad)${diasporaDeskOnly() ? " · always, for the Diaspora Desk" : ""}</span></label></div>
+      <div class="field"><label for="field-country">Country of residence</label><input id="field-country" name="country" maxlength="80" value="${escapeHtml(record?.country || "")}" placeholder="e.g. UAE, UK, USA"></div>
+      ${record?.id ? clientPortalControls(record) : ""}
+      <div class="field full"><label class="checkbox-field"><input type="checkbox" name="marketing_opt_in" ${record?.marketing_opt_in ? "checked" : ""}><span>Agrees to receive SMS / e-mail about new properties</span></label><div class="field-help">Tick only when the client said yes. Payment receipts and installment reminders are sent to every client anyway.</div></div>
       ${formSection("Classification")}
       <div class="field"><label for="field-client-type">Type</label><select id="field-client-type" name="client_type"><option value="buyer" ${record?.client_type === "buyer" ? "selected" : ""}>Buyer</option><option value="seller" ${record?.client_type === "seller" ? "selected" : ""}>Seller</option><option value="landlord" ${record?.client_type === "landlord" ? "selected" : ""}>Landlord</option><option value="tenant" ${record?.client_type === "tenant" ? "selected" : ""}>Tenant</option></select></div>
       <div class="field"><label for="field-client-status">Status</label><select id="field-client-status" name="status"><option value="lead" ${record?.status === "lead" ? "selected" : ""}>Lead / prospect</option><option value="active" ${record?.status === "active" ? "selected" : ""}>Active client</option><option value="inactive" ${record?.status === "inactive" ? "selected" : ""}>Inactive</option></select></div>
@@ -5195,7 +5276,7 @@ async function handleFormSubmit(event) {
   event.preventDefault();
   const form = event.target;
   // Forms with their own submit handler (the signed contract upload).
-  if (form.id === "signed-copy-form" || form.id === "statement-form") return;
+  if (form.id === "signed-copy-form" || form.id === "statement-form" || form.id === "progress-form") return;
   const data = Object.fromEntries(new FormData(form));
   const type = modal.dataset.type;
   const id = form.dataset.id;
@@ -5376,6 +5457,9 @@ async function handleFormSubmit(event) {
       }
     } else if (type === "client") {
       data.project_id = data.project_id ? Number(data.project_id) : null;
+      // An unticked checkbox is absent from FormData: send an explicit false.
+      data.marketing_opt_in = Boolean(data.marketing_opt_in);
+      data.is_diaspora = diasporaDeskOnly() || Boolean(data.is_diaspora);
       // The contract step is part of the client form, so its fields are split off
       // before the client is posted: the client endpoint must not receive them.
       const contractStep = {
@@ -5597,6 +5681,396 @@ async function createBackup() {
     if (state.view === "system") render();
     await downloadFile(`/backups/${encodeURIComponent(backup.name)}/download`, backup.name);
   } catch (error) { showToast(error.message || "Backup failed."); }
+}
+
+/* --------------------------------------------------------------------------
+   Diaspora Desk and verification
+   -------------------------------------------------------------------------- */
+const VERIFY_LABELS = { unverified: "Waiting for documents", submitted: "Documents in · to verify", desk_checked: "Documents in · to verify", verified: "Verified", rejected: "Sent back to customer" };
+const VERIFY_TONES = { unverified: "pending", submitted: "pending", desk_checked: "pending", verified: "approved", rejected: "overdue" };
+
+/** The tick badge for a diaspora customer MKUYU has verified. NULL status =
+    added by staff, checked in person, so verified too (as in the portal). */
+function isVerifiedClient(client) {
+  return Boolean(client?.is_diaspora ?? true) && (!client?.verification_status || client.verification_status === "verified");
+}
+function verifiedBadge(client, { withNationality = false } = {}) {
+  if (!isVerifiedClient(client)) return client?.verification_status ? badge(VERIFY_LABELS[client.verification_status] || client.verification_status, VERIFY_TONES[client.verification_status] || "neutral") : "";
+  const nationality = withNationality && client.verification_status && !client.citizenship_confirmed_at
+    ? ` <span class="badge badge-pending" title="Legal confirms nationality before any agreement is signed">Nationality: Legal to confirm</span>` : "";
+  return `<span class="badge-verified" title="${client.verification_status ? "Identity verified by MKUYU" : "Added by MKUYU staff"}">${icon("check")}Verified</span>${nationality}`;
+}
+
+/** Only in the Diaspora Desk: the server already limits everything to diaspora work. */
+function diasporaDeskOnly() {
+  return Boolean(state.organization?.me?.diaspora_desk_only);
+}
+
+function inDiasporaDesk() {
+  return (state.organization?.me?.user?.departments || []).some((department) => String(department.name).toUpperCase() === "DIASPORA DESK");
+}
+
+/** May this person see Diaspora verification at all (same rule as the menu)? */
+function canSeeVerification() {
+  return inDiasporaDesk() || can("approve_legal") || can("approve_management");
+}
+
+/** Re-read the verification queue. `quiet`: refresh the data only (the caller redraws). */
+async function loadVerification({ quiet = false } = {}) {
+  state.verificationRequested = true;
+  state.verificationAt = Date.now();
+  try { state.verification = await api("/diaspora/verifications"); }
+  catch (error) { if (!quiet || !state.verification) state.verification = { rows: [], role: {}, error: error.message || "Unable to load." }; }
+  if (!quiet && state.view === "verification") render();
+  if (!quiet) updateNavigation();
+}
+
+/** Customers waiting for THIS person: documents to verify (Desk), nationality to confirm (Legal). */
+function verificationsNeedingMe() {
+  const data = state.verification;
+  if (!data?.rows) return [];
+  const role = data.role || {};
+  return data.rows.filter((row) => ((role.desk || role.legal) && ["submitted", "desk_checked"].includes(row.verification_status))
+    || (role.legal && row.verification_status === "verified" && !row.citizenship_confirmed_at));
+}
+
+function renderVerification() {
+  const data = state.verification;
+  if (!data) { content.innerHTML = `<div class="panel">${emptyState("Loading", "", { iconName: "shield", compact: true })}</div>`; return; }
+  const role = data.role || {};
+  const filter = state.verificationFilter || "todo";
+  const docsIn = (row) => ["submitted", "desk_checked"].includes(row.verification_status);
+  const nationalityDue = (row) => row.verification_status === "verified" && !row.citizenship_confirmed_at;
+  const todo = (row) => ((role.desk || role.legal) && docsIn(row)) || (role.legal && nationalityDue(row));
+  const stage = { submitted: docsIn, nationality: nationalityDue };
+  const matches = (row, key) => key === "all" || (key === "todo" ? todo(row) : stage[key] ? stage[key](row) : row.verification_status === key);
+  const rows = (data.rows || []).filter((row) => matches(row, filter));
+  const tabs = [["todo", "Waiting for me"], ["submitted", "To verify"], ["nationality", "Legal: nationality"], ["unverified", "No documents yet"], ["rejected", "Sent back"], ["verified", "Verified"], ["all", "All"]]
+    .map(([key, label]) => `<button class="seg-btn${filter === key ? " active" : ""}" data-action="verification-filter" data-filter-key="${key}">${escapeHtml(label)} (${(data.rows || []).filter((r) => matches(r, key)).length})</button>`).join("");
+  const docLabel = { passport: "Passport / NIDA", residence: "Residence abroad", other: "Other" };
+  const list = rows.map((row) => {
+    const missing = ["passport", "residence"].filter((kind) => !(row.documents || []).some((d) => d.kind === kind));
+    const docs = ((row.documents || []).map((d) => `<button type="button" class="btn btn-ghost btn-small" data-action="kyc-doc" data-id="${row.id}" data-doc="${d.id}">${icon("file")}${escapeHtml(docLabel[d.kind] || d.kind)}</button>`).join(" ") || `<span class="muted">None yet</span>`)
+      + (row.verification_status !== "verified" && missing.length && (row.documents || []).length ? `<span class="cell-sub" style="color:var(--danger)">Missing: ${escapeHtml(missing.map((k) => docLabel[k]).join(", "))}</span>` : "");
+    const check = row.residence_check === "check" ? `<span class="cell-sub" style="color:var(--danger)">Phone is ${escapeHtml(row.phone_country || "unknown")}, lives in ${escapeHtml(row.country || "?")}: ask the customer</span>` : `<span class="cell-sub">Phone matches ${escapeHtml(row.country || "")}</span>`;
+    const actions = [
+      (row.documents || []).length ? `<button class="btn btn-small" data-action="kyc-doc" data-id="${row.id}">Review documents</button>` : "",
+      (role.desk || role.legal) && docsIn(row) ? `<button class="btn btn-small btn-primary" data-action="kyc" data-kyc="verify" data-id="${row.id}">${icon("check")} Verify customer</button>` : "",
+      role.legal && nationalityDue(row) ? `<button class="btn btn-small btn-primary" data-action="kyc" data-kyc="confirm_citizenship" data-id="${row.id}">Confirm nationality</button>` : "",
+      ((role.desk || role.legal) && ["submitted", "desk_checked", "unverified"].includes(row.verification_status)) || (role.legal && nationalityDue(row))
+        ? `<button class="btn btn-small btn-danger-ghost" data-action="kyc" data-kyc="reject" data-id="${row.id}">Send back</button>` : "",
+    ].join("");
+    const status = row.verification_status === "verified"
+      ? `${verifiedBadge({ ...row, is_diaspora: true }, { withNationality: true })}${row.verified_by_name ? `<span class="cell-sub">Verified by ${escapeHtml(row.verified_by_name)}${row.verified_at ? ` · ${escapeHtml(formatDate(row.verified_at))}` : ""}</span>` : ""}${row.citizenship_confirmed_by_name ? `<span class="cell-sub">Nationality: ${escapeHtml(row.citizenship_confirmed_by_name)} (Legal)</span>` : ""}`
+      : `${badge(VERIFY_LABELS[row.verification_status] || row.verification_status, VERIFY_TONES[row.verification_status] || "neutral")}${row.verification_note ? `<span class="cell-sub">${escapeHtml(row.verification_note)}</span>` : ""}`;
+    return `<tr><td><span class="cell-main">${escapeHtml(row.name)}</span><span class="cell-sub">${escapeHtml([row.email, row.phone].filter(Boolean).join(" · "))}</span>${row.officer_name ? `<span class="cell-sub">Desk contact: ${escapeHtml(row.officer_name)}</span>` : ""}</td>
+      <td><span class="cell-main">${escapeHtml(row.country || "—")}</span>${check}</td>
+      <td>${escapeHtml(row.nationality || "—")}</td>
+      <td>${docs}</td>
+      <td>${status}</td>
+      <td class="align-right"><div class="row-actions">${actions || `<span class="muted cell-plain">${row.verification_status === "verified" ? "Done" : "Waiting"}</span>`}</div></td></tr>`;
+  }).join("");
+  content.innerHTML = `
+    <div class="page-tip">${icon("info")}<span><strong>Diaspora Desk</strong>: check that the documents match what the customer declared, then press <strong>Verify customer</strong>. The customer gets the Verified badge at once and can request properties. <strong>Legal</strong>: confirm nationality afterwards; nobody signs an agreement before that.</span></div>
+    <div class="toolbar"><div class="toolbar-filters"><div class="segmented" role="group" aria-label="Verification stage">${tabs}</div></div></div>
+    ${data.error ? `<div class="panel">${escapeHtml(data.error)}</div>` : rows.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Customer</th><th>Lives in</th><th>Nationality</th><th>Documents</th><th>Status</th><th class="align-right">Action</th></tr></thead><tbody>${list}</tbody></table></div>`
+      : `<div class="panel">${emptyState("Nothing here", "Customers appear here when they sign up and upload their documents.", { iconName: "shield", compact: true })}</div>`}`;
+}
+
+/* The customer's identity documents, opened inside the app: a photo or a PDF
+   shown in a viewer, with the decision buttons beside it, so the Desk checks
+   and verifies without downloading anything or leaving the page. */
+const KYC_DOC_LABELS = { passport: "Passport / NIDA", residence: "Proof of residence abroad", other: "Other document" };
+let kycViewerUrl = null;
+
+async function openKycDocument(clientId, docId = null) {
+  const find = () => (state.verification?.rows || []).find((r) => String(r.id) === String(clientId));
+  if (!find()) await loadVerification({ quiet: true });
+  const row = find();
+  if (!row || !(row.documents || []).length) { showToast("No documents yet."); return; }
+  const doc = row.documents.find((d) => String(d.id) === String(docId)) || row.documents[0];
+  const role = state.verification?.role || {};
+  modal.dataset.type = "kyc-viewer";
+  modal.classList.add("modal-wide", "modal-document");
+  const tabs = row.documents.map((d) => `<button type="button" class="seg-btn${d.id === doc.id ? " active" : ""}" data-action="kyc-doc" data-id="${row.id}" data-doc="${d.id}">${escapeHtml(KYC_DOC_LABELS[d.kind] || d.kind)}</button>`).join("");
+  const missing = ["passport", "residence"].filter((kind) => !row.documents.some((d) => d.kind === kind));
+  const docsIn = ["submitted", "desk_checked"].includes(row.verification_status);
+  const nationalityDue = row.verification_status === "verified" && !row.citizenship_confirmed_at;
+  const actions = [
+    (role.desk || role.legal) && docsIn ? `<button type="button" class="btn btn-primary" data-action="kyc" data-kyc="verify" data-id="${row.id}" ${missing.length ? "disabled title=\"A document is missing\"" : ""}>${icon("check")}Verify customer</button>` : "",
+    role.legal && nationalityDue ? `<button type="button" class="btn btn-primary" data-action="kyc" data-kyc="confirm_citizenship" data-id="${row.id}">Confirm nationality</button>` : "",
+    ((role.desk || role.legal) && ["submitted", "desk_checked", "unverified"].includes(row.verification_status)) || (role.legal && nationalityDue) ? `<button type="button" class="btn btn-danger-ghost" data-action="kyc" data-kyc="reject" data-id="${row.id}">Send back</button>` : "",
+  ].join("");
+  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(row.name)}</h2>
+      <p class="modal-sub">Declared: lives in ${escapeHtml(row.country || "?")} · nationality ${escapeHtml(row.nationality || "?")}${row.residence_check === "check" ? ` · <strong style="color:var(--danger)">phone is ${escapeHtml(row.phone_country || "unknown")}</strong>` : ""}</p></div>
+      <button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
+    <div class="kyc-viewer-tabs"><div class="segmented" role="group" aria-label="Documents">${tabs}</div>
+      ${missing.length && row.verification_status !== "verified" ? `<span class="kyc-missing">${icon("alert")}Missing: ${escapeHtml(missing.map((k) => KYC_DOC_LABELS[k]).join(", "))}</span>` : ""}</div>
+    <div class="kyc-viewer" id="kyc-viewer"><div class="loading" role="status"><div class="spinner" aria-hidden="true"></div><span>Opening ${escapeHtml(doc.name || "document")}…</span></div></div>
+    <div class="row-actions docx-actions">
+      <span class="muted kyc-file">${escapeHtml(doc.name || "")}${doc.uploaded_at ? ` · uploaded ${escapeHtml(formatDateTime(doc.uploaded_at, true))}` : ""}</span>
+      <button type="button" class="btn btn-ghost" data-action="kyc-doc-download" data-id="${row.id}" data-doc="${doc.id}" data-filename="${escapeHtml(doc.name || "document")}">Download</button>
+      ${actions}
+    </div>`;
+  modalBackdrop.hidden = false;
+  const host = document.getElementById("kyc-viewer");
+  try {
+    const response = await fetch(`${API_ROOT}/diaspora/verifications/${row.id}/documents/${doc.id}`, { headers: { ...CSRF_HEADERS }, credentials: "same-origin" });
+    if (response.status === 401) { endSession("Your session has expired. Please sign in again."); return; }
+    if (!response.ok) { const payload = await response.json().catch(() => ({})); throw new Error(payload.error || "The document could not be opened."); }
+    const blob = await response.blob();
+    if (kycViewerUrl) URL.revokeObjectURL(kycViewerUrl);
+    kycViewerUrl = URL.createObjectURL(blob);
+    if (!document.getElementById("kyc-viewer")) return; // closed meanwhile
+    const type = blob.type || "";
+    host.innerHTML = type.startsWith("image/")
+      ? `<img class="kyc-image" src="${kycViewerUrl}" alt="${escapeHtml(KYC_DOC_LABELS[doc.kind] || "Document")} of ${escapeHtml(row.name)}" data-action="kyc-zoom" title="Click to zoom">`
+      : type === "application/pdf"
+        ? `<iframe class="kyc-pdf" src="${kycViewerUrl}" title="${escapeHtml(KYC_DOC_LABELS[doc.kind] || "Document")}"></iframe>`
+        : `<div class="empty">This file type cannot be shown here. Use Download.</div>`;
+  } catch (error) {
+    host.innerHTML = `<div class="empty">${escapeHtml(error.message || "The document could not be opened.")}</div>`;
+  }
+}
+
+async function kycAction(clientId, kind) {
+  const texts = {
+    verify: ["Verify customer", "The documents match what the customer declared. The customer gets the Verified badge in their portal and can request properties straight away. Legal confirms nationality before any agreement is signed.", "Verify", "primary", "Note (optional)"],
+    confirm_citizenship: ["Confirm nationality", "You have checked the customer's nationality. They can sign their agreement once it is ready.", "Confirm", "primary", "Note (optional)"],
+    reject: ["Send back to the customer", "The customer sees your note and uploads the documents again. Until then they cannot request properties.", "Send back", "danger", "What must the customer correct? (they will read this)"],
+    desk_ok: ["Documents OK", "The documents match what the customer declared.", "Save", "primary", "Note (optional)"],
+  }[kind];
+  if (!texts) return;
+  // Opened from the document viewer: the question takes the dialog's normal size.
+  modal.classList.remove("modal-wide", "modal-document");
+  const ok = await confirmDialog({ title: texts[0], message: texts[1], confirmLabel: texts[2], tone: texts[3], noteLabel: texts[4] });
+  const note = String(state.transitionNotes || "").trim();
+  state.transitionNotes = "";
+  if (!ok) return;
+  try {
+    await api(`/diaspora/verifications/${clientId}`, { method: "POST", body: JSON.stringify({ action: kind, note }) });
+    showToast(kind === "verify" ? "Customer verified." : kind === "confirm_citizenship" ? "Nationality confirmed." : kind === "desk_ok" ? "Saved." : "Sent back to the customer.");
+    await loadVerification();
+  } catch (error) { showToast(error.message || "Could not save."); }
+}
+
+/* --------------------------------------------------------------------------
+   Diaspora customer portal (staff side): invite / disable, and construction
+   updates that customers see in their portal.
+   -------------------------------------------------------------------------- */
+const PORTAL_STATUS_TEXT = { invited: "Invited · has not signed in yet", active: "Active · has signed in", disabled: "Disabled" };
+
+function clientPortalControls(record) {
+  if (!record.is_diaspora) return `<div class="field full"><div class="field-help">Tick "Diaspora client" and save to be able to invite them to the online portal.</div></div>`;
+  const status = record.portal_status;
+  const invite = `<button type="button" class="btn btn-soft btn-small" data-action="portal-invite" data-id="${record.id}">${status && status !== "disabled" ? "Send the invitation again" : "Invite to the portal"}</button>`;
+  const disable = status && status !== "disabled" ? `<button type="button" class="btn btn-danger-ghost btn-small" data-action="portal-disable" data-id="${record.id}">Disable portal</button>` : "";
+  return `<div class="field full"><div class="page-tip">${icon(status === "active" ? "check" : "info")}<span>Portal: <strong>${escapeHtml(PORTAL_STATUS_TEXT[status] || "Not invited")}</strong>. They sign in on the website with a code sent to their e-mail (${escapeHtml(record.email || "add an e-mail first")}).</span></div><div class="row-actions">${invite}${disable}</div></div>`;
+}
+
+async function portalAction(clientId, kind) {
+  if (kind === "disable") {
+    const ok = await confirmDialog({ title: "Disable portal", message: "The client is signed out at once and can no longer sign in. You can invite them again later.", confirmLabel: "Disable", tone: "danger" });
+    if (!ok) return;
+  }
+  try {
+    const result = await api(`/clients/${clientId}/portal-${kind}`, { method: "POST", body: "{}" });
+    if (kind === "invite") showToast(result.emailed ? `Invitation e-mailed to ${result.account.email}.` : `Portal opened for ${result.account.email}. E-mail is not set up, so tell the client: website → Diaspora login.`);
+    else showToast("Portal disabled.");
+    closeModal();
+    await refresh();
+  } catch (error) { showToast(error.message || "Could not update the portal."); }
+}
+
+/**
+ * The client overlay: everything about one customer on one screen. Who they
+ * are, their portal sign-up, the property and project they took (with its
+ * picture), what they have paid and still owe, and what they asked for.
+ */
+async function openClientProfile(clientId) {
+  modal.dataset.type = "client-profile";
+  modal.classList.add("modal-wide");
+  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">Client</h2><p class="modal-sub">Loading…</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div><div class="empty">Loading…</div>`;
+  modalBackdrop.hidden = false;
+  let data;
+  try { data = await api(`/clients/${clientId}/profile`); }
+  catch (error) {
+    modal.querySelector(".empty").textContent = error.message || "Could not load this client.";
+    return;
+  }
+  if (modal.dataset.type !== "client-profile") return;
+  const c = data.client || {};
+  const a = data.account;
+  const row = (label, value) => value ? `<div class="cp-row"><span>${escapeHtml(label)}</span><strong>${value}</strong></div>` : "";
+  const text = (value) => value ? escapeHtml(String(value)) : "";
+  const when = (value) => value ? escapeHtml(formatDate(value)) : "";
+  const accountState = !a ? "" : a.status === "active" ? "Active" : a.status === "invited" ? "Invited, not signed in yet" : "Disabled";
+  const contracts = (data.contracts || []).map((k) => {
+    const pct = Number(k.value) > 0 ? Math.min(100, Math.round((Number(k.paid) / Number(k.value)) * 100)) : 0;
+    const picture = k.photo_url
+      ? `<div class="cp-photo"><img data-src="${escapeHtml(k.photo_url)}" alt="${escapeHtml(k.property_name || "Property")}"><span class="cp-photo-fallback" hidden>${icon("home")}</span></div>`
+      : `<div class="cp-photo cp-photo-empty">${icon("home")}<span>No picture yet</span></div>`;
+    return `<article class="cp-asset">
+      ${picture}
+      <div class="cp-asset-body">
+        <div class="cp-asset-head"><h3>${text(k.property_name) || "Property not set"}</h3>${badge(humanize(k.status), k.status)}</div>
+        <p class="muted">${[k.property_location, k.project_name ? `Project: ${k.project_name}` : "", k.project_location].filter(Boolean).map(escapeHtml).join(" · ") || "—"}</p>
+        <div class="cp-grid">
+          ${row("Contract", text(k.contract_number) || `#${k.id}`)}
+          ${row("Deal", text(humanize(k.deal_type || "sale")))}
+          ${row("Value", escapeHtml(money(k.value)))}
+          ${row("Paid", escapeHtml(money(k.paid)))}
+          ${row("Balance", escapeHtml(money(k.balance)))}
+          ${k.next_due ? row("Next installment", `${escapeHtml(money(k.next_due.amount))} · ${when(k.next_due.due_date)}`) : ""}
+          ${row("Signed in portal", when(k.customer_accepted_at))}
+        </div>
+        <div class="cp-progress" title="${pct}% paid"><span style="width:${pct}%"></span></div>
+        <div class="cp-asset-foot"><span class="muted">${pct}% paid</span><button class="btn btn-small" data-action="view-contract" data-id="${k.id}">Open contract</button></div>
+      </div>
+    </article>`;
+  }).join("");
+  const requests = (data.requests || []).map((r) => `<li class="cp-request">
+      ${r.photo_url ? `<img class="cp-thumb" data-src="${escapeHtml(r.photo_url)}" alt="">` : `<span class="cp-thumb cp-thumb-empty">${icon("home")}</span>`}
+      <div><strong>${text(humanize(r.service || "request"))}${r.property_name ? ` · ${text(r.property_name)}` : ""}</strong>
+      <div class="muted">${when(r.created_at)}${r.budget ? ` · Budget ${escapeHtml(money(r.budget))}` : ""}${r.notes ? ` · ${text(String(r.notes).slice(0, 120))}` : ""}</div></div>
+      ${badge(humanize(r.status || "new"), r.status)}
+    </li>`).join("");
+  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">${text(c.name)}</h2><p class="modal-sub">${c.is_diaspora ? `Diaspora customer${c.country ? ` · lives in ${text(c.country)}` : ""}` : "Customer"}${c.is_diaspora ? ` ${verifiedBadge(c, { withNationality: true })}` : ""}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
+    <div class="cp-body">
+      <section class="cp-card">
+        <h3 class="cp-title">${icon("user")}Customer details</h3>
+        <div class="cp-grid">
+          ${row("Full name", text(c.name))}
+          ${row("E-mail", c.email ? `<a href="mailto:${escapeHtml(c.email)}">${escapeHtml(c.email)}</a>` : "")}
+          ${row("Phone", c.phone ? `<a href="tel:${escapeHtml(String(c.phone).replace(/\s+/g, ""))}">${escapeHtml(c.phone)}</a>` : "")}
+          ${row("Nationality", text(c.nationality))}
+          ${row("Lives in", text(c.country))}
+          ${c.residence_check && c.residence_check !== "ok" ? row("Phone check", text(c.residence_check)) : ""}
+          ${row("Status", text(humanize(c.status)))}
+          ${row("Project", text(c.project_name))}
+          ${row("Contact person", text(c.officer_name))}
+          ${row("Documents sent", c.is_diaspora ? String(data.kyc_documents ?? 0) : "")}
+          ${row("Added", when(c.created_at))}
+        </div>
+        ${c.verification_note ? `<p class="muted">Note: ${text(c.verification_note)}</p>` : ""}
+        ${c.notes ? `<p class="client-notes">${text(c.notes)}</p>` : ""}
+      </section>
+      ${a ? `<section class="cp-card">
+        <h3 class="cp-title">${icon("shield")}Portal account</h3>
+        <div class="cp-grid">
+          ${row("Username", text(a.username))}
+          ${row("Login e-mail", text(a.email))}
+          ${row("Account", escapeHtml(accountState))}
+          ${row("Signed up", when(a.activated_at || a.created_at))}
+          ${row("Last sign-in", when(a.last_login_at) || "Not yet")}
+        </div>
+      </section>` : ""}
+      <section class="cp-section">
+        <h3 class="cp-title">${icon("home")}Property taken ${data.contracts?.length ? `(${data.contracts.length})` : ""}</h3>
+        ${contracts || `<div class="empty">No property yet. When a contract is prepared for this customer, the property, project and payments show here.</div>`}
+      </section>
+      <section class="cp-section">
+        <h3 class="cp-title">${icon("inbox")}Requests ${data.requests?.length ? `(${data.requests.length})` : ""}</h3>
+        ${requests ? `<ul class="cp-requests">${requests}</ul>` : `<div class="empty">No request from this customer yet.</div>`}
+      </section>
+    </div>
+    <div class="form-actions">${can("edit") ? `<button class="btn" data-action="edit-client" data-id="${escapeHtml(String(c.id))}">Edit client</button>` : ""}<button class="btn btn-primary" data-action="close-modal">Close</button></div>`;
+  modal.querySelectorAll(".cp-photo img").forEach((img) => img.addEventListener("error", () => { img.hidden = true; }));
+  await hydrateImages(modal);
+  modal.querySelectorAll(".cp-photo").forEach((box) => {
+    const img = box.querySelector("img");
+    if (!img || !img.getAttribute("src")) { box.classList.add("cp-photo-empty"); box.innerHTML = `${icon("home")}<span>No picture yet</span>`; }
+  });
+}
+
+async function openProgress(projectId) {
+  const project = (state.projects || []).find((p) => String(p.id) === String(projectId));
+  modal.dataset.type = "progress";
+  modal.classList.add("modal-wide");
+  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">Construction updates</h2><p class="modal-sub">${escapeHtml(project?.name || "Project")} · diaspora customers with a contract here see these in their portal</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
+    <form id="progress-form" class="form-grid" data-project="${escapeHtml(String(projectId))}">
+      <div class="field full"><label for="progress-title">Title</label><input id="progress-title" name="title" required maxlength="160" placeholder="e.g. Foundation completed"></div>
+      <div class="field"><label for="progress-date">Date</label><input id="progress-date" name="update_date" type="date" value="${new Date().toISOString().slice(0, 10)}"></div>
+      <div class="field"><label for="progress-photos">Photos (up to 8)</label><input id="progress-photos" name="photos" type="file" multiple accept=".png,.jpg,.jpeg,.webp"></div>
+      <div class="field full"><label for="progress-note">What was done</label><textarea id="progress-note" name="note" maxlength="2000" rows="3" placeholder="Short and clear: what customers will read"></textarea></div>
+      <div class="form-actions"><button type="submit" class="btn btn-primary">Publish update</button></div>
+    </form>
+    <div id="progress-list" class="empty">Loading…</div>`;
+  modalBackdrop.hidden = false;
+  await loadProgressList(projectId);
+}
+
+async function loadProgressList(projectId) {
+  const host = document.getElementById("progress-list");
+  if (!host) return;
+  try {
+    const list = await api(`/projects/${projectId}/progress`);
+    host.className = "";
+    host.innerHTML = list.length ? `<div class="table-wrap"><table><thead><tr><th>Date</th><th>Update</th><th>Photos</th><th class="align-right"></th></tr></thead><tbody>${list.map((u) => `<tr><td>${formatDate(u.update_date)}</td><td><strong>${escapeHtml(u.title)}</strong>${u.note ? `<div class="field-help">${escapeHtml(u.note)}</div>` : ""}</td><td>${u.photos.length}</td><td class="align-right"><button type="button" class="btn btn-danger-ghost btn-small" data-action="progress-delete" data-project="${escapeHtml(String(projectId))}" data-id="${u.id}">Delete</button></td></tr>`).join("")}</tbody></table></div>`
+      : `<div class="empty">No update yet. The first one is often the site before work starts.</div>`;
+  } catch (error) { host.textContent = error.message || "Could not load the updates."; }
+}
+
+async function deleteProgress(projectId, updateId) {
+  const ok = await confirmDialog({ title: "Delete update", message: "Customers will no longer see this update and its photos.", confirmLabel: "Delete", tone: "danger" });
+  if (!ok) { openProgress(projectId); return; }
+  try { await api(`/projects/${projectId}/progress/${updateId}`, { method: "DELETE" }); showToast("Update deleted."); }
+  catch (error) { showToast(error.message || "Could not delete."); }
+  openProgress(projectId);
+}
+
+document.addEventListener("submit", async (event) => {
+  if (event.target.id !== "progress-form") return;
+  event.preventDefault();
+  const form = event.target;
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true; button.textContent = "Publishing…";
+  try {
+    await api(`/projects/${form.dataset.project}/progress`, { method: "POST", form: true, body: new FormData(form) });
+    showToast("Update published to customers.");
+    form.reset();
+    await loadProgressList(form.dataset.project);
+  } catch (error) { showToast(error.message || "Could not publish."); }
+  button.disabled = false; button.textContent = "Publish update";
+});
+
+/** Activity log filter (System page): one staff member or one desk. */
+document.addEventListener("change", async (event) => {
+  const select = event.target.closest?.('[data-action-change="activity-filter"]');
+  if (!select) return;
+  const key = select.value;
+  if (!key) { state.staffActivity = null; render(); return; }
+  const [kind, value] = key.split(/:(.+)/);
+  try {
+    const rows = await api(`/org/audit?limit=300&${kind === "user" ? `user_id=${encodeURIComponent(value)}` : `department=${encodeURIComponent(value)}`}`);
+    state.staffActivity = { key, label: select.options[select.selectedIndex].textContent, rows: Array.isArray(rows) ? rows : rows.entries || [] };
+  } catch (error) { showToast(error.message || "Could not load the activity."); }
+  render();
+});
+
+/** "Check reminders now": the hourly reminder / overdue pass, run at once. */
+async function runCustomerNotices() {
+  try {
+    showToast("Checking installments…");
+    const result = await api("/notifications/run", { method: "POST", body: "{}" });
+    showToast(`Reminders: ${Number(result.due_soon?.sent || 0)} · overdue notices: ${Number(result.overdue?.sent || 0)}.`);
+    await loadBackups();
+    if (state.view === "system") render();
+  } catch (error) { showToast(error.message || "Could not check reminders."); }
+}
+
+/** "Send test SMS": one message to a number the administrator types. */
+async function sendTestSms() {
+  const ok = await confirmDialog({ title: "Send a test SMS", message: "Type your own mobile number. In test mode the message is only written to the list, not sent.", confirmLabel: "Send", tone: "primary", noteLabel: "Mobile number" });
+  const phone = String(state.transitionNotes || "").trim();
+  state.transitionNotes = "";
+  if (!ok || !phone) return;
+  try {
+    const result = await api("/notifications/test-sms", { method: "POST", body: JSON.stringify({ phone }) });
+    showToast(result.status === "sent" ? "Test SMS sent." : result.status === "test" ? "Test mode: written to the list, not sent." : `Not sent: ${result.error || result.status}`);
+    await loadBackups();
+    if (state.view === "system") render();
+  } catch (error) { showToast(error.message || "Test SMS failed."); }
 }
 
 /* --------------------------------------------------------------------------
@@ -5832,6 +6306,32 @@ function emailStatusNote(email) {
   return `<div class="page-tip">${icon("check")}<span>Customer e-mails are ON: receipts ${email.receipts ? "on approval" : "off"}, reminders ${email.reminders ? `${email.reminder_days} days before the due date` : "off"}.${last ? ` Last: ${escapeHtml(last.kind)} to ${escapeHtml(last.recipient || "")} (${escapeHtml(last.status)}${last.error ? `: ${escapeHtml(last.error)}` : ""}).` : ""}</span></div>`;
 }
 
+/** Customer SMS: off, test mode (only logged), or live through the gateway. */
+function smsStatusNote(sms) {
+  if (!sms) return "";
+  if (!sms.enabled) return `<div class="page-tip">${icon("alert")}<span>Customer SMS is OFF (SMS_PROVIDER=off).</span></div>`;
+  if (!sms.live) {
+    const why = sms.missing ? `${escapeHtml(sms.requested)} is chosen but ${escapeHtml(sms.missing)} is missing in .env` : "no SMS account is set in .env yet";
+    return `<div class="page-tip">${icon("alert")}<span>Customer SMS is in TEST MODE: ${why}. Messages are written to the list below but not sent. Put the company's SMS account in .env (SMS_PROVIDER, its username/key, SMS_SENDER_ID) and restart the server.</span></div>`;
+  }
+  return `<div class="page-tip">${icon("check")}<span>Customer SMS is ON through ${escapeHtml(sms.provider)} as "${escapeHtml(sms.sender_id)}": payments, reminders ${escapeHtml((sms.due_days || []).join(", "))} days before, overdue after ${escapeHtml((sms.overdue_days || []).join(", "))} days, new properties to clients who agreed. Today: ${Number(sms.today?.sent || 0)} sent${sms.today?.failed ? `, ${Number(sms.today.failed)} failed` : ""}.</span></div>`;
+}
+
+const NOTICE_LABELS = { payment_received: "Payment received", fully_paid: "Fully paid", due_soon: "Installment reminder", overdue: "Overdue", new_listing: "New property", test: "Test" };
+
+/** The latest customer notices (SMS and e-mail copies), newest first. */
+function renderCustomerNotices(sms) {
+  if (!sms) return "";
+  const rows = (sms.recent || []).map((entry) => {
+    const tone = entry.status === "sent" ? "approved" : entry.status === "failed" ? "overdue" : "pending";
+    const label = entry.status === "test" ? "Test (not sent)" : entry.status;
+    return `<tr><td>${escapeHtml(NOTICE_LABELS[entry.kind] || entry.kind)}</td><td>${escapeHtml(entry.channel === "sms" ? "SMS" : "E-mail")}</td><td>${escapeHtml(entry.recipient || "")}</td><td class="notice-text">${escapeHtml(entry.message || "")}${entry.error ? `<div class="field-help">${escapeHtml(entry.error)}</div>` : ""}</td><td>${badge(label, tone)}</td><td>${formatDateTime(entry.created_at, true)}</td></tr>`;
+  }).join("");
+  return `<section class="card glass"><div class="section-head"><div><h2 class="section-title">Customer notices</h2><div class="section-note">SMS and e-mails sent to customers: payments, reminders, overdue and new properties · the latest 30</div></div><div class="row-actions"><button class="btn btn-soft btn-small" data-action="notices-test-sms">Send test SMS</button><button class="btn btn-primary btn-small" data-action="notices-run">Check reminders now</button></div></div>
+    ${rows ? `<div class="table-wrap"><table><thead><tr><th>Notice</th><th>By</th><th>To</th><th>Message</th><th>Status</th><th>When</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty">No customer notice yet. They start when a payment is approved, an installment comes near or a property is published.</div>`}
+  </section>`;
+}
+
 /** One line on the automatic daily backup: on/off, the last one, and the copy folder. */
 function autoBackupNote(status) {
   if (!status) return "";
@@ -5848,8 +6348,8 @@ async function loadBackups() {
   if (!isAdmin()) return;
   state.backupsRequested = true;
   try {
-    const [list, status, email] = await Promise.all([api("/backups"), api("/backups/status").catch(() => null), api("/email/status").catch(() => null)]);
-    state.backups = { list, status, email };
+    const [list, status, email, sms] = await Promise.all([api("/backups"), api("/backups/status").catch(() => null), api("/email/status").catch(() => null), api("/notifications/status").catch(() => null)]);
+    state.backups = { list, status, email, sms };
   } catch (error) {
     state.backups = { list: [], error: error.message || "Unable to load backups." };
   }
@@ -6177,6 +6677,9 @@ function viewContract(contractId) {
   modal.innerHTML = `${head}
     <div class="form-grid">
       <div class="field"><span class="muted">Status</span><div>${contractStatusBadge(contract)}${contractPositionNote(contract)}</div></div>
+      ${contract.channel === "diaspora" ? `<div class="field full"><div class="page-tip">${icon(contract.customer_accepted_at ? "check" : "info")}<span><strong>Diaspora contract.</strong> ${contract.customer_accepted_at
+        ? `Signed electronically by <strong>${escapeHtml(contract.customer_accepted_name || "")}</strong> on ${formatDateTime(contract.customer_accepted_at, true)} from ${escapeHtml(contract.customer_accepted_ip || "?")}. Fingerprint of the signed text: <code>${escapeHtml(String(contract.customer_accepted_hash || "").slice(0, 16))}…</code>. After Finance confirms the deposit, Legal presses “Record customer signature”.`
+        : `Path: Diaspora Desk prepares → Legal → Finance → MD → Legal sends it → the customer reads and signs in the portal → deposit confirmed → Legal records the signature. ${contract.client_verification_status && contract.client_verification_status !== "verified" ? "<strong>The customer is not verified yet.</strong>" : contract.client_verification_status === "verified" && !contract.client_citizenship_confirmed_at ? "<strong>Legal has not confirmed the customer's nationality yet: the customer cannot sign until it is confirmed (Diaspora verification).</strong>" : ""}`}</span></div></div>` : ""}
       <div class="field"><span class="muted">Contract type</span><div>${contract.deal_type ? badge(dealTypeLabel(contract.deal_type), "open") : "Not recorded"}</div></div>
       <div class="field"><span class="muted">Agreement</span><div>${badge(contract.contract_type)}</div></div>
       <div class="field"><span class="muted">Start</span><div>${formatDate(contract.start_date)}</div></div>
@@ -6355,6 +6858,10 @@ document.addEventListener("click", async (event) => {
   if (target.closest(".row-menu-list")) closeRowMenus();
   if (action === "new-project") openModal("project");
   if (action === "edit-project") openModalFor("projects", id, "project");
+  if (action === "project-progress") openProgress(id);
+  if (action === "progress-delete") deleteProgress(target.dataset.project, id);
+  if (action === "portal-invite") portalAction(id, "invite");
+  if (action === "portal-disable") portalAction(id, "disable");
   if (action === "delete-project") deleteRecord("project", id);
   if (action === "project-properties" && allowedViewFor("properties") !== false) {
     // A shortcut into the existing Properties filter; nothing new is fetched
@@ -6558,6 +7065,8 @@ document.addEventListener("click", async (event) => {
     document.getElementById("primary-nav")?.classList.remove("nav-open");
   }
   if (action === "backup-now") createBackup();
+  if (action === "notices-run") runCustomerNotices();
+  if (action === "notices-test-sms") sendTestSms();
   if (action === "open-administration") {
     state.view = "organization";
     updateNavigation();
@@ -6615,6 +7124,7 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "new-client") openModal("client");
   if (action === "edit-client") openModalFor("clients", id, "client");
+  if (action === "view-client") openClientProfile(id);
   if (action === "delete-client") deleteRecord("client", id);
   if (action === "new-appointment") openModal("appointment");
   if (action === "edit-appointment") openModalFor("appointments", id, "appointment");
@@ -6630,6 +7140,13 @@ document.addEventListener("click", async (event) => {
   if (action === "new-task") openTaskModal();
   if (action === "hand-off-lead") handOffLead(target.dataset.id);
   if (action === "request-stage") { state.requestStage = target.dataset.stage || ""; render(); }
+  if (action === "request-segment") { state.requestSegment = target.dataset.segment || ""; state.requestStage = ""; render(); }
+  if (action === "client-segment") { state.clientSegment = target.dataset.segment || ""; render(); }
+  if (action === "kyc") kycAction(id, target.dataset.kyc);
+  if (action === "kyc-doc") openKycDocument(id, target.dataset.doc || null);
+  if (action === "kyc-zoom") target.classList.toggle("is-zoomed");
+  if (action === "kyc-doc-download") downloadFile(`/diaspora/verifications/${id}/documents/${target.dataset.doc}`, target.dataset.filename).catch((error) => showToast(error.message || "Download failed"));
+  if (action === "verification-filter") { state.verificationFilter = target.dataset.filterKey || "todo"; render(); }
   if (action === "open-task") openTask(id);
   if (action === "task-action") submitTaskAction(id, target.dataset.taskAction);
   if (action === "task-box") {

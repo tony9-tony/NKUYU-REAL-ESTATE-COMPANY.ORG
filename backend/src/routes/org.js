@@ -21,7 +21,7 @@ import { ROLE_DUTIES, CONTRACT_OWNERSHIP, ROLE_HOME_DEPARTMENT, DEPARTMENT_DEFAU
 import taskRoutes from "./tasks.js";
 import { EXISTING_CLIENT_SQL, findExistingClient } from "../org/clientMatch.js";
 import { APPOINTMENT_TYPES, arrangeRequestAppointment } from "../org/requestAppointment.js";
-import { cleanupUploadedFile, profileImageExtensions, profileUploadsDir, removeStoredFile, resolveStoredFile, uploadProfileImageFile, validateUploadedFile } from "../uploads.js";
+import { cleanupUploadedFile, documentUploadsDir, profileImageExtensions, profileUploadsDir, removeStoredFile, resolveStoredFile, storedFileExists, uploadProfileImageFile, validateUploadedFile } from "../uploads.js";
 
 const router = Router();
 
@@ -233,6 +233,7 @@ async function buildMe(req) {
     permissions,
     financial: can(req.access, "view_financial"),
     scope: req.access?.scope || "own",
+    diaspora_desk_only: Boolean(req.access?.diasporaDeskOnly),
     rank: req.access?.rank ?? 0,
     modules,
     readonly_modules: readonlyModules,
@@ -553,7 +554,9 @@ router.get("/workspace", async (req, res, next) => {
       clients: clientsPage.rows,
       properties: propertiesPage.rows,
       appointments: appointmentsPage.rows,
-      documents: documentsPage.rows,
+      // Same shape as GET /documents: whether the file is really on disk. Without
+      // it the register's first page said "No file attached" for every document.
+      documents: documentsPage.rows.map((doc) => ({ ...doc, has_file: storedFileExists(documentUploadsDir, doc.stored_name), file_name: doc.original_filename || null })),
       debts: debtsPage.rows,
       payments: paymentsPage.rows,
       leads: leadsPage.rows,
@@ -1002,6 +1005,17 @@ router.get("/audit", requireAnyPermission("view_audit", "manage_settings"), asyn
     // business action ever recorded. This mirrors requireAdmin() elsewhere.
     const full = req.access?.isAdmin === true;
     if (full) {
+      // Optional filters for "what did this person / this desk do" (e.g. each
+      // Diaspora Desk member's own sign-ins and work). Without them: as before.
+      const userId = Number(req.query.user_id);
+      const department = typeof req.query.department === "string" ? req.query.department.slice(0, 80) : "";
+      if ((Number.isSafeInteger(userId) && userId > 0) || department) {
+        const values = [org, limit];
+        let where = "a.organization_id=$1";
+        if (Number.isSafeInteger(userId) && userId > 0) { values.push(userId); where += ` AND a.user_id=$${values.length}`; }
+        if (department) { values.push(department); where += ` AND a.user_id IN (SELECT ud.user_id FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE d.organization_id=$1 AND d.name=$${values.length})`; }
+        return res.json(await rows(`SELECT a.*,u.display_name AS user_name FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id WHERE ${where} ORDER BY a.created_at DESC,a.id DESC LIMIT $2`, values));
+      }
       return res.json(await rows(
         "SELECT a.*,u.display_name AS user_name FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id WHERE a.organization_id=$1 ORDER BY a.created_at DESC,a.id DESC LIMIT $2",
         [org, limit],
@@ -1079,7 +1093,7 @@ router.get("/requests", requireModuleAccess("leads"), async(req,res,next)=>{try{
     LEFT JOIN clients cl ON cl.id=l.client_id LEFT JOIN users cv ON cv.id=l.converted_by
     LEFT JOIN LATERAL (SELECT c.body, c.created_at FROM task_comments c WHERE c.task_id=t.id AND c.author_id=t.assigned_to ORDER BY c.created_at DESC, c.id DESC LIMIT 1) rp ON TRUE
     LEFT JOIN clients ec ON l.client_id IS NULL AND ec.id = ${EXISTING_CLIENT_SQL} AND ec.organization_id=$1 AND ${existingClientVisible}
-    WHERE l.organization_id=$1 AND l.source IN ('website','website-contact') AND ${visible} ORDER BY l.created_at DESC LIMIT 500`,values));
+    WHERE l.organization_id=$1 AND l.source IN ('website','website-contact','diaspora-portal','website-signup') AND ${visible} ORDER BY l.created_at DESC LIMIT 500`,values));
 }catch(e){next(e);}});
 // Sales arranges the agreed appointment for a request once Customer Service
 // has reported back (or moves it). It goes straight into Appointments.
@@ -1090,7 +1104,7 @@ async function inSalesDepartment(userId){
 router.post("/requests/:id/appointment", requireModuleAccess("leads"), requireModuleAccess("appointments"), requirePermission("assign_tasks"), async(req,res,next)=>{try{
   if(!await inSalesDepartment(req.user.id))return res.status(403).json({error:"Sales arranges the appointment; the MD can see it under Appointments"});
   const leadId=id(req.params.id,"lead_id");const org=await organizationId();
-  const values=[leadId,org];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND l.source IN ('website','website-contact') AND ${scopeCondition("l","lead",req.access,values)}`,values);
+  const values=[leadId,org];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND l.source IN ('website','website-contact','diaspora-portal','website-signup') AND ${scopeCondition("l","lead",req.access,values)}`,values);
   if(!lead)return res.status(404).json({error:"request not found"});
   // A report must have come back and been accepted first (unless one is already booked).
   if(!lead.appointment_id){
@@ -1129,9 +1143,10 @@ router.post("/requests/:id/handed-off", requireModuleAccess("leads"), requirePer
   if(!await inSalesDepartment(req.user.id))return res.status(403).json({error:"Sales hands requests to Customer Service; the MD can follow them under Requests"});
   const leadId=id(req.params.id,"lead_id");const taskId=id(req.body?.task_id,"task_id");const org=await organizationId();
   // Contact-page messages may be handed to Customer Service the same way.
-  const values=[leadId,org];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND l.source IN ('website','website-contact') AND ${scopeCondition("l","lead",req.access,values)}`,values);
+  const values=[leadId,org];const lead=await queryOne(`SELECT l.* FROM leads l WHERE l.id=$1 AND l.organization_id=$2 AND l.source IN ('website','website-contact','diaspora-portal','website-signup') AND ${scopeCondition("l","lead",req.access,values)}`,values);
   if(!lead)return res.status(404).json({error:"request not found"});
-  if(lead.client_id)return res.status(409).json({error:"this request is already a client"});
+  // A diaspora request comes from an existing client (signed in to the portal), so it is handed on like any request.
+  if(lead.client_id&&lead.source!=="diaspora-portal")return res.status(409).json({error:"this request is already a client"});
   const task=await queryOne("SELECT id,assigned_to FROM tasks WHERE id=$1 AND organization_id=$2 AND assigned_by=$3",[taskId,org,req.user.id]);
   if(!task)return res.status(400).json({error:"task not found"});
   // A request goes to Customer Service, nobody else.

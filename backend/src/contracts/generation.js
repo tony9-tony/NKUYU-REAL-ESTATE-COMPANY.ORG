@@ -10,7 +10,7 @@
 // derived from a request body.
 // ---------------------------------------------------------------------------
 import { CONTRACT_PLACEHOLDERS, formatDocumentDate, formatMoney, generateContractDocument, renderTemplate, unknownPlaceholders } from "./workflow.js";
-import { AGREEMENTS, agreementFor } from "./agreements.js";
+import { AGREEMENTS, agreementFor, agreementForChannel } from "./agreements.js";
 
 const PROPERTY_TYPE_LABELS = { land: "Land / plot", house: "House", apartment: "Apartment", villa: "Villa", commercial: "Commercial property", penthouse: "Penthouse" };
 
@@ -42,7 +42,7 @@ export function buildContractValues({ contract, project, property, client, compa
   // exactly as the office entered it, so "1 months" is never invented.
   const unit = String(contract.agreement_duration_unit || "months").replace(/s$/, "");
   const duration = contract.agreement_duration ? `${contract.agreement_duration} ${unit}${Number(contract.agreement_duration) === 1 ? "" : "s"}` : "";
-  const agreement = agreementFor(contract.deal_type);
+  const agreement = agreementForChannel(contract.deal_type, contract.channel);
   const area = Number(property?.area);
   return {
     CONTRACT_TITLE: agreement.title,
@@ -53,6 +53,8 @@ export function buildContractValues({ contract, project, property, client, compa
     CLIENT_NAME: contract.client_name || client?.name || "",
     CLIENT_PHONE: contract.client_phone || client?.phone || "Not provided",
     CLIENT_EMAIL: contract.client_email || client?.email || "Not provided",
+    CLIENT_NATIONALITY: client?.nationality || "To be confirmed by Legal",
+    CLIENT_RESIDENCE: client?.country || "Not provided",
     COMPANY_NAME: companyName || "MKUYU",
     PROJECT_NAME: project?.name || "",
     PROPERTY_NAME: property?.name || "",
@@ -82,8 +84,8 @@ export function buildContractValues({ contract, project, property, client, compa
 }
 
 /** The built-in agreement for a deal type (Buy, Rent or Sell). */
-export function builtInAgreement(dealType) {
-  return agreementFor(dealType);
+export function builtInAgreement(dealType, channel = "standard") {
+  return agreementForChannel(dealType, channel);
 }
 
 /** The built-in template, used when the caller does not select one: a Sale. */
@@ -98,7 +100,7 @@ export function buildDocumentValues(args, agreementBody) {
   // The lawyer's signature spot stays a placeholder inside the body, so the
   // Word filler can put the real signature there once Legal approves.
   const { LAWYER_SIGNATURE, ...bodyValues } = values;
-  return { ...values, CONTRACT_BODY: renderTemplate(agreementBody || agreementFor(args.contract?.deal_type).body, bodyValues) };
+  return { ...values, CONTRACT_BODY: renderTemplate(agreementBody || agreementForChannel(args.contract?.deal_type, args.contract?.channel).body, bodyValues) };
 }
 
 /** Renders a template body with the contract's own values. */

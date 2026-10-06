@@ -158,7 +158,7 @@ const EXPECTED_ROLES = {
   LEGAL: ["Legal Manager", "Legal Officer"],
   "CUSTOMER SERVICE": ["Customer Service Manager", "Customer Service Officer"],
 };
-check(matrix.departments.length === 6, `exactly six departments (${matrix.departments.length})`);
+check(matrix.departments.length === 7, `exactly seven departments, Diaspora Desk included (${matrix.departments.length})`);
 const roleNames = new Set(matrix.roles.map((r) => r.name));
 for (const [department, expected] of Object.entries(EXPECTED_ROLES)) {
   for (const role of expected) check(roleNames.has(role), `${department} has the "${role}" role`);

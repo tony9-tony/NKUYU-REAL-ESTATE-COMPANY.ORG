@@ -2223,3 +2223,59 @@ label.btn { cursor: pointer; }
 .lang-switch { display: flex; justify-content: flex-end; gap: 4px; margin-bottom: 10px; }
 .lang-btn { padding: 4px 10px; border-radius: var(--radius-pill); border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: var(--fs-xs); font-weight: 700; }
 .lang-btn.active { background: var(--ink); color: #fff; border-color: var(--ink); }
+
+/* Customer notices list (System & backups): the SMS text wraps. */
+.notice-text { min-width: 240px; max-width: 460px; white-space: normal; line-height: 1.45; }
+
+/* Diaspora client line on client cards */
+.client-diaspora { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; font-size: .82rem; color: var(--muted, #6b6b6b); margin: .2rem 0 .4rem; }
+
+/* Client overlay: the customer, their property (with its picture) and requests. */
+.client-open { font: inherit; color: inherit; font-weight: 600; text-align: left; padding: 0; background: none; border: 0; cursor: pointer; }
+.client-open:hover { text-decoration: underline; }
+.cp-body { display: grid; gap: 16px; max-height: 70vh; overflow: auto; padding: 2px 2px 8px; }
+.cp-card, .cp-section { border: 1px solid var(--border, #e7e1d8); border-radius: 12px; padding: 14px 16px; background: var(--surface, #fff); }
+.cp-title { display: flex; align-items: center; gap: 8px; font-size: 15px; margin: 0 0 10px; }
+.cp-title svg { width: 16px; height: 16px; }
+.cp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px 16px; }
+.cp-row { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cp-row span { font-size: 12px; color: var(--muted, #7a7368); }
+.cp-row strong { font-weight: 600; overflow-wrap: anywhere; }
+.cp-asset { display: grid; grid-template-columns: 220px 1fr; gap: 16px; padding: 12px 0; border-top: 1px solid var(--border, #eee); }
+.cp-asset:first-of-type { border-top: 0; padding-top: 0; }
+.cp-photo { width: 100%; aspect-ratio: 4 / 3; border-radius: 10px; overflow: hidden; background: var(--surface-sunken, #f4efe7); display: flex; align-items: center; justify-content: center; }
+.cp-photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cp-photo-empty { flex-direction: column; gap: 6px; color: var(--muted, #8a8276); font-size: 13px; }
+.cp-photo-empty svg { width: 28px; height: 28px; }
+.cp-asset-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.cp-asset-head h3 { margin: 0; font-size: 16px; }
+.cp-asset-body p { margin: 4px 0 10px; }
+.cp-progress { height: 8px; border-radius: 99px; background: var(--surface-sunken, #efe9df); overflow: hidden; margin-top: 12px; }
+.cp-progress span { display: block; height: 100%; background: var(--gold, #a67c52); }
+.cp-asset-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+.cp-requests { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.cp-request { display: grid; grid-template-columns: 56px 1fr auto; gap: 12px; align-items: center; }
+.cp-thumb { width: 56px; height: 42px; border-radius: 8px; object-fit: cover; background: var(--surface-sunken, #f4efe7); display: flex; align-items: center; justify-content: center; }
+.cp-thumb svg { width: 18px; height: 18px; }
+@media (max-width: 720px) { .cp-asset { grid-template-columns: 1fr; } .cp-request { grid-template-columns: 44px 1fr; } .cp-request .badge { grid-column: 2; justify-self: start; } }
+
+/* Diaspora: the Verified tick badge (identity verified by MKUYU) */
+.badge-verified {
+  display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 9px 0 6px;
+  border-radius: var(--radius-pill); background: var(--success); color: #fff;
+  font-size: 12px; font-weight: 700; line-height: 1; white-space: nowrap; vertical-align: middle;
+}
+.badge-verified .ic { width: 14px; height: 14px; stroke-width: 2.6; }
+.modal-sub .badge-verified, .modal-sub .badge { margin-left: 4px; }
+
+/* Diaspora verification: identity documents opened inside the app */
+.kyc-viewer-tabs { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.kyc-missing { display: inline-flex; align-items: center; gap: 6px; color: var(--danger); font-size: 13px; font-weight: 600; }
+.kyc-viewer { display: grid; place-items: center; height: min(66vh, 720px); margin: 0 -4px 14px; padding: 12px; overflow: auto; border-radius: var(--radius); background: #2a2622; }
+.kyc-viewer .loading, .kyc-viewer .empty { color: #eee; }
+.kyc-image { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; cursor: zoom-in; box-shadow: 0 4px 18px rgba(0,0,0,.35); }
+.kyc-image.is-zoomed { max-width: none; max-height: none; cursor: zoom-out; }
+.kyc-viewer:has(.kyc-image.is-zoomed) { place-items: start; }
+.kyc-pdf { width: 100%; height: 100%; border: 0; border-radius: 4px; background: #fff; }
+.kyc-file { margin-right: auto; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch; }
+@media (max-width: 720px) { .kyc-viewer { height: 58vh; } .kyc-file { max-width: 100%; flex-basis: 100%; } }

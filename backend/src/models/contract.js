@@ -7,7 +7,7 @@ const ENTITY = "contract";
 // `final_price` is exposed as an alias of the authoritative `value` column rather
 // than stored twice: callers get the pricing breakdown, and there is still only
 // one number in the database that defines what the contract is worth.
-const select = `SELECT c.*, c.value AS final_price, p.name AS project_name,cl.name AS linked_client_name,pr.name AS property_name,
+const select = `SELECT c.*, c.value AS final_price, p.name AS project_name,cl.name AS linked_client_name,cl.verification_status AS client_verification_status,cl.citizenship_confirmed_at AS client_citizenship_confirmed_at,cl.is_diaspora AS client_is_diaspora,pr.name AS property_name,
   lr.display_name AS legal_reviewer_name,fv.display_name AS finance_validator_name,ma.display_name AS management_approver_name,su.display_name AS signed_uploaded_by_name,sd.original_filename AS signed_file_name
   FROM contracts c
   LEFT JOIN projects p ON p.id = c.project_id

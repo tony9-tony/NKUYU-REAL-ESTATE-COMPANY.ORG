@@ -4,7 +4,12 @@ import { normalizePhone, parsePaymentMessage } from "../payments/parseMessage.js
 import { emailReceipt, receiptCoverage, writeReceiptPdf } from "../payments/notices.js";
 import { parseStatement } from "../payments/statement.js";
 import multer from "multer";
-import { mailConfigured } from "../mail.js";
+import { mailConfigured, sendMail } from "../mail.js";
+import { maybeAnnounceListing, noticeAfterPayment, noticeStatus, runScheduledNotices } from "../notify/customerNotices.js";
+import { sendSms } from "../notify/sms.js";
+import customerRoutes from "./customer.js";
+import { uploadProgressImages, progressUploadsDir, MAX_PROGRESS_PHOTOS } from "../uploads.js";
+import { smsNumber } from "../notify/messages.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -561,6 +566,41 @@ function validatePropertyListing(body, current = {}, salePrice = 0) {
 }
 
 
+/**
+ * "Agrees to receive offers about new properties" on a client. Stored apart
+ * from validateClient (whose fixed-arity UPDATE must not grow), and only when
+ * the request carries the field, so other client edits leave it untouched.
+ */
+async function setMarketingOptIn(clientId, body) {
+  if (!body || !Object.prototype.hasOwnProperty.call(body, "marketing_opt_in")) return;
+  const value = body.marketing_opt_in === true || body.marketing_opt_in === 1 || body.marketing_opt_in === "1" || body.marketing_opt_in === "on";
+  await query("UPDATE clients SET marketing_opt_in=$1, marketing_opt_in_at=CASE WHEN $1 AND NOT marketing_opt_in THEN NOW() WHEN $1 THEN marketing_opt_in_at END WHERE id=$2", [value, clientId]);
+}
+
+/**
+ * Diaspora client (lives abroad) and their country. Only diaspora clients can
+ * be invited to the customer portal; un-marking one disables their portal.
+ */
+async function setDiasporaFields(clientId, body, access = null) {
+  // The Diaspora Desk only ever works diaspora customers: whatever it creates or
+  // edits stays a diaspora client (and so stays visible to the desk).
+  if (access?.diasporaDeskOnly) body = { ...(body || {}), is_diaspora: true };
+  if (!body) return;
+  if (Object.prototype.hasOwnProperty.call(body, "country")) {
+    await query("UPDATE clients SET country=$1 WHERE id=$2", [String(body.country || "").trim().slice(0, 80) || null, clientId]);
+  }
+  if (!Object.prototype.hasOwnProperty.call(body, "is_diaspora")) return;
+  const value = body.is_diaspora === true || body.is_diaspora === 1 || body.is_diaspora === "1" || body.is_diaspora === "on";
+  await query("UPDATE clients SET is_diaspora=$1 WHERE id=$2", [value, clientId]);
+  if (!value) await disablePortalAccount(clientId);
+}
+
+async function disablePortalAccount(clientId) {
+  const account = await queryOne("UPDATE customer_accounts SET status='disabled' WHERE client_id=$1 AND status<>'disabled' RETURNING id", [clientId]);
+  if (account) await query("DELETE FROM customer_sessions WHERE account_id=$1", [account.id]);
+  return Boolean(account);
+}
+
 function validateClient(body, current = {}) {
   return {
     project_id: parseId(body.project_id ?? current.project_id, "project_id", true),
@@ -1050,6 +1090,9 @@ router.get("/auth/me", requireAuth, route(async (req, res) => {
 // The public website's read-only API. Mounted BEFORE requireAuth: it needs no
 // login and returns only what the Sales Officer has published.
 router.use("/public", publicRoutes);
+// The diaspora customer portal: its own accounts and sessions, never a staff
+// session (routes/customer.js). Mounted before the staff login on purpose.
+router.use("/customer", customerRoutes);
 router.use(requireAuth);
 // Own profile photo, kept for compatibility with the earlier /profile/photo
 // endpoints. Both routes use the same stored photo as /org/me/photo, which is
@@ -1200,7 +1243,11 @@ router.post("/contracts/:id/transition", route(async (req, res) => {
     throw new HttpError(409, "this contract needs management approval before it goes to the customer");
   }
   const notes = optionalText(req.body?.notes, "notes", 2000);
-  const signedBy = optionalText(req.body?.signed_by, "signed_by", 160);
+  let signedBy = optionalText(req.body?.signed_by, "signed_by", 160);
+  // A diaspora customer signed in the portal: the record says so, with when.
+  if (name === "record_signature" && contract.channel === "diaspora" && contract.customer_accepted_at && !signedBy) {
+    signedBy = `${contract.customer_accepted_name} (signed electronically in the portal, ${new Date(contract.customer_accepted_at).toISOString().slice(0, 16).replace("T", " ")} UTC)`.slice(0, 160);
+  }
   if (name === "record_signature" && !signedBy) throw new HttpError(400, "signed_by is required to record a customer signature");
   // A contract comes into force only when the customer has signed AND paid what
   // is due at signing: the deposit (or, for cash, the whole price), confirmed by
@@ -1325,7 +1372,11 @@ router.post("/contracts/generate", route(async (req, res) => {
   //   * a full-wording template written for this type: filled as it is;
   //   * no template: the built-in MKUYU letterhead.
   // Letterheads live in the page header/footer, so every page carries them.
-  const agreement = builtInAgreement(data.deal_type);
+  // A customer living abroad gets the Diaspora agreement and the diaspora path
+  // (verification first, e-signature in the portal, management approval).
+  const diaspora = data.client_id ? Boolean((await queryOne("SELECT is_diaspora FROM clients WHERE id=$1", [data.client_id]))?.is_diaspora) : false;
+  if (diaspora && !["buy", "rent"].includes(data.deal_type)) throw new HttpError(400, "a diaspora customer can buy or rent through the Diaspora Desk; a Sell mandate is made by Sales");
+  const agreement = builtInAgreement(data.deal_type, diaspora ? "diaspora" : "standard");
   let templateId = null;
   let templateBody = agreement.body;
   let templateTitle = agreement.title;
@@ -1352,12 +1403,19 @@ router.post("/contracts/generate", route(async (req, res) => {
       throw new HttpError(400, `the selected template is for ${template.template_deal_type} contracts; choose a ${data.deal_type} template or the letterhead`);
     }
     letterhead = CONTRACT_BODY_TOKEN.test(template.body_text);
-    // A letterhead carries the type's wording; a full template its own.
-    templateBody = letterhead ? String(template.body_text).replace(CONTRACT_BODY_TOKEN, agreement.body) : String(template.body_text);
-    if (!letterhead) templateTitle = template.title || agreement.title;
-    templateWordPath = templateWordFile(template);
-    // In a Word letterhead the design is the file; the stored text is the wording.
-    if (templateWordPath && letterhead) templateBody = agreement.body;
+    // Diaspora wording is fixed: a template may only be the letterhead around it.
+    if (diaspora && !letterhead) {
+      if (hasSelectedTemplate) throw new HttpError(400, "a diaspora contract uses the Diaspora agreement wording: choose a letterhead template or the built-in one");
+      letterhead = false; templateId = null; templateWordPath = null;
+    }
+    if (templateId) {
+      // A letterhead carries the type's wording; a full template its own.
+      templateBody = letterhead ? String(template.body_text).replace(CONTRACT_BODY_TOKEN, agreement.body) : String(template.body_text);
+      if (!letterhead) templateTitle = template.title || agreement.title;
+      templateWordPath = templateWordFile(template);
+      // In a Word letterhead the design is the file; the stored text is the wording.
+      if (templateWordPath && letterhead) templateBody = agreement.body;
+    }
   }
   const unknownTemplateTokens = templateWordPath
     ? await templateFileUnknownPlaceholders(fs.readFileSync(templateWordPath))
@@ -1379,6 +1437,7 @@ router.post("/contracts/generate", route(async (req, res) => {
     first_due_date: plan ? plan.firstDueDate : null,
   });
   if (paymentMode || plan) await query("UPDATE contracts SET payment_mode=$1 WHERE id=$2", [paymentMode || "installments", created.id]);
+  if (diaspora) await query("UPDATE contracts SET channel='diaspora', requires_management_approval=TRUE WHERE id=$1", [created.id]);
   const contract = await Contract.get(created.id);
 
   // --- Generate the FULL document -----------------------------------------
@@ -1642,7 +1701,7 @@ router.get("/contracts/:id/document-content", route(async (req, res) => {
 
   let bodyText = document.body_text;
   if (!bodyText) {
-    const agreement = builtInAgreement(contract.deal_type);
+    const agreement = builtInAgreement(contract.deal_type, contract.channel);
     let templateBody = agreement.body;
     if (contract.template_document_id) {
       const template = await Document.get(contract.template_document_id);
@@ -1761,7 +1820,12 @@ router.get("/contract-placeholders", route(async (req, res) => { res.json(CONTRA
 router.post("/contracts", route(async (req, res) => {
   requireContractAuthor(req.access);
   const data = await ensureContractClient(await validateContract(req.body || {}));
+  const diaspora = data.client_id ? Boolean((await queryOne("SELECT is_diaspora FROM clients WHERE id=$1", [data.client_id]))?.is_diaspora) : false;
+  if (diaspora && !["buy", "rent"].includes(data.deal_type)) throw new HttpError(400, "a diaspora customer can buy or rent through the Diaspora Desk; a Sell mandate is made by Sales");
   const result = await Contract.create(data);
+  // A diaspora customer's contract follows the diaspora path even when it is
+  // created without its document; the document is generated before it is sent.
+  if (diaspora) await query("UPDATE contracts SET channel='diaspora', requires_management_approval=TRUE WHERE id=$1", [result.id]);
   res.status(201).json(contractResponse(await Contract.get(result.id), req));
 }));
 router.put("/contracts/:id", route(async (req, res) => {
@@ -2170,6 +2234,8 @@ async function approvePayment(req, id) {
   // The customer's receipt goes out by e-mail in the background (when e-mail
   // is set up); a mail problem never affects the approval.
   emailReceipt(id).catch((error) => console.warn(`receipt e-mail failed: ${error.message}`));
+  // ...and the SMS: "received, balance, next installment", or "fully paid".
+  noticeAfterPayment(id).catch((error) => console.warn(`payment SMS failed: ${error.message}`));
   return paymentResponse(await Payment.get(id));
 }
 
@@ -2407,6 +2473,256 @@ router.get("/email/status", route(async (req, res) => {
   const recent = (await query("SELECT kind, recipient, subject, status, error, created_at FROM email_log ORDER BY id DESC LIMIT 20")).rows;
   res.json({ configured: mailConfigured(), receipts: process.env.MAIL_RECEIPTS !== "0", reminders: process.env.MAIL_REMINDERS !== "0", reminder_days: Number(process.env.MAIL_REMINDER_DAYS || 3), recent });
 }));
+// ---- Diaspora customer portal: Sales invites a diaspora client ------------
+// Everything about one client on a single screen (the client overlay): who they
+// are, their portal sign-up, the property and project they took, what they have
+// paid, and what they asked for. The client lookup enforces the caller's scope,
+// and the contracts are filtered by the contract scope too.
+router.get("/clients/:id/profile", route(async (req, res) => {
+  const client = requireRecord(await Client.get(parseId(req.params.id)), "Client");
+  const extra = await queryOne(
+    `SELECT c.nationality, c.residence_code, c.phone_country, c.residence_check, c.verification_status, c.verification_note,
+            c.verified_at, c.desk_checked_at, c.citizenship_confirmed_at, c.created_at, u.display_name AS officer_name, pr.name AS project_name, pr.location AS project_location
+       FROM clients c LEFT JOIN users u ON u.id=c.diaspora_officer_id LEFT JOIN projects pr ON pr.id=c.project_id WHERE c.id=$1`, [client.id]);
+  const account = await queryOne("SELECT username, email, status, invited_at, activated_at, last_login_at, created_at FROM customer_accounts WHERE client_id=$1", [client.id]);
+  const values = [client.id];
+  const scope = scopeCondition("c", "contract", req.access, values, { read: true });
+  const contracts = (await query(
+    `SELECT c.id, c.contract_number, c.status, c.deal_type, c.channel, c.value, c.start_date, c.end_date, c.created_at, c.customer_accepted_at,
+            c.property_id, p.name AS property_name, p.location AS property_location, p.property_type, p.price AS property_price,
+            pr.id AS project_id, pr.name AS project_name, pr.location AS project_location,
+            (SELECT pi.id FROM property_images pi WHERE pi.property_id=p.id ORDER BY pi.id LIMIT 1) AS photo_id,
+            COALESCE((SELECT SUM(pm.amount) FROM payments pm WHERE pm.contract_id=c.id AND pm.status='approved'),0)
+              - COALESCE((SELECT SUM(rf.amount) FROM refunds rf WHERE rf.contract_id=c.id AND rf.status='approved'),0) AS paid,
+            (SELECT json_build_object('due_date', d.due_date, 'amount', d.amount) FROM debts d WHERE d.contract_id=c.id AND d.status<>'paid' ORDER BY d.due_date NULLS LAST, d.id LIMIT 1) AS next_due
+       FROM contracts c LEFT JOIN properties p ON p.id=c.property_id LEFT JOIN projects pr ON pr.id=c.project_id
+      WHERE c.client_id=$1 AND ${scope} ORDER BY c.id DESC`, values)).rows.map((c) => ({
+    ...c,
+    paid: Math.max(0, Number(c.paid || 0)),
+    balance: Math.max(0, Number(c.value || 0) - Math.max(0, Number(c.paid || 0))),
+    photo_url: c.photo_id ? `/api/v1/properties/${c.property_id}/images/${c.photo_id}/file` : null,
+  }));
+  const requests = (await query(
+    `SELECT l.id, l.service, l.status, l.budget, l.notes, l.created_at, l.source, p.name AS property_name, p.id AS property_id,
+            (SELECT pi.id FROM property_images pi WHERE pi.property_id=p.id ORDER BY pi.id LIMIT 1) AS photo_id
+       FROM leads l LEFT JOIN properties p ON p.id=l.property_id
+      WHERE l.organization_id=$2 AND l.client_id=$1 ORDER BY l.created_at DESC LIMIT 20`, [client.id, req.access.organizationId])).rows
+    .map((r) => ({ ...r, photo_url: r.photo_id ? `/api/v1/properties/${r.property_id}/images/${r.photo_id}/file` : null }));
+  const documents = (await queryOne("SELECT COUNT(*)::int AS n FROM documents WHERE client_id=$1 AND category LIKE 'kyc\\_%'", [client.id]))?.n ?? 0;
+  res.json({ client: { ...client, ...extra }, account, contracts, requests, kyc_documents: documents });
+}));
+router.get("/clients/:id/portal", route(async (req, res) => {
+  const client = requireRecord(await Client.get(parseId(req.params.id)), "Client");
+  const account = await queryOne("SELECT email, status, invited_at, activated_at, last_login_at FROM customer_accounts WHERE client_id=$1", [client.id]);
+  res.json({ is_diaspora: Boolean(client.is_diaspora), account });
+}));
+router.post("/clients/:id/portal-invite", route(async (req, res) => {
+  const client = requireRecord(await Client.get(parseId(req.params.id)), "Client");
+  if (!client.is_diaspora) throw new HttpError(400, "Only a diaspora client can be invited to the customer portal. Tick 'Diaspora client' first.");
+  const email = String(client.email || "").trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, "Add the client's e-mail address first: they sign in with a code sent there.");
+  const taken = await queryOne("SELECT client_id FROM customer_accounts WHERE lower(email)=$1 AND status<>'disabled' AND client_id<>$2", [email, client.id]);
+  if (taken) throw new HttpError(409, "Another client already uses this e-mail for the portal.");
+  const contracts = await queryOne("SELECT COUNT(*)::int AS n FROM contracts WHERE client_id=$1 AND status NOT IN ('draft','rejected','cancelled')", [client.id]);
+  const account = await queryOne(
+    `INSERT INTO customer_accounts (client_id, email, status, invited_by, invited_at) VALUES ($1,$2,'invited',$3,NOW())
+     ON CONFLICT (client_id) DO UPDATE SET email=EXCLUDED.email, invited_by=EXCLUDED.invited_by, invited_at=NOW(),
+       status=CASE WHEN customer_accounts.status='active' AND customer_accounts.email=EXCLUDED.email THEN 'active' ELSE 'invited' END
+     RETURNING id, email, status`, [client.id, email, req.user.id]);
+  const site = String(process.env.PUBLIC_SITE_URL || "").trim().replace(/\/+$/, "");
+  const link = site ? `${site}/login.html` : "the MKUYU website (Diaspora login)";
+  const mail = mailConfigured()
+    ? await sendMail({ to: email, subject: "Your MKUYU diaspora portal",
+        text: `Dear ${client.name},\n\nYou can now follow your MKUYU property from wherever you are: your contract, every payment and receipt, the balance and next installment, and photos of the construction progress.\n\nOpen ${link}, choose 'Forgot password or first time here?', enter this e-mail address (${email}) and set your password with the code we send you. After that you sign in with your e-mail and password.\n\nMKUYU Africa` ,
+        kind: "portal_invite" })
+    : { sent: false, error: "e-mail is not set up" };
+  await audit(req, "portal_invited", "client", client.id, { email, contracts: contracts.n, emailed: mail.sent });
+  res.json({ account, emailed: mail.sent, email_error: mail.sent ? null : mail.error, contracts: contracts.n });
+}));
+router.post("/clients/:id/portal-disable", route(async (req, res) => {
+  const client = requireRecord(await Client.get(parseId(req.params.id)), "Client");
+  const disabled = await disablePortalAccount(client.id);
+  await audit(req, "portal_disabled", "client", client.id, {});
+  res.json({ ok: true, disabled });
+}));
+
+// ---- Diaspora verification: the Desk verifies, Legal confirms nationality ----
+// A self sign-up proves who they are before MKUYU serves them:
+//   submitted (documents in) --Desk: verify--> verified
+//     -> the customer gets the Verified badge and may request properties;
+//   then Legal confirms nationality (citizenship_confirmed_at), which decides the
+//   contract MKUYU may offer: no agreement is signed before that.
+//   Desk or Legal may send documents back with a note; the customer uploads again.
+// desk_checked is the old intermediate stage; such customers can be verified directly.
+// Purpose-built endpoints, so Legal can do its step without being given the
+// Desk's whole client list.
+const DESK_NAME = "DIASPORA DESK";
+async function inDiasporaDesk(userId) {
+  return Boolean(await queryOne("SELECT 1 FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=$1 AND d.name=$2 AND d.active=TRUE", [userId, DESK_NAME]));
+}
+const isLegalVerifier = (req) => canPermission(req.access, "approve_legal");
+async function verificationRole(req) {
+  const desk = await inDiasporaDesk(req.user.id);
+  const legal = isLegalVerifier(req);
+  const oversight = canPermission(req.access, "approve_management");
+  if (!desk && !legal && !oversight) throw new HttpError(403, "Only the Diaspora Desk, Legal and the MD see customer verification.");
+  return { desk, legal, oversight };
+}
+router.get("/diaspora/verifications", route(async (req, res) => {
+  const role = await verificationRole(req);
+  const rows = (await query(
+    `SELECT c.id, c.name, c.email, c.phone, c.country, c.residence_code, c.nationality, c.phone_country, c.residence_check,
+            c.verification_status, c.verification_note, c.created_at, c.desk_checked_at, c.verified_at, c.citizenship_confirmed_at,
+            o.display_name AS officer_name, dc.display_name AS desk_checked_by_name, vb.display_name AS verified_by_name,
+            cb.display_name AS citizenship_confirmed_by_name,
+            COALESCE((SELECT json_agg(json_build_object('id', d.id, 'kind', substr(d.category, 5), 'name', d.original_filename, 'uploaded_at', d.uploaded_at) ORDER BY d.id)
+                        FROM documents d WHERE d.client_id=c.id AND d.category LIKE 'kyc_%'), '[]') AS documents
+       FROM clients c LEFT JOIN users o ON o.id=c.diaspora_officer_id LEFT JOIN users dc ON dc.id=c.desk_checked_by LEFT JOIN users vb ON vb.id=c.verified_by
+            LEFT JOIN users cb ON cb.id=c.citizenship_confirmed_by
+      WHERE c.organization_id=$1 AND c.is_diaspora=TRUE AND c.verification_status IS NOT NULL
+      ORDER BY CASE c.verification_status WHEN 'submitted' THEN 0 WHEN 'desk_checked' THEN 0 WHEN 'unverified' THEN 2 WHEN 'rejected' THEN 3 ELSE 4 END, c.id DESC LIMIT 300`,
+    [await organizationId()])).rows;
+  res.json({ role, rows });
+}));
+router.get("/diaspora/verifications/:id/documents/:docId", route(async (req, res) => {
+  await verificationRole(req);
+  const doc = requireRecord(await queryOne(`SELECT d.* FROM documents d JOIN clients c ON c.id=d.client_id
+    WHERE d.id=$1 AND c.id=$2 AND c.is_diaspora=TRUE AND d.category LIKE 'kyc_%'`, [parseId(req.params.docId, "document_id"), parseId(req.params.id)]), "Document");
+  const fullPath = resolveStoredFile(documentUploadsDir, doc.stored_name);
+  if (!fullPath) throw new HttpError(404, "Document file not found");
+  await audit(req, "kyc_document_viewed", "client", doc.client_id, { document_id: doc.id });
+  return sendStoredFile(res, fullPath, doc.mime_type || null, doc.original_filename || doc.stored_name, false);
+}));
+router.post("/diaspora/verifications/:id", route(async (req, res) => {
+  const role = await verificationRole(req);
+  const clientId = parseId(req.params.id);
+  const client = requireRecord(await queryOne("SELECT id, name, email, verification_status, citizenship_confirmed_at FROM clients WHERE id=$1 AND is_diaspora=TRUE AND organization_id=$2", [clientId, await organizationId()]), "Customer");
+  const action = String(req.body?.action || "");
+  const note = String(req.body?.note || "").trim().slice(0, 1000) || null;
+  const documentsIn = ["submitted", "desk_checked"].includes(client.verification_status);
+  let update;
+  if (action === "verify") {
+    // The Diaspora Desk verifies identity. Legal may verify too; when Legal
+    // does, nationality is confirmed in the same step.
+    if (!role.desk && !role.legal) throw new HttpError(403, "Customers are verified by the Diaspora Desk.");
+    if (!documentsIn) throw new HttpError(409, client.verification_status === "verified" ? "This customer is already verified." : "The customer must upload their documents first.");
+    const have = await queryOne("SELECT COUNT(*) FILTER (WHERE category='kyc_passport')::int AS p, COUNT(*) FILTER (WHERE category='kyc_residence')::int AS r FROM documents WHERE client_id=$1", [clientId]);
+    if (!have.p || !have.r) throw new HttpError(409, `The ${!have.p ? "passport" : "proof of residence"} is still missing. Press "Send back" and ask the customer to upload it.`);
+    update = role.legal && !role.desk
+      ? ["UPDATE clients SET verification_status='verified', verified_by=$2, verified_at=NOW(), verification_note=$3, citizenship_confirmed_by=$2, citizenship_confirmed_at=NOW() WHERE id=$1", [clientId, req.user.id, note]]
+      : ["UPDATE clients SET verification_status='verified', verified_by=$2, verified_at=NOW(), verification_note=$3 WHERE id=$1", [clientId, req.user.id, note]];
+  } else if (action === "confirm_citizenship") {
+    if (!role.legal) throw new HttpError(403, "Nationality is confirmed by Legal.");
+    if (client.verification_status !== "verified") throw new HttpError(409, "The Diaspora Desk verifies the customer first.");
+    if (client.citizenship_confirmed_at) throw new HttpError(409, "Nationality is already confirmed.");
+    update = ["UPDATE clients SET citizenship_confirmed_by=$2, citizenship_confirmed_at=NOW(), verification_note=COALESCE($3, verification_note) WHERE id=$1", [clientId, req.user.id, note]];
+  } else if (action === "desk_ok") {
+    // Older two-step screens: kept so they still work. New screens verify directly.
+    if (!role.desk) throw new HttpError(403, "The first check is done by the Diaspora Desk.");
+    if (client.verification_status !== "submitted") throw new HttpError(409, "Only a customer whose documents are in can be checked.");
+    update = ["UPDATE clients SET verification_status='desk_checked', desk_checked_by=$2, desk_checked_at=NOW(), verification_note=$3 WHERE id=$1", [clientId, req.user.id, note]];
+  } else if (action === "reject") {
+    if (!role.desk && !role.legal) throw new HttpError(403, "Only the Diaspora Desk or Legal can send documents back.");
+    if (!note) throw new HttpError(400, "Write what the customer must correct; they will see it.");
+    // Legal may still send back a verified customer whose nationality it cannot confirm.
+    const legalReview = role.legal && client.verification_status === "verified" && !client.citizenship_confirmed_at;
+    if (!["submitted", "desk_checked", "unverified"].includes(client.verification_status) && !legalReview) throw new HttpError(409, "Nothing to send back.");
+    update = ["UPDATE clients SET verification_status='rejected', verification_note=$2, verified_by=NULL, verified_at=NULL WHERE id=$1", [clientId, note]];
+  } else throw new HttpError(400, "Unknown action.");
+  await query(update[0], update[1]);
+  await audit(req, `kyc_${action}`, "client", clientId, { note });
+  if (mailConfigured() && client.email && ["verify", "reject", "confirm_citizenship"].includes(action)) {
+    const site = String(process.env.PUBLIC_SITE_URL || "").trim().replace(/\/+$/, "");
+    sendMail({ to: client.email, subject: action === "verify" ? "MKUYU: you are verified" : action === "confirm_citizenship" ? "MKUYU: your nationality is confirmed" : "MKUYU: please check your documents",
+      text: action === "confirm_citizenship"
+        ? `Dear ${client.name},\n\nMKUYU's Legal team has confirmed your nationality. When your agreement is ready, you can read and sign it in your portal.\n\n${site ? `${site}/login.html` : "Website → Diaspora login"}\n\nMKUYU Africa`
+        : action === "verify"
+        ? `Dear ${client.name},\n\nMKUYU has verified your identity. Your portal now shows the Verified badge, and you can request any property from it.\n\n${site ? `${site}/login.html` : "Website → Diaspora login"}\n\nMKUYU Africa`
+        : `Dear ${client.name},\n\nWe could not verify your documents yet:\n\n${note}\n\nPlease sign in and upload them again.\n\nMKUYU Africa`,
+      kind: "kyc" }).catch(() => {});
+  }
+  const now = await queryOne("SELECT verification_status, citizenship_confirmed_at FROM clients WHERE id=$1", [clientId]);
+  res.json({ ok: true, status: now.verification_status, citizenship_confirmed: Boolean(now.citizenship_confirmed_at) });
+}));
+
+// ---- Construction progress for customers (a dated note with photos) --------
+async function progressList(projectId) {
+  const updates = (await query(`SELECT u.*, p.name AS property_name, us.display_name AS created_by_name FROM construction_updates u
+    LEFT JOIN properties p ON p.id=u.property_id LEFT JOIN users us ON us.id=u.created_by WHERE u.project_id=$1 ORDER BY u.update_date DESC, u.id DESC`, [projectId])).rows;
+  const images = updates.length ? (await query("SELECT id, update_id FROM construction_update_images WHERE update_id = ANY($1::int[]) ORDER BY id", [updates.map((u) => u.id)])).rows : [];
+  return updates.map((u) => ({ ...u, photos: images.filter((i) => i.update_id === u.id).map((i) => ({ id: i.id, url: `/api/v1/projects/${projectId}/progress/photos/${i.id}` })) }));
+}
+router.get("/projects/:id/progress", route(async (req, res) => {
+  const project = requireRecord(await Project.get(parseId(req.params.id)), "Project");
+  res.json(await progressList(project.id));
+}));
+router.post("/projects/:id/progress", uploadProgressImages, route(async (req, res) => {
+  const files = req.files || [];
+  const cleanup = () => files.forEach((file) => cleanupUploadedFile(file));
+  try {
+    const project = requireRecord(await Project.get(parseId(req.params.id)), "Project");
+    const title = String(req.body?.title || "").trim().slice(0, 160);
+    if (!title) throw new HttpError(400, "Write a short title, for example 'Foundation completed'.");
+    const note = String(req.body?.note || "").trim().slice(0, 2000) || null;
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.update_date || "")) ? req.body.update_date : null;
+    const propertyId = req.body?.property_id ? parseId(req.body.property_id, "property_id") : null;
+    if (propertyId) {
+      const property = requireRecord(await Property.get(propertyId), "Property");
+      if (Number(property.project_id) !== Number(project.id)) throw new HttpError(400, "That property is not in this project.");
+    }
+    if (files.length > MAX_PROGRESS_PHOTOS) throw new HttpError(400, `At most ${MAX_PROGRESS_PHOTOS} photos per update.`);
+    const checked = files.map((file) => validateUploadedFile(file, propertyImageExtensions));
+    const update = await queryOne(`INSERT INTO construction_updates (organization_id, project_id, property_id, title, note, update_date, created_by)
+      VALUES ($1,$2,$3,$4,$5,COALESCE($6::date, CURRENT_DATE),$7) RETURNING id`, [await organizationId(), project.id, propertyId, title, note, date, req.user.id]);
+    for (const info of checked) {
+      await query("INSERT INTO construction_update_images (update_id, stored_name, original_filename, mime_type, file_size) VALUES ($1,$2,$3,$4,$5)",
+        [update.id, info.storedName, info.displayName, info.mimeType, info.size]);
+    }
+    await audit(req, "progress_published", "project", project.id, { update_id: update.id, photos: checked.length });
+    res.status(201).json((await progressList(project.id)).find((u) => u.id === update.id));
+  } catch (error) { cleanup(); throw error; }
+}));
+router.get("/projects/:id/progress/photos/:photoId", route(async (req, res) => {
+  const project = requireRecord(await Project.get(parseId(req.params.id)), "Project");
+  const photo = requireRecord(await queryOne(`SELECT i.* FROM construction_update_images i JOIN construction_updates u ON u.id=i.update_id
+    WHERE i.id=$1 AND u.project_id=$2`, [parseId(req.params.photoId, "photo_id"), project.id]), "Photo");
+  const fullPath = resolveStoredFile(progressUploadsDir, photo.stored_name);
+  if (!fullPath) throw new HttpError(404, "Photo file not found");
+  return sendStoredFile(res, fullPath, photo.mime_type || null, photo.original_filename || photo.stored_name, false);
+}));
+router.delete("/projects/:id/progress/:updateId", route(async (req, res) => {
+  const project = requireRecord(await Project.get(parseId(req.params.id)), "Project");
+  const updateId = parseId(req.params.updateId, "update_id");
+  const photos = (await query("SELECT i.stored_name FROM construction_update_images i JOIN construction_updates u ON u.id=i.update_id WHERE u.id=$1 AND u.project_id=$2", [updateId, project.id])).rows;
+  const removed = await query("DELETE FROM construction_updates WHERE id=$1 AND project_id=$2", [updateId, project.id]);
+  if (!removed.rowCount) throw new HttpError(404, "Update not found");
+  for (const photo of photos) { const full = resolveStoredFile(progressUploadsDir, photo.stored_name); if (full) try { fs.unlinkSync(full); } catch { /* already gone */ } }
+  await audit(req, "progress_deleted", "project", project.id, { update_id: updateId });
+  res.json({ ok: true });
+}));
+
+// Customer SMS notices: how they are set up and the latest ones (Finance, admin).
+router.get("/notifications/status", route(async (req, res) => {
+  if (!req.access?.isAdmin && !can(req.access, "view_financial")) throw new HttpError(403, "only Finance and the administrator see customer notices");
+  res.json(await noticeStatus());
+}));
+// Run the reminder / overdue pass now instead of waiting for the hourly one.
+router.post("/notifications/run", requireAdmin(), route(async (req, res) => {
+  const result = await runScheduledNotices({ force: true });
+  await audit(req, "notices_run", "notification", null, result);
+  res.json(result);
+}));
+// One test SMS to a number the administrator types (their own phone).
+router.post("/notifications/test-sms", requireAdmin(), route(async (req, res) => {
+  const number = smsNumber(req.body?.phone);
+  if (!number) throw new HttpError(400, "enter a Tanzanian mobile number, e.g. 0712 345 678");
+  const text = `${String(process.env.SMS_COMPANY_NAME || "MKUYU")}: Huu ni ujumbe wa majaribio kutoka mfumo wa MKUYU. / This is a test message from the MKUYU system.`;
+  const result = await sendSms(number, text);
+  await query("INSERT INTO notification_log (kind, channel, dedupe_key, recipient, message, status, error, provider, provider_ref, sent_at) VALUES ('test','sms',$1,$2,$3,$4,$5,$6,$7,NOW())",
+    [`test:${Date.now()}`, number, text, result.status === "off" ? "off" : result.status, result.error || null, result.provider || null, result.ref || null]);
+  await audit(req, "test_sms", "notification", null, { to: number, status: result.status });
+  res.json(result);
+}));
 router.post("/backups", requireAdmin(), route(async (req, res) => {
   res.status(201).json(await createBackup());
 }));
@@ -2444,7 +2760,10 @@ router.post("/properties", route(async (req, res) => {
   await Property.setListing(propertyId, listing);
   await applyCategoryStatus(propertyId, req.body || {}, {}, listing, data);
   await recordPropertyHistory(propertyId, req.user.id, "created", { status: data.status, price: data.price });
-  res.status(201).json(await Property.get(propertyId));
+  const saved = await Property.get(propertyId);
+  // Published straight away: tell the customers who asked for new offers.
+  if (maybeAnnounceListing({}, saved)) await recordPropertyHistory(propertyId, req.user.id, "announced", { audience: "opted-in customers" });
+  res.status(201).json(saved);
 }));
 router.put("/properties/:id", route(async (req, res) => {
   const id = parseId(req.params.id);
@@ -2462,7 +2781,11 @@ router.put("/properties/:id", route(async (req, res) => {
     await recordPropertyHistory(id, req.user.id, "status_changed", { from: current.status, to: states.status, sale: states.sale_status, rent: states.rent_status });
   }
   if (Number(current.price) !== Number(data.price)) await recordPropertyHistory(id, req.user.id, "price_changed", { from: current.price, to: data.price });
-  res.json(await Property.get(id));
+  const saved = await Property.get(id);
+  // Newly published, or open again after a cancelled sale/rent: announce it.
+  const announced = maybeAnnounceListing(current, saved);
+  if (announced) await recordPropertyHistory(id, req.user.id, "announced", { service: announced, audience: "opted-in customers" });
+  res.json(saved);
 }));
 
 /**
@@ -2562,8 +2885,10 @@ router.get("/clients", route(async (req, res) => {
   const projectId = req.query.project_id === undefined ? null : parseId(req.query.project_id, "project_id");
   const status = req.query.status || null;
   if (status && !clientStatuses.has(status)) throw new HttpError(400, "status is invalid");
-  if (!paginationRequested(req.query)) return res.json(await Client.all(projectId, status));
-  const paged = await paginatedList({ build: () => Client.paged(projectId, status, searchTerm(req.query.search)), ...parsePagination(req.query) });
+  // Ndani ya nchi / Diaspora: the two client lists the desks work from.
+  const segment = ["diaspora", "local"].includes(req.query.segment) ? req.query.segment : null;
+  if (!paginationRequested(req.query)) return res.json(await Client.all(projectId, status, segment));
+  const paged = await paginatedList({ build: () => Client.paged(projectId, status, searchTerm(req.query.search), segment), ...parsePagination(req.query) });
   res.json({ data: paged.rows, pagination: paged.pagination });
 }));
 router.get("/clients/:id", route(async (req, res) => res.json(requireRecord(await Client.get(parseId(req.params.id)), "Client"))));
@@ -2592,6 +2917,8 @@ router.post("/clients", route(async (req, res) => {
     data.status = "lead";
   }
   const result = await Client.create(data);
+  await setMarketingOptIn(result.id, req.body);
+  await setDiasporaFields(result.id, req.body, req.access);
   if (associatedContract) {
     await query("UPDATE contracts SET client_id=$1 WHERE id=$2", [result.id, associatedContract.id]);
     clearAccessCache();
@@ -2617,6 +2944,8 @@ router.put("/clients/:id", route(async (req, res) => {
     await requireContractForCompletedClient(id, data.status, current.status);
   }
   await Client.update(id, data);
+  await setMarketingOptIn(id, req.body);
+  await setDiasporaFields(id, req.body, req.access);
   res.json(await Client.get(id));
 }));
 router.delete("/clients/:id", route(async (req, res) => {

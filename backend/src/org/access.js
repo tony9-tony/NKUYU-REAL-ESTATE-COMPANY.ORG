@@ -65,6 +65,9 @@ export async function accessForUser(user) {
        COALESCE((SELECT json_agg(d.id ORDER BY d.id)
                    FROM user_departments ud JOIN departments d ON d.id = ud.department_id
                   WHERE ud.user_id = $1 AND d.active = TRUE), '[]'::json) AS departments,
+       COALESCE((SELECT json_agg(d.name ORDER BY d.id)
+                   FROM user_departments ud JOIN departments d ON d.id = ud.department_id
+                  WHERE ud.user_id = $1 AND d.active = TRUE), '[]'::json) AS department_names,
        COALESCE((SELECT json_agg(DISTINCT p.permission_key)
                    FROM user_roles ur
                    JOIN roles r ON r.id = ur.role_id AND r.active = TRUE
@@ -88,6 +91,10 @@ export async function accessForUser(user) {
     permissions: row.permissions || [],
     organizationId: await organizationId(),
   };
+  // A member of the Diaspora Desk only (no other department, no organization
+  // scope) works diaspora customers and nothing else: see scopeCondition.
+  const names = row.department_names || [];
+  access.diasporaDeskOnly = !access.isAdmin && access.scope !== "organization" && names.length > 0 && names.every((name) => name === "DIASPORA DESK");
   accessCache.set(key, { access, loadedAt: Date.now() });
   return access;
 }
@@ -160,8 +167,52 @@ export function financeDesk(access) {
   return Boolean(access && !access.isAdmin && access.permissions?.includes("validate_finance") && access.permissions?.includes("view_financial"));
 }
 
+/**
+ * What a Diaspora-Desk-only member may see, per record type: diaspora customers
+ * and the work around them (the whole desk shares one queue, so every desk
+ * member sees all of it), plus anything they made themselves. Projects and
+ * properties are the ordinary catalogue the Sales team maintains (read only for
+ * the desk). Everything else of the office stays out of sight.
+ */
+function diasporaDeskCondition(alias, entity, access, values) {
+  // The Diaspora Desk works ONLY with diaspora customers and their work. The
+  // property and project catalogue is the normal one (posted by Sales), so it
+  // stays fully visible. Inner aliases are prefixed "dsp_" so they never clash
+  // with the caller's alias (counts use "dc" for documents, for example).
+  const bind = (value) => { values.push(value); return `$${values.length}`; };
+  const me = () => bind(access.userId);
+  const mine = () => `(${alias}.owner_id = ${me()} OR ${alias}.created_by = ${me()})`;
+  const diasporaClient = (column) => `EXISTS (SELECT 1 FROM clients dsp_c WHERE dsp_c.id = ${alias}.${column} AND dsp_c.is_diaspora = TRUE)`;
+  const diasporaContract = (column) => `EXISTS (SELECT 1 FROM contracts dsp_k WHERE dsp_k.id = ${alias}.${column} AND (dsp_k.channel = 'diaspora' OR EXISTS (SELECT 1 FROM clients dsp_kc WHERE dsp_kc.id = dsp_k.client_id AND dsp_kc.is_diaspora = TRUE)))`;
+  const deskDepartment = () => (access.departmentIds.length ? ` OR ${alias}.department_id = ANY(${bind(access.departmentIds)})` : "");
+  switch (entity) {
+    case "project":
+    case "property":
+      return "TRUE";
+    case "client":
+      return `(${alias}.is_diaspora = TRUE)`;
+    case "lead":
+      return `(${alias}.source = 'diaspora-portal' OR ${diasporaClient("client_id")} OR ${alias}.assigned_to = ${me()}${deskDepartment()})`;
+    case "contract":
+      return `(${alias}.channel = 'diaspora' OR ${diasporaClient("client_id")})`;
+    case "appointment":
+      return `(${diasporaClient("client_id")} OR ${mine()})`;
+    case "document":
+      return `(${alias}.category = 'template' OR ${diasporaClient("client_id")} OR ${diasporaContract("contract_id")} OR ${mine()})`;
+    case "follow_up":
+      return `(${diasporaClient("client_id")} OR EXISTS (SELECT 1 FROM leads dsp_l WHERE dsp_l.id = ${alias}.lead_id AND (dsp_l.source = 'diaspora-portal' OR EXISTS (SELECT 1 FROM clients dsp_lc WHERE dsp_lc.id = dsp_l.client_id AND dsp_lc.is_diaspora = TRUE))) OR ${alias}.assigned_to = ${me()} OR ${mine()})`;
+    case "debt":
+    case "payment":
+      return diasporaContract("contract_id");
+    default:
+      // Reports and anything else: only what this person made or owns.
+      return mine();
+  }
+}
+
 export function scopeCondition(alias, entity, access, values, { read = false } = {}) {
   if (!access || access.isAdmin || access.scope === "organization") return "TRUE";
+  if (access.diasporaDeskOnly) return diasporaDeskCondition(alias, entity, access, values);
   if (FINANCE_LEDGER_ENTITIES.has(entity) && financeDesk(access)) return "TRUE";
   if (read && SHARED_READ_ENTITIES[entity] && canReadModule(access, SHARED_READ_ENTITIES[entity])) return "TRUE";
   const grant = CATALOGUE_READ_GRANT[entity];

@@ -184,6 +184,21 @@ export function canTransition(status, actionName) {
  */
 export function transitionBlockedReason(contract, actionName) {
   if (!contract) return null;
+  // Diaspora contracts have their own path: the customer must be verified
+  // (Desk + Legal) before the deal goes to Legal, and the customer signs
+  // electronically in the portal before Legal records the signature.
+  if (contract.channel === "diaspora") {
+    const verified = !contract.client_verification_status || contract.client_verification_status === "verified";
+    if (["submit", "legal_approve", "send_to_customer"].includes(actionName) && !verified) {
+      return "The diaspora customer must be verified (Diaspora Desk, then Legal) before this contract can move on";
+    }
+    if (actionName === "send_to_customer" && !contract.generated_document_id) {
+      return "Generate the Diaspora agreement for this contract before sending it to the customer";
+    }
+    if (actionName === "record_signature" && !contract.customer_accepted_at) {
+      return "The diaspora customer has not yet signed this agreement in the portal";
+    }
+  }
   const financeDone = Boolean(contract.finance_validated_at);
   if (actionName === "submit_management" && !financeDone) {
     return "Finance must validate the financial terms before the contract goes to the Managing Director";
@@ -273,6 +288,9 @@ export const CONTRACT_PLACEHOLDERS = [
   { token: "TITLE_DEED_NUMBER", label: "Title deed / certificate number" },
   { token: "PROPERTY_TYPE", label: "Property type" },
   { token: "PROPERTY_AREA", label: "Property size" },
+  // Diaspora agreements: who the customer is, as verified by Legal.
+  { token: "CLIENT_NATIONALITY", label: "Client nationality (verified)" },
+  { token: "CLIENT_RESIDENCE", label: "Client country of residence" },
   // The whole agreement wording for the chosen contract type. Put it in a
   // letterhead template where the contract text should go.
   { token: "CONTRACT_BODY", label: "Full agreement text for the chosen type (for letterhead templates)" },
