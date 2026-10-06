@@ -615,7 +615,16 @@ router.post("/requests", requireCustomer, route(async (req, res) => {
      VALUES ($1,$2,$3,$4,$5,'diaspora-portal','new',$6,$7,$8,$9,$10,$11,$11,$12,$13) RETURNING id`,
     [client.organization_id, client.id, client.name, client.email, client.phone, notes, budget, service, property.id, preferred, client.diaspora_officer_id, desk, desk ? "department" : "organization"]);
   broadcastChange("requests");
-  res.status(201).json({ reference: `D-${lead.id}`, message: "Request received. Our sales team will contact you, usually within one working day." });
+  broadcastChange("diaspora");
+  // The Diaspora Desk is told by e-mail as well, at once.
+  if (mailConfigured()) {
+    query(`SELECT DISTINCT u.email FROM users u JOIN user_departments ud ON ud.user_id=u.id JOIN departments d ON d.id=ud.department_id
+            WHERE d.name='DIASPORA DESK' AND d.active=TRUE AND u.email IS NOT NULL AND u.email <> ''`)
+      .then(({ rows }) => Promise.all(rows.map((r) => sendMail({ to: r.email, subject: `MKUYU: ${client.name} wants to ${service === "rent" ? "rent" : "buy"} ${property.name}`,
+        text: `${client.name}${client.country ? ` (${client.country})` : ""} asked to ${service === "rent" ? "rent" : "buy"} "${property.name}" from the portal.\n\n${message ? `${message}\n\n` : ""}Open the system → Diaspora requests.\n\nMKUYU Africa`, kind: "request" }).catch(() => {}))))
+      .catch(() => {});
+  }
+  res.status(201).json({ reference: `D-${lead.id}`, message: "Request received. Our Diaspora Desk will contact you, usually within one working day." });
 }));
 
 // ---- The agreement: read it, then sign it electronically ------------------------

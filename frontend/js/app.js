@@ -269,6 +269,7 @@ const viewMeta = {
   properties: ["Properties", "The property portfolio: status, price, location and photos"],
   clients: ["Clients", "People and companies, from first enquiry to signed agreement"],
   verification: ["Diaspora verification", "Diaspora sign-ups prove who they are: the Diaspora Desk verifies them, Legal then confirms nationality"],
+  "diaspora-requests": ["Diaspora requests", "Properties diaspora customers asked to buy or rent from their portal, for the Diaspora Desk to answer"],
   "diaspora-legal": ["Property legal", "Legal records each property's title and where every ownership transfer stands; diaspora customers read it in their portal"],
   "diaspora-messages": ["Diaspora messages", "What diaspora customers write to the Diaspora Desk from their portal, and your replies"],
   contracts: ["Contracts", "Every agreement and where it sits in the approval workflow"],
@@ -923,6 +924,7 @@ async function refresh() {
   loadUpcomingReminders().then(() => { updateNavigation(); updateNotificationDot(); if (state.view === "reminders") render(); });
   // The Diaspora verification badge: customers waiting for this person.
   if (canSeeVerification()) loadDiasporaMessages({ quiet: true }).then(() => updateNavigation());
+  if (canSeeVerification()) loadDiasporaRequests({ quiet: true });
   if (canSeeVerification()) loadVerification({ quiet: true }).then(() => { updateNavigation(); if (["verification", "dashboard"].includes(state.view) && modalBackdrop.hidden) render(); });
   // Keeps the Requests count in the navigation current.
   if (canModule("leads") && can("view")) reloadRequests().then(() => { updateNavigation(); if (state.view === "requests") render(); });
@@ -1075,6 +1077,7 @@ const NAV_ITEMS = [
   { view: "requests", label: "Requests & leads", icon: "inbox", module: "leads", permission: "view", group: "Business" },
   // Identity checks of diaspora sign-ups: the Diaspora Desk checks, Legal verifies.
   { view: "verification", label: "Diaspora verification", icon: "shield", group: "Business", diasporaVerification: true },
+  { view: "diaspora-requests", label: "Diaspora requests", icon: "inbox", group: "Business", diasporaVerification: true },
   { view: "diaspora-messages", label: "Diaspora messages", icon: "mail", group: "Business", diasporaVerification: true },
   { view: "diaspora-legal", label: "Property legal", icon: "shield", group: "Business", diasporaVerification: true },
   // Leads live under "Requests & leads" (a tab there), not as a second menu entry.
@@ -1189,6 +1192,8 @@ function navSources() {
     verification: verificationsNeedingMe().map((row) => `${row.id}:${row.verification_status}:${row.citizenship_confirmed_at ? 1 : 0}`),
     // Customer messages not yet opened by the desk.
     "diaspora-messages": (state.dmThreads?.rows || []).reduce((sum, row) => sum + Number(row.unread || 0), 0),
+    // Customer requests nobody has answered yet.
+    "diaspora-requests": (state.drRequests?.rows || []).filter((r) => r.status === "new").length,
   };
 }
 
@@ -1226,7 +1231,7 @@ function updateNavigation() {
     // waiting on this person, which already falls as they act, so it stays
     // until the work is done rather than clearing on sight.
     const sources = navSources();
-    const live = new Set(["assignments", "verification", "diaspora-messages"]);
+    const live = new Set(["assignments", "verification", "diaspora-messages", "diaspora-requests"]);
     if (sources[activeView] !== undefined && !live.has(activeView)) markSeen(`nav:${activeView}`, sources[activeView]);
     let lastGroup = null;
     nav.innerHTML = allowed.map((item) => {
@@ -4462,6 +4467,10 @@ function render() {
     renderDiasporaMessages();
     if (!state.dmRequested) loadDiasporaMessages();
   }
+  if (state.view === "diaspora-requests") {
+    renderDiasporaRequests();
+    if (!state.drRequested) loadDiasporaRequests();
+  }
   if (state.view === "diaspora-legal") {
     renderDiasporaLegal();
     if (!state.legalRequested) loadDiasporaLegal();
@@ -4664,6 +4673,7 @@ async function refreshLive() {
     state.view === "assignments" || state.tasks ? loadTasks() : null,
     canSeeVerification() ? loadVerification({ quiet: true }) : null,
     canSeeVerification() ? loadDiasporaMessages({ quiet: true }) : null,
+    canSeeVerification() ? loadDiasporaRequests({ quiet: true }) : null,
     state.view === "templates" ? (state.templatesLoaded = false, state.templatesRequested = false, null) : null,
   ]);
   updateNavigation();
@@ -5921,6 +5931,43 @@ async function openKycHistory(clientId) {
     host.className = "";
     host.innerHTML = list.length ? `<ol class="history-list">${list.map((e) => `<li><strong>${escapeHtml(e.text)}</strong><span class="muted"> · ${escapeHtml(e.who)} · ${escapeHtml(formatDateTime(e.at, true))}</span>${e.note ? `<div class="field-help">${escapeHtml(e.note)}</div>` : ""}</li>`).join("")}</ol>` : `<div class="empty">Nothing recorded yet.</div>`;
   } catch (error) { host.textContent = error.message || "Could not load the history."; }
+}
+
+
+/* --------------------------------------------------------------------------
+   Diaspora requests: what customers asked for from their portal.
+   -------------------------------------------------------------------------- */
+async function loadDiasporaRequests({ quiet = false } = {}) {
+  state.drRequested = true;
+  try { state.drRequests = await api("/diaspora/requests"); }
+  catch (error) { if (!state.drRequests) state.drRequests = { rows: [], error: error.message || "Unable to load." }; }
+  if (state.view === "diaspora-requests" && modalBackdrop.hidden && !quiet) render();
+  else if (state.view === "diaspora-requests" && modalBackdrop.hidden) renderDiasporaRequests();
+  updateNavigation();
+}
+async function setDiasporaRequestStatus(id, status) {
+  try { await api(`/diaspora/requests/${id}`, { method: "POST", body: JSON.stringify({ status }) }); showToast("Updated."); loadDiasporaRequests(); }
+  catch (error) { showToast(error.message || "Could not update the request."); }
+}
+function renderDiasporaRequests() {
+  const data = state.drRequests;
+  if (!data) { content.innerHTML = `<div class="panel">${emptyState("Loading", "", { iconName: "inbox", compact: true })}</div>`; return; }
+  if (data.error) { content.innerHTML = `<div class="panel">${escapeHtml(data.error)}</div>`; return; }
+  const filter = state.drFilter || "open";
+  const isOpen = (r) => !["closed", "lost"].includes(r.status);
+  const tabs = [["new", "New"], ["open", "Open"], ["closed", "Closed"], ["all", "All"]];
+  const matches = (r, key) => key === "all" || (key === "new" ? r.status === "new" : key === "open" ? isOpen(r) : !isOpen(r));
+  const rows = data.rows.filter((r) => matches(r, filter));
+  const money = (n) => `TZS ${Number(n).toLocaleString("en-US")}`;
+  const body = rows.map((r) => `<tr><td><span class="cell-main">${escapeHtml(r.client_name)}</span><span class="cell-sub">${escapeHtml([r.country, r.phone].filter(Boolean).join(" · "))}</span></td>
+      <td><span class="cell-main">${escapeHtml(r.property_name || "Property")}</span><span class="cell-sub">${r.service === "rent" ? "Wants to rent" : "Wants to buy"}${r.property_location ? ` · ${escapeHtml(r.property_location)}` : ""}${r.budget ? ` · budget ${escapeHtml(money(r.budget))}` : ""}</span><span class="cell-sub">Prefers: ${escapeHtml(r.preferred_contact || "e-mail")}</span></td>
+      <td>${badge(r.status_text, r.status === "new" ? "pending" : isOpen(r) ? "active" : "approved")}<span class="cell-sub">${escapeHtml(formatDateTime(r.created_at, true))}</span></td>
+      <td class="align-right"><div class="row-actions"><button class="btn btn-small btn-primary" data-action="dr-message" data-client="${r.client_id}">${icon("mail")} Message</button>
+        ${data.can_act && r.status === "new" ? `<button class="btn btn-small" data-action="dr-status" data-id="${r.id}" data-status="contacted">Mark contacted</button>` : ""}
+        ${data.can_act && isOpen(r) ? `<button class="btn btn-small btn-danger-ghost" data-action="dr-status" data-id="${r.id}" data-status="closed">Close</button>` : ""}</div></td></tr>`).join("");
+  content.innerHTML = `<div class="page-tip">${icon("info")}<span>Each time a verified customer presses <strong>Request</strong> in their portal it appears here, and the Desk is e-mailed. Press <strong>Message</strong> to answer in their portal chat.</span></div>
+    <div class="toolbar"><div class="toolbar-filters"><div class="segmented" role="group" aria-label="Requests">${tabs.map(([key, label]) => `<button class="seg-btn${filter === key ? " active" : ""}" data-action="dr-filter" data-filter-key="${key}">${label} (${data.rows.filter((r) => matches(r, key)).length})</button>`).join("")}</div></div></div>
+    ${rows.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Customer</th><th>Request</th><th>Status</th><th class="align-right"></th></tr></thead><tbody>${body}</tbody></table></div>` : `<div class="panel">${emptyState("No requests here", "When a customer asks for a property from the portal, it appears here.", { iconName: "inbox", compact: true })}</div>`}`;
 }
 
 /* --------------------------------------------------------------------------
@@ -7672,6 +7719,9 @@ document.addEventListener("click", async (event) => {
   if (action === "dm-back") { state.dmEditing = null; state.dmReplyTo = null; state.dmSelected = null; state.dmConversation = null; render(); }
   if (action === "kyc") kycAction(id, target.dataset.kyc);
   if (action === "kyc-history") openKycHistory(id);
+  if (action === "dr-message") { state.dmSelected = Number(target.dataset.client); state.dmConversation = null; state.dmRequested = false; state.view = "diaspora-messages"; updateNavigation(); render(); openDiasporaConversation(state.dmSelected); }
+  if (action === "dr-status") setDiasporaRequestStatus(id, target.dataset.status);
+  if (action === "dr-filter") { state.drFilter = target.dataset.filterKey; render(); }
   if (action === "legal-filter") { state.legalFilter = target.dataset.filterKey; render(); }
   if (action === "legal-edit") openLegalModal(id);
   if (action === "transfer-edit") openTransferModal(id);

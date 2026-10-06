@@ -119,6 +119,19 @@ try {
     await query("UPDATE contracts SET deal_type='rent' WHERE id=$1", [contract]);
     assert.equal((await staff(`/diaspora/legal/contracts/${contract}/transfer`, { token: legal, method: "POST", body: { stage: "registry" } })).status, 409);
   });
+  await test("a customer's request reaches the Diaspora Desk, which can answer and close it", async () => {
+    const lp = (await queryOne("INSERT INTO properties (organization_id, project_id, name, location, public_listing, public_listing_status, offer_buy, sale_status) VALUES ($1,$2,$3,'Kigamboni',TRUE,'approved',TRUE,'available') RETURNING id", [org, project, `House ${tag}`])).id;
+    await query("UPDATE contracts SET deal_type='buy' WHERE id=$1", [contract]);
+    const r = await customer("/requests", { cookie, method: "POST", body: { service: "buy", property_id: lp, message: "Is it still free?" } });
+    assert.equal(r.status, 201, JSON.stringify(r.payload));
+    const list = await staff("/diaspora/requests", { token: desk });
+    assert.equal(list.status, 200, JSON.stringify(list.payload));
+    const row = list.payload.rows.find((x) => x.property_id === lp);
+    assert.ok(row, "the desk sees it"); assert.equal(row.status, "new"); assert.equal(row.client_name, "Salma Hassan");
+    assert.equal((await staff(`/diaspora/requests/${row.id}`, { token: sales, method: "POST", body: { status: "contacted" } })).status, 403);
+    assert.equal((await staff(`/diaspora/requests/${row.id}`, { token: desk, method: "POST", body: { status: "contacted" } })).status, 200);
+    assert.equal((await customer("/requests", { cookie })).payload.find((x) => x.property_id === lp).status, "Contacted");
+  });
   await test("a passport about to expire is reminded once and recorded", async () => {
     const { sendExpiryReminders } = await import("./backend/src/notify/diasporaNotices.js");
     await query("INSERT INTO documents (organization_id, client_id, title, category, status, expires_on) VALUES ($1,$2,'Passport','kyc_passport','pending', CURRENT_DATE + 10)", [org, cid]);

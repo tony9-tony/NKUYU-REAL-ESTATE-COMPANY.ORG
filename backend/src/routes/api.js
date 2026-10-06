@@ -2768,6 +2768,34 @@ router.post("/diaspora/verifications/:id", route(async (req, res) => {
 }));
 
 
+
+// ---- Requests from diaspora customers' portals -------------------------------------
+// A customer presses "Request" on a property in the portal; it arrives here for the
+// Diaspora Desk (it is also a lead for Sales, but the Desk does not need the Leads module).
+const REQUEST_STATUS_TEXT = { new: "New", handed_off: "With our customer team", contacted: "Contacted", appointment: "Meeting arranged", converted: "Moving to an agreement", lost: "Closed", closed: "Closed" };
+router.get("/diaspora/requests", route(async (req, res) => {
+  const role = await verificationRole(req);
+  const rows = (await query(
+    `SELECT l.id, l.client_id, l.service, l.status, l.budget, l.preferred_contact, l.notes, l.created_at, l.appointment_at,
+            c.name AS client_name, c.country, c.phone, p.id AS property_id, p.name AS property_name, p.location AS property_location, u.display_name AS officer_name
+       FROM leads l JOIN clients c ON c.id=l.client_id AND c.is_diaspora=TRUE
+       LEFT JOIN properties p ON p.id=l.property_id LEFT JOIN users u ON u.id=c.diaspora_officer_id
+      WHERE l.source='diaspora-portal' AND l.organization_id=$1 ORDER BY (l.status='new') DESC, l.id DESC LIMIT 300`, [await organizationId()])).rows;
+  res.json({ can_act: role.desk || role.legal, rows: rows.map((r) => ({ ...r, status_text: REQUEST_STATUS_TEXT[r.status] || r.status, budget: r.budget === null ? null : Number(r.budget) })) });
+}));
+router.post("/diaspora/requests/:id", route(async (req, res) => {
+  const role = await verificationRole(req);
+  if (!role.desk && !role.legal) throw new HttpError(403, "Only the Diaspora Desk or Legal can update a customer's request.");
+  const id = parseId(req.params.id);
+  const lead = requireRecord(await queryOne("SELECT id, client_id, status FROM leads WHERE id=$1 AND source='diaspora-portal' AND organization_id=$2", [id, await organizationId()]), "Request");
+  const status = String(req.body?.status || "");
+  if (!["contacted", "closed", "lost"].includes(status)) throw new HttpError(400, "Choose what happened to the request.");
+  await query("UPDATE leads SET status=$2 WHERE id=$1", [id, status]);
+  await audit(req, "diaspora_request_status", "lead", id, { from: lead.status, to: status });
+  broadcastChange("requests"); broadcastChange("diaspora");
+  res.json({ ok: true });
+}));
+
 // ---- Verification history ------------------------------------------------------
 const EVENT_TEXT = { documents_submitted: "Documents sent", verify: "Verified", reject: "Sent back", revoke: "Verification removed", confirm_citizenship: "Nationality confirmed by Legal", desk_ok: "Checked by the Desk", expiry_reminder: "Reminder: a document is about to expire" };
 router.get("/diaspora/verifications/:id/history", route(async (req, res) => {
