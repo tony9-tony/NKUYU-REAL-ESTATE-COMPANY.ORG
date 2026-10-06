@@ -460,6 +460,7 @@ const ICON_PATHS = {
   spark: '<path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z"/>',
   money: '<rect x="3" y="6" width="18" height="12" rx="2"/><circle cx="12" cy="12" r="2.6"/><path d="M6.5 9.5v.01M17.5 14.5v.01"/>',
   phone: '<path d="M5 4h3.5l1.8 4.3-2.2 1.4a11 11 0 0 0 6.2 6.2l1.4-2.2L20 15.5V19a1.5 1.5 0 0 1-1.6 1.5C10.6 20 4 13.4 3.5 5.6A1.5 1.5 0 0 1 5 4z"/>',
+  send: '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>',
   mail: '<rect x="3" y="5.5" width="18" height="13" rx="2"/><path d="M3.5 7l8.5 6 8.5-6"/>',
   logout: '<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 16l-4-4 4-4M6 12h10"/>',
   user: '<circle cx="12" cy="8.5" r="3.8"/><path d="M4.5 20.5a7.5 7.5 0 0 1 15 0"/>',
@@ -5901,14 +5902,26 @@ const KYC_REASONS = [
 /* --------------------------------------------------------------------------
    Diaspora messages: what customers write from their portal, and the desk's replies.
    -------------------------------------------------------------------------- */
+let dmTimer = null;
 async function loadDiasporaMessages({ quiet = false } = {}) {
   state.dmRequested = true;
   try {
     state.dmThreads = await api("/diaspora/messages");
     if (state.dmSelected) state.dmConversation = await api(`/diaspora/messages/${state.dmSelected}`);
   } catch (error) { if (!quiet || !state.dmThreads) state.dmThreads = { rows: [], error: error.message || "Unable to load." }; }
-  if (state.view === "diaspora-messages" && !(document.activeElement?.id === "dm-reply" && document.activeElement.value)) render();
-  else updateNavigation();
+  if (state.view === "diaspora-messages") {
+    // New messages slot into the open page; the reply box and what is typed in it are never touched.
+    if (document.querySelector(".dm")) paintDiasporaMessages(); else render();
+  } else updateNavigation();
+}
+
+/** While the messages page is open it also asks every few seconds, in case the live link is down. */
+function watchDiasporaMessages() {
+  clearInterval(dmTimer);
+  dmTimer = setInterval(() => {
+    if (state.view !== "diaspora-messages") { clearInterval(dmTimer); return; }
+    if (!document.hidden && modalBackdrop.hidden) loadDiasporaMessages({ quiet: true });
+  }, 5000);
 }
 
 async function openDiasporaConversation(clientId) {
@@ -5920,40 +5933,101 @@ async function openDiasporaConversation(clientId) {
   render();
   const box = document.getElementById("dm-thread");
   if (box) box.scrollTop = box.scrollHeight;
+  document.getElementById("dm-reply")?.focus();
 }
 
 async function sendDiasporaMessage() {
   const field = document.getElementById("dm-reply");
   const text = field?.value.trim();
   if (!text || !state.dmSelected) return;
+  field.value = ""; field.style.height = "auto";
   try {
     await api(`/diaspora/messages/${state.dmSelected}`, { method: "POST", body: JSON.stringify({ body: text }) });
-    field.value = "";
     state.dmConversation = await api(`/diaspora/messages/${state.dmSelected}`);
     await loadDiasporaMessages({ quiet: true });
-    render();
     const box = document.getElementById("dm-thread");
     if (box) box.scrollTop = box.scrollHeight;
-    showToast("Reply sent. The customer is e-mailed.");
-  } catch (error) { showToast(error.message || "Could not send the reply."); }
+  } catch (error) { field.value = text; showToast(error.message || "Could not send the reply."); }
+  field?.focus();
+}
+
+const dmClock = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const dmSameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
+function dmDayLabel(iso) {
+  const d = new Date(iso);
+  const start = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((start(new Date()) - start(d)) / 86400000);
+  return diff === 0 ? "Today" : diff === 1 ? "Yesterday" : d.toLocaleDateString([], { day: "numeric", month: "long", year: d.getFullYear() === new Date().getFullYear() ? undefined : "numeric" });
+}
+function dmInitials(name) { return String(name || "?").trim().split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?"; }
+
+function dmThreadHtml(conv) {
+  const list = conv?.messages || [];
+  if (!list.length) return `<div class="dmc-empty">No messages yet.</div>`;
+  let html = "";
+  list.forEach((m, i) => {
+    const prev = list[i - 1], next = list[i + 1];
+    if (!prev || !dmSameDay(prev.created_at, m.created_at)) html += `<div class="dmc-day"><span>${escapeHtml(dmDayLabel(m.created_at))}</span></div>`;
+    const mine = m.sender === "staff";
+    const gPrev = prev && prev.sender === m.sender && dmSameDay(prev.created_at, m.created_at) && new Date(m.created_at) - new Date(prev.created_at) < 5 * 60000;
+    const gNext = next && next.sender === m.sender && dmSameDay(next.created_at, m.created_at) && new Date(next.created_at) - new Date(m.created_at) < 5 * 60000;
+    const who = mine ? (m.staff_name || "Diaspora Desk") : conv.client.name;
+    html += `<div class="dmc-row ${mine ? "is-me" : "is-them"}${gPrev ? " is-grouped" : ""}">
+      ${!mine ? `<span class="dmc-avatar${gNext ? " is-hidden" : ""}" aria-hidden="true">${escapeHtml(dmInitials(who))}</span>` : ""}
+      <div class="dmc-bubble">${!gPrev ? `<span class="dmc-who">${escapeHtml(who)}</span>` : ""}<span class="dmc-text">${escapeHtml(m.body).replace(/\n/g, "<br>")}</span>
+        <span class="dmc-time">${escapeHtml(dmClock(m.created_at))}${mine ? `<span class="dmc-tick${m.read ? " is-seen" : ""}" title="${m.read ? "Seen by the customer" : "Sent"}">${m.read ? "✓✓" : "✓"}</span>` : ""}</span></div></div>`;
+  });
+  return html;
+}
+
+function dmListHtml(rows) {
+  return rows.map((row) => `<button type="button" class="dm-thread-row${String(state.dmSelected) === String(row.id) ? " is-active" : ""}" data-action="dm-open" data-id="${row.id}">
+      <span class="dmc-avatar" aria-hidden="true">${escapeHtml(dmInitials(row.name))}</span>
+      <span class="dm-rowtext"><span class="dm-name">${escapeHtml(row.name)}${row.verification_status === "verified" ? ` <span class="badge-verified" title="Identity verified">${icon("check")}</span>` : ""}</span>
+        <span class="dm-last">${row.last_from === "staff" ? "You: " : ""}${escapeHtml(String(row.last_body || "").slice(0, 70))}</span></span>
+      <span class="dm-side"><span class="dm-when">${escapeHtml(row.last_at ? (dmSameDay(row.last_at, new Date()) ? dmClock(row.last_at) : dmDayLabel(row.last_at)) : "")}</span>${row.unread ? `<span class="dm-unread">${row.unread}</span>` : ""}</span></button>`).join("");
+}
+
+/** Updates the conversation list and the open thread in place (scroll position kept). */
+function paintDiasporaMessages() {
+  const data = state.dmThreads;
+  const list = document.querySelector(".dm-list");
+  if (list && data) list.innerHTML = dmListHtml(data.rows || []);
+  const box = document.getElementById("dm-thread");
+  if (box && state.dmConversation) {
+    const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 90;
+    const html = dmThreadHtml(state.dmConversation);
+    if (box.dataset.sig !== html) {
+      box.innerHTML = html;
+      box.dataset.sig = html;
+      if (stick) box.scrollTop = box.scrollHeight;
+    }
+  }
+  updateNavigation();
 }
 
 function renderDiasporaMessages() {
   const data = state.dmThreads;
   if (!data) { content.innerHTML = `<div class="panel">${emptyState("Loading", "", { iconName: "mail", compact: true })}</div>`; return; }
+  watchDiasporaMessages();
   const rows = data.rows || [];
-  const list = rows.map((row) => `<button type="button" class="dm-thread-row${String(state.dmSelected) === String(row.id) ? " is-active" : ""}" data-action="dm-open" data-id="${row.id}">
-      <span class="dm-name">${escapeHtml(row.name)}${row.verification_status === "verified" ? ` <span class="badge-verified" title="Identity verified">${icon("check")}</span>` : ""}${row.unread ? `<span class="dm-unread">${row.unread}</span>` : ""}</span>
-      <span class="dm-last">${row.last_from === "staff" ? "You: " : ""}${escapeHtml(String(row.last_body || "").slice(0, 80))}</span>
-      <span class="dm-when">${escapeHtml([row.country, row.last_at ? formatDateTime(row.last_at, true) : ""].filter(Boolean).join(" · "))}</span></button>`).join("");
   const conv = state.dmConversation;
   const thread = !state.dmSelected ? `<div class="dm-empty">${emptyState("Pick a conversation", "Customers' messages appear on the left. Open one to read it and reply.", { iconName: "mail", compact: true })}</div>`
     : !conv ? `<div class="dm-empty">${emptyState("Loading", "", { iconName: "mail", compact: true })}</div>`
-    : `<div class="dm-head"><button type="button" class="btn btn-small btn-ghost dm-back" data-action="dm-back">Back</button><strong>${escapeHtml(conv.client.name)}</strong><span class="muted">${escapeHtml(conv.client.country || "")}</span></div>
-       <div class="dm-thread" id="dm-thread">${(conv.messages || []).map((m) => `<div class="dm-msg ${m.sender === "staff" ? "is-staff" : "is-customer"}"><div class="dm-bubble">${escapeHtml(m.body).replace(/\n/g, "<br>")}</div><span class="dm-meta">${escapeHtml(m.sender === "staff" ? (m.staff_name || "Diaspora Desk") : conv.client.name)} · ${escapeHtml(formatDateTime(m.created_at, true))}</span></div>`).join("") || `<p class="muted">No messages yet.</p>`}</div>
-       ${data.can_reply ? `<div class="dm-compose"><textarea id="dm-reply" rows="3" maxlength="2000" placeholder="Write your reply. The customer sees it in their portal and gets an e-mail."></textarea><button type="button" class="btn btn-primary" data-action="dm-send">Send reply</button></div>` : `<p class="muted">You can read these messages. Replies are sent by the Diaspora Desk.</p>`}`;
-  content.innerHTML = `<div class="page-tip">${icon("info")}<span>Customers write to the Diaspora Desk from the <strong>Messages</strong> tab of their portal. Opening a conversation marks it read; your reply is e-mailed to the customer.</span></div>
-    ${data.error ? `<div class="panel">${escapeHtml(data.error)}</div>` : rows.length || state.dmSelected ? `<div class="dm${state.dmSelected ? " has-selection" : ""}"><div class="dm-list">${list}</div><div class="dm-pane">${thread}</div></div>` : `<div class="panel">${emptyState("No messages yet", "When a diaspora customer writes from the portal, the conversation appears here.", { iconName: "mail", compact: true })}</div>`}`;
+    : `<div class="dm-head"><button type="button" class="btn btn-small btn-ghost dm-back" data-action="dm-back">Back</button><span class="dmc-avatar dmc-avatar--lg" aria-hidden="true">${escapeHtml(dmInitials(conv.client.name))}</span>
+         <div class="dm-headtext"><strong>${escapeHtml(conv.client.name)}${conv.client.verification_status === "verified" ? ` <span class="badge-verified" title="Identity verified">${icon("check")}</span>` : ""}</strong><span class="muted">${escapeHtml(conv.client.country || "")}</span></div></div>
+       <div class="dm-thread" id="dm-thread" role="log" aria-live="polite">${dmThreadHtml(conv)}</div>
+       ${data.can_reply ? `<div class="dm-compose"><textarea id="dm-reply" rows="1" maxlength="2000" placeholder="Write a reply… (Enter to send, Shift+Enter for a new line)"></textarea><button type="button" class="dmc-send" data-action="dm-send" aria-label="Send reply">${icon("send")}</button></div>` : `<p class="muted dm-readonly">You can read these messages. Replies are sent by the Diaspora Desk.</p>`}`;
+  content.innerHTML = `<div class="page-tip">${icon("info")}<span>Customers write to the Diaspora Desk from the <strong>Messages</strong> tab of their portal. New messages appear here by themselves; your reply is e-mailed to the customer too.</span></div>
+    ${data.error ? `<div class="panel">${escapeHtml(data.error)}</div>` : rows.length || state.dmSelected ? `<div class="dm${state.dmSelected ? " has-selection" : ""}"><div class="dm-list">${dmListHtml(rows)}</div><div class="dm-pane">${thread}</div></div>` : `<div class="panel">${emptyState("No messages yet", "When a diaspora customer writes from the portal, the conversation appears here.", { iconName: "mail", compact: true })}</div>`}`;
+  const box = document.getElementById("dm-thread");
+  if (box) { box.dataset.sig = dmThreadHtml(conv); box.scrollTop = box.scrollHeight; }
+  const reply = document.getElementById("dm-reply");
+  if (reply) {
+    const grow = () => { reply.style.height = "auto"; reply.style.height = `${Math.min(reply.scrollHeight, 140)}px`; };
+    reply.addEventListener("input", grow);
+    reply.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); sendDiasporaMessage(); } });
+  }
 }
 
 async function kycAction(clientId, kind) {

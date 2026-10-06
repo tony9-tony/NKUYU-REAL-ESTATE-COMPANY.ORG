@@ -695,7 +695,7 @@ const fileHeaders = (res, mime, filename, download) => {
 const idParam = (value) => { const n = Number(value); if (!Number.isSafeInteger(n) || n < 1) throw new HttpError(404, "not found"); return n; };
 
 // ---- Messages with the Diaspora Desk --------------------------------------------
-const messageRow = (m) => ({ id: m.id, from: m.sender, name: m.sender === "staff" ? (m.staff_name || "Diaspora Desk") : "You", body: m.body, at: m.created_at });
+const messageRow = (m) => ({ id: m.id, from: m.sender, name: m.sender === "staff" ? (m.staff_name || "Diaspora Desk") : "You", body: m.body, at: m.created_at, read: Boolean(m.read_at) });
 
 router.get("/messages", requireCustomer, route(async (req, res) => {
   const rows = (await query(`SELECT m.*, u.display_name AS staff_name FROM customer_messages m LEFT JOIN users u ON u.id=m.staff_user_id
@@ -703,6 +703,20 @@ router.get("/messages", requireCustomer, route(async (req, res) => {
   // Opening the conversation marks the desk's replies as read.
   await query("UPDATE customer_messages SET read_at=NOW() WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [req.customer.client_id]);
   res.json({ messages: rows.map(messageRow) });
+}));
+
+// Light check the open portal makes every few seconds: only what is new since the
+// last message the page has, which of the customer's own messages the desk has
+// read, and how many replies are waiting. "peek" counts without marking as read.
+router.get("/messages/poll", requireCustomer, route(async (req, res) => {
+  const after = Math.max(0, Number.parseInt(req.query.after, 10) || 0);
+  const peek = req.query.peek === "1";
+  const fresh = (await query(`SELECT m.*, u.display_name AS staff_name FROM customer_messages m LEFT JOIN users u ON u.id=m.staff_user_id
+    WHERE m.client_id=$1 AND m.id > $2 ORDER BY m.id LIMIT 100`, [req.customer.client_id, after])).rows;
+  const seen = (await query("SELECT id FROM customer_messages WHERE client_id=$1 AND sender='customer' AND read_at IS NOT NULL ORDER BY id DESC LIMIT 100", [req.customer.client_id])).rows.map((r) => r.id);
+  if (!peek) await query("UPDATE customer_messages SET read_at=NOW() WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [req.customer.client_id]);
+  const unread = peek ? (await queryOne("SELECT COUNT(*)::int AS n FROM customer_messages WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [req.customer.client_id]))?.n || 0 : 0;
+  res.json({ messages: fresh.map(messageRow), seen, unread });
 }));
 
 router.post("/messages", requireCustomer, (req, res, next) => {

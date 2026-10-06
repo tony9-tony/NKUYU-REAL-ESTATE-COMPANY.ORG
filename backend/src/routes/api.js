@@ -2610,7 +2610,7 @@ router.get("/diaspora/messages/:id", route(async (req, res) => {
   await verificationRole(req);
   const clientId = parseId(req.params.id);
   const client = requireRecord(await queryOne("SELECT id, name, country, verification_status FROM clients WHERE id=$1 AND is_diaspora=TRUE AND organization_id=$2", [clientId, await organizationId()]), "Customer");
-  const messages = (await query(`SELECT m.id, m.sender, m.body, m.created_at, u.display_name AS staff_name FROM customer_messages m LEFT JOIN users u ON u.id=m.staff_user_id
+  const messages = (await query(`SELECT m.id, m.sender, m.body, m.created_at, (m.read_at IS NOT NULL) AS read, u.display_name AS staff_name FROM customer_messages m LEFT JOIN users u ON u.id=m.staff_user_id
     WHERE m.client_id=$1 ORDER BY m.id DESC LIMIT 200`, [clientId])).rows.reverse();
   await query("UPDATE customer_messages SET read_at=NOW() WHERE client_id=$1 AND sender='customer' AND read_at IS NULL", [clientId]);
   res.json({ client, messages });
