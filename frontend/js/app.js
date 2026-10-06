@@ -1078,7 +1078,6 @@ const NAV_ITEMS = [
   { view: "requests", label: "Requests & leads", icon: "inbox", module: "leads", permission: "view", group: "Business" },
   // Identity checks of diaspora sign-ups: the Diaspora Desk checks, Legal verifies.
   { view: "verification", label: "Diaspora verification", icon: "shield", group: "Business", diasporaVerification: true },
-  { view: "diaspora-requests", label: "Diaspora requests", icon: "inbox", group: "Business", diasporaVerification: true },
   { view: "diaspora-messages", label: "Diaspora messages", icon: "mail", group: "Business", diasporaVerification: true },
   { view: "diaspora-legal", label: "Property legal", icon: "shield", group: "Business", diasporaVerification: true },
   { view: "diaspora-report", label: "Diaspora report", icon: "chart", group: "Business", diasporaVerification: true },
@@ -1194,8 +1193,6 @@ function navSources() {
     verification: verificationsNeedingMe().map((row) => `${row.id}:${row.verification_status}:${row.citizenship_confirmed_at ? 1 : 0}`),
     // Customer messages not yet opened by the desk.
     "diaspora-messages": (state.dmThreads?.rows || []).reduce((sum, row) => sum + Number(row.unread || 0), 0),
-    // Customer requests nobody has answered yet.
-    "diaspora-requests": (state.drRequests?.rows || []).filter((r) => r.status === "new").length,
   };
 }
 
@@ -1233,7 +1230,7 @@ function updateNavigation() {
     // waiting on this person, which already falls as they act, so it stays
     // until the work is done rather than clearing on sight.
     const sources = navSources();
-    const live = new Set(["assignments", "verification", "diaspora-messages", "diaspora-requests"]);
+    const live = new Set(["assignments", "verification", "diaspora-messages"]);
     if (sources[activeView] !== undefined && !live.has(activeView)) markSeen(`nav:${activeView}`, sources[activeView]);
     let lastGroup = null;
     nav.innerHTML = allowed.map((item) => {
@@ -4197,6 +4194,10 @@ function renderRequests() {
       const approve = ["existing", "contacted", "answered", "unreachable"].includes(key) ? convert(false) : "";
       next = `${approve}${views}` || note(progress.next);
     }
+    // Diaspora customers can be answered in their portal chat from the same row.
+    if (isDiasporaRow(row) && row.client_id && (inDiasporaDesk() || can("view"))) {
+      next += `<button class="btn btn-small" data-action="dr-message" data-client="${row.client_id}">${icon("mail")} Message</button>`;
+    }
     // What Customer Service wrote back, on the request itself.
     const reportLine = row.task_report && !/^Outcome:/.test(row.task_report) && key !== "answered" && row.task_report !== row.outcome_note
       ? `<span class="cell-sub request-report"><strong>Report:</strong> ${escapeHtml(row.task_report)}</span>` : "";
@@ -4502,6 +4503,7 @@ function render() {
   if (state.view === "leads") renderLeads();
   addRequestTabs();
   addPageTip();
+  if (state.view === "diaspora-requests") { state.view = "requests"; }
   if (state.view === "diaspora-messages") {
     renderDiasporaMessages();
     if (!state.dmRequested) loadDiasporaMessages();
