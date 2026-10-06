@@ -797,7 +797,7 @@ router.post("/verification/documents", requireCustomer, (req, res, next) => {
       if (!parsed || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== expiresRaw) throw new HttpError(400, "Enter the expiry date as shown on the document.");
       if (parsed.getTime() < Date.now() - 24 * 60 * 60 * 1000) throw new HttpError(400, "This document has already expired. Please upload one that is still valid.");
       expiresOn = expiresRaw;
-    } else if (kind === "passport") throw new HttpError(400, "Enter the passport's expiry date.");
+    } else if (kind === "passport" || kind === "residence") throw new HttpError(400, kind === "residence" ? "Enter the expiry date of your visa, residence card or permit." : "Enter the passport's expiry date.");
     const info = validateUploadedFile(req.file, documentExtensions);
     const client = await queryOne("SELECT organization_id, department_id FROM clients WHERE id=$1", [req.customer.client_id]);
     // One current document per kind: a new upload replaces the old one, which
