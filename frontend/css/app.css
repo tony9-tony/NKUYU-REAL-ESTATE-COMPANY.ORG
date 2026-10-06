@@ -1193,7 +1193,8 @@ td.amount { text-align: left; }
 .cell-main { display: block; color: var(--ink); font-weight: 600; }
 .cell-sub, .table-sub { display: block; margin-top: 2px; color: var(--muted); font-size: 12.5px; font-weight: 400; }
 .cell-plain { font-weight: 400; color: var(--ink-2); }
-.cell-note { max-width: 260px; color: var(--muted); font-size: 13px; }
+.cell-note { min-width: 180px; max-width: 260px; color: var(--muted); font-size: 13px; }
+.note-clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .stage-note { margin-top: 5px; font-size: 12px; }
 .cell-link {
   display: block;

@@ -4211,7 +4211,7 @@ function renderRequests() {
       <td>${row.budget ? `${row.service === "sell" ? "Asking " : ""}TZS ${escapeHtml(Number(row.budget).toLocaleString("en-US"))}` : (row.service === "sell" ? "No asking price" : "—")}<span class="cell-sub">Contact by ${escapeHtml(means[row.preferred_contact] || "Phone")}</span></td>
       <td>${formatDate(row.created_at)}</td>
       <td>${badge(label, tone)}${isContactMessage(row) ? `${who}${nextLine}${answeredNote}${reportLine}` : `${known}${who}${nextLine}${reported}${reportLine}`}</td>
-      <td class="cell-note">${escapeHtml(String(row.notes || "").replace(/^Website request to [^\n]*\n*/, "").replace(/^Website enquiry · [^\n]*\n*/, "") || "—")}</td>
+      <td class="cell-note">${(() => { const t = String(row.notes || "").replace(/^Website request to [^\n]*\n*/, "").replace(/^Website enquiry · [^\n]*\n*/, "").replace(/^DIASPORA customer[^:]*: requests to [A-Za-z]+ "[^"]*"\.\s*(Preferred contact: \w+\.\s*)?/i, "").trim(); return t ? `<span class="note-clamp" title="${escapeHtml(t)}">${escapeHtml(t)}</span>` : "—"; })()}</td>
       <td class="align-right"><div class="row-actions">${next}</div></td>
     </tr>`;
   }).join("");
