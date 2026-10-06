@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { runMigrations } from "./migrate.js";
 import { ensureUploadDirs } from "./uploads.js";
 import { startAutoBackups } from "./backups.js";
+import { startExpiryReminders } from "./notify/diasporaNotices.js";
 import { startDueReminders } from "./payments/notices.js";
 import { startCustomerNotices } from "./notify/customerNotices.js";
 import apiRoutes from "./routes/api.js";
@@ -198,6 +199,8 @@ function startServer(port = PORT) {
     startDueReminders();
     // Customer SMS: installment reminders and overdue notices (notify/customerNotices.js).
     startCustomerNotices();
+    // Diaspora customers are asked for a new passport 30 days before it expires.
+    startExpiryReminders();
   });
 }
 

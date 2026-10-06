@@ -96,6 +96,7 @@ import { generateFromWordTemplate, templateFileUnknownPlaceholders, templateWord
 import { clearContractSignatureDocument, contractSignature, signContractDocument } from "../contracts/signature.js";
 import { docxToPreview } from "../contracts/docxPreview.js";
 import { announceWrites, broadcastChange, liveStream } from "../live.js";
+import { customersOf, notifyCustomer, recordVerificationEvent } from "../notify/diasporaNotices.js";
 import { clearTyping, isTyping, REACTIONS, setTyping, DELETE_ALL_WINDOW_MS, EDIT_WINDOW_MS } from "../typing.js";
 import { RENT_STATUSES, SALE_STATUSES, categoryStatusesFrom, overallStatus } from "../models/propertyStatus.js";
 
@@ -2611,7 +2612,7 @@ router.get("/diaspora/messages", route(async (req, res) => {
 router.get("/diaspora/messages/:id", route(async (req, res) => {
   await verificationRole(req);
   const clientId = parseId(req.params.id);
-  const client = requireRecord(await queryOne("SELECT id, name, country, verification_status FROM clients WHERE id=$1 AND is_diaspora=TRUE AND organization_id=$2", [clientId, await organizationId()]), "Customer");
+  const client = requireRecord(await queryOne("SELECT id, name, country, phone, verification_status FROM clients WHERE id=$1 AND is_diaspora=TRUE AND organization_id=$2", [clientId, await organizationId()]), "Customer");
   const rows = (await query(`SELECT m.id, m.sender, m.body, m.created_at, m.read_at, m.delivered_at, m.reply_to, m.reaction_customer, m.reaction_staff, m.edited_at, m.deleted_at, m.staff_user_id,
       u.display_name AS staff_name, r.body AS reply_body, r.sender AS reply_sender, r.deleted_at AS reply_deleted, ru.display_name AS reply_staff_name
     FROM customer_messages m LEFT JOIN users u ON u.id=m.staff_user_id
@@ -2701,17 +2702,13 @@ router.post("/diaspora/messages/:id", route(async (req, res) => {
   // The customer's own messages up to now count as answered, so the desk's unread count falls.
   await query("UPDATE customer_messages SET read_at=COALESCE(read_at, NOW()), delivered_at=COALESCE(delivered_at, NOW()) WHERE client_id=$1 AND sender='customer'", [clientId]);
   broadcastChange("diaspora");
-  if (mailConfigured() && client.email) {
-    const site = String(process.env.PUBLIC_SITE_URL || "").trim().replace(/\/+$/, "");
-    sendMail({ to: client.email, subject: "MKUYU: you have a new message",
-      text: `Dear ${client.name},\n\nThe Diaspora Desk replied to you in your portal.\n\n${site ? `${site}/login.html` : "Website → Diaspora login"}  → Messages\n\nMKUYU Africa`, kind: "message" }).catch(() => {});
-  }
+  notifyCustomer(clientId, { subject: "you have a new message", lines: "The Diaspora Desk replied to you in your portal.", where: "Messages" });
   res.status(201).json({ ok: true, id: row.id });
 }));
 router.post("/diaspora/verifications/:id", route(async (req, res) => {
   const role = await verificationRole(req);
   const clientId = parseId(req.params.id);
-  const client = requireRecord(await queryOne("SELECT id, name, email, verification_status, citizenship_confirmed_at FROM clients WHERE id=$1 AND is_diaspora=TRUE AND organization_id=$2", [clientId, await organizationId()]), "Customer");
+  const client = requireRecord(await queryOne("SELECT id, name, email, notify_email, verification_status, citizenship_confirmed_at FROM clients WHERE id=$1 AND is_diaspora=TRUE AND organization_id=$2", [clientId, await organizationId()]), "Customer");
   const action = String(req.body?.action || "");
   const note = String(req.body?.note || "").trim().slice(0, 1000) || null;
   const documentsIn = ["submitted", "desk_checked"].includes(client.verification_status);
@@ -2753,7 +2750,8 @@ router.post("/diaspora/verifications/:id", route(async (req, res) => {
   } else throw new HttpError(400, "Unknown action.");
   await query(update[0], update[1]);
   await audit(req, `kyc_${action}`, "client", clientId, { note });
-  if (mailConfigured() && client.email && ["verify", "reject", "revoke", "confirm_citizenship"].includes(action)) {
+  await recordVerificationEvent(clientId, req.user.id, action, note);
+  if (mailConfigured() && client.email && client.notify_email !== false && ["verify", "reject", "revoke", "confirm_citizenship"].includes(action)) {
     const site = String(process.env.PUBLIC_SITE_URL || "").trim().replace(/\/+$/, "");
     sendMail({ to: client.email, subject: action === "verify" ? "MKUYU: you are verified" : action === "confirm_citizenship" ? "MKUYU: your nationality is confirmed" : "MKUYU: please check your documents",
       text: action === "confirm_citizenship"
@@ -2767,6 +2765,110 @@ router.post("/diaspora/verifications/:id", route(async (req, res) => {
   }
   const now = await queryOne("SELECT verification_status, citizenship_confirmed_at FROM clients WHERE id=$1", [clientId]);
   res.json({ ok: true, status: now.verification_status, citizenship_confirmed: Boolean(now.citizenship_confirmed_at) });
+}));
+
+
+// ---- Verification history ------------------------------------------------------
+const EVENT_TEXT = { documents_submitted: "Documents sent", verify: "Verified", reject: "Sent back", revoke: "Verification removed", confirm_citizenship: "Nationality confirmed by Legal", desk_ok: "Checked by the Desk", expiry_reminder: "Reminder: a document is about to expire" };
+router.get("/diaspora/verifications/:id/history", route(async (req, res) => {
+  await verificationRole(req);
+  const clientId = parseId(req.params.id);
+  requireRecord(await queryOne("SELECT id FROM clients WHERE id=$1 AND is_diaspora=TRUE AND organization_id=$2", [clientId, await organizationId()]), "Customer");
+  const rows = (await query(`SELECT e.id, e.action, e.note, e.created_at, u.display_name AS who FROM verification_events e LEFT JOIN users u ON u.id=e.actor_user_id
+    WHERE e.client_id=$1 ORDER BY e.id DESC LIMIT 100`, [clientId])).rows;
+  res.json(rows.map((r) => ({ id: r.id, action: r.action, text: EVENT_TEXT[r.action] || r.action, note: r.note, who: r.who || "Customer / system", at: r.created_at })));
+}));
+
+// ---- Legal status of properties and the transfer of ownership -------------------
+// Legal records what it has checked on each property (title deed, a note the customer
+// reads) and where each sale's ownership transfer stands. The Desk and the MD can read.
+const LEGAL_STATUSES = ["not_checked", "in_review", "verified", "issues"];
+const TRANSFER_STAGES = ["not_started", "documents", "tax_clearance", "registry", "transferred"];
+const TRANSFER_LABELS = { not_started: "Not started", documents: "Transfer documents prepared", tax_clearance: "Tax clearance", registry: "Land registry", transferred: "Transferred to the buyer" };
+router.get("/diaspora/legal", route(async (req, res) => {
+  const role = await verificationRole(req);
+  const org = await organizationId();
+  const properties = (await query(
+    `SELECT p.id, p.name, p.location, p.status, pr.name AS project_name, p.legal_status, p.title_deed_no, p.title_deed_kind, p.legal_note, p.legal_checked_at, u.display_name AS legal_checked_by_name
+       FROM properties p LEFT JOIN projects pr ON pr.id=p.project_id LEFT JOIN users u ON u.id=p.legal_checked_by
+      WHERE p.organization_id=$1 ORDER BY (p.legal_status='not_checked') DESC, p.name LIMIT 400`, [org])).rows;
+  const transfers = (await query(
+    `SELECT c.id, c.contract_number, c.status, c.transfer_stage, c.transfer_note, c.transfer_updated_at, cl.name AS client_name, p.name AS property_name
+       FROM contracts c JOIN clients cl ON cl.id=c.client_id AND cl.is_diaspora=TRUE LEFT JOIN properties p ON p.id=c.property_id
+      WHERE c.organization_id=$1 AND COALESCE(c.deal_type,'buy')='buy' AND c.status IN ('active','completed') ORDER BY c.id DESC LIMIT 200`, [org])).rows;
+  res.json({ can_edit: role.legal, statuses: LEGAL_STATUSES, stages: TRANSFER_STAGES.map((key) => ({ key, label: TRANSFER_LABELS[key] })), properties, transfers });
+}));
+router.post("/diaspora/legal/properties/:id", route(async (req, res) => {
+  const role = await verificationRole(req);
+  if (!role.legal) throw new HttpError(403, "Only Legal records the legal status of a property.");
+  const id = parseId(req.params.id);
+  const property = requireRecord(await queryOne("SELECT id, name, legal_status FROM properties WHERE id=$1 AND organization_id=$2", [id, await organizationId()]), "Property");
+  const status = String(req.body?.legal_status || "");
+  if (!LEGAL_STATUSES.includes(status)) throw new HttpError(400, "Choose a legal status.");
+  const deedNo = String(req.body?.title_deed_no || "").trim().slice(0, 80) || null;
+  const deedKind = String(req.body?.title_deed_kind || "").trim().slice(0, 80) || null;
+  const note = String(req.body?.legal_note || "").trim().slice(0, 1000) || null;
+  if (status === "verified" && !deedNo) throw new HttpError(400, "Enter the title deed number before marking the property as verified.");
+  if (status === "issues" && !note) throw new HttpError(400, "Write what the issue is; customers with this property will read it.");
+  await query("UPDATE properties SET legal_status=$2, title_deed_no=$3, title_deed_kind=$4, legal_note=$5, legal_checked_at=NOW(), legal_checked_by=$6 WHERE id=$1", [id, status, deedNo, deedKind, note, req.user.id]);
+  await recordPropertyHistory(id, req.user.id, "legal_status", { from: property.legal_status, to: status });
+  await audit(req, "legal_status", "property", id, { status });
+  if (status !== property.legal_status && ["verified", "issues"].includes(status)) {
+    customersOf({ propertyId: id }).then((ids) => ids.forEach((cid) => notifyCustomer(cid, { subject: status === "verified" ? "Legal has verified your property" : "Legal update on your property",
+      lines: [status === "verified" ? `Our Legal team has checked ${property.name} and verified its title.` : `Our Legal team has a note about ${property.name}:\n${note}`], where: "My property" }))).catch(() => {});
+  }
+  broadcastChange("diaspora");
+  res.json({ ok: true });
+}));
+router.post("/diaspora/legal/contracts/:id/transfer", route(async (req, res) => {
+  const role = await verificationRole(req);
+  if (!role.legal) throw new HttpError(403, "Only Legal records the ownership transfer.");
+  const id = parseId(req.params.id);
+  const contract = requireRecord(await queryOne("SELECT c.id, c.client_id, c.transfer_stage, c.deal_type, c.status, p.name AS property_name FROM contracts c LEFT JOIN properties p ON p.id=c.property_id WHERE c.id=$1 AND c.organization_id=$2", [id, await organizationId()]), "Contract");
+  if (contract.deal_type && contract.deal_type !== "buy") throw new HttpError(409, "Only a purchase has an ownership transfer.");
+  if (!["active", "completed"].includes(contract.status)) throw new HttpError(409, "The transfer starts once the agreement is signed.");
+  const stage = String(req.body?.stage || "");
+  if (!TRANSFER_STAGES.includes(stage)) throw new HttpError(400, "Choose a transfer stage.");
+  const note = String(req.body?.note || "").trim().slice(0, 500) || null;
+  await query("UPDATE contracts SET transfer_stage=$2, transfer_note=$3, transfer_updated_at=NOW() WHERE id=$1", [id, stage, note]);
+  await audit(req, "transfer_stage", "contract", id, { stage });
+  if (stage !== contract.transfer_stage && contract.client_id) {
+    notifyCustomer(contract.client_id, { subject: "update on your ownership transfer", lines: [`${contract.property_name || "Your property"}: ${TRANSFER_LABELS[stage]}.`, note || ""].filter(Boolean), where: "My property" });
+  }
+  broadcastChange("diaspora");
+  res.json({ ok: true });
+}));
+
+// ---- Construction stages of a project ------------------------------------------
+router.get("/projects/:id/stages", route(async (req, res) => {
+  const project = requireRecord(await Project.get(parseId(req.params.id)), "Project");
+  const row = await queryOne("SELECT progress_pct, to_char(expected_completion,'YYYY-MM-DD') AS expected_completion FROM projects WHERE id=$1", [project.id]);
+  const stages = (await query("SELECT id, title, status, to_char(planned_date,'YYYY-MM-DD') AS planned_date, to_char(done_date,'YYYY-MM-DD') AS done_date FROM project_stages WHERE project_id=$1 ORDER BY position, id", [project.id])).rows;
+  res.json({ progress_pct: row?.progress_pct ?? null, expected_completion: row?.expected_completion || null, stages });
+}));
+router.put("/projects/:id/stages", route(async (req, res) => {
+  const project = requireRecord(await Project.get(parseId(req.params.id)), "Project");
+  const list = Array.isArray(req.body?.stages) ? req.body.stages.slice(0, 20) : null;
+  if (!list) throw new HttpError(400, "Send the list of stages.");
+  const dateOrNull = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) ? v : null);
+  const clean = list.map((s) => ({ title: String(s?.title || "").trim().slice(0, 100), status: ["upcoming", "current", "done"].includes(s?.status) ? s.status : "upcoming", planned: dateOrNull(s?.planned_date), done: dateOrNull(s?.done_date) })).filter((s) => s.title);
+  if (clean.filter((s) => s.status === "current").length > 1) throw new HttpError(400, "Only one stage can be in progress at a time.");
+  const pctRaw = req.body?.progress_pct;
+  const pct = pctRaw === null || pctRaw === undefined || pctRaw === "" ? null : Number(pctRaw);
+  if (pct !== null && (!Number.isInteger(pct) || pct < 0 || pct > 100)) throw new HttpError(400, "Progress is a whole number from 0 to 100.");
+  const before = (await query("SELECT title, status FROM project_stages WHERE project_id=$1", [project.id])).rows;
+  await query("DELETE FROM project_stages WHERE project_id=$1", [project.id]);
+  for (const [index, s] of clean.entries()) {
+    await query("INSERT INTO project_stages (project_id, position, title, status, planned_date, done_date) VALUES ($1,$2,$3,$4,$5,$6)",
+      [project.id, index, s.title, s.status, s.planned, s.status === "done" ? (s.done || new Date().toISOString().slice(0, 10)) : null]);
+  }
+  await query("UPDATE projects SET progress_pct=$2, expected_completion=$3 WHERE id=$1", [project.id, pct, dateOrNull(req.body?.expected_completion)]);
+  await audit(req, "project_stages", "project", project.id, { stages: clean.length, progress: pct });
+  const wasDone = new Set(before.filter((b) => b.status === "done").map((b) => b.title));
+  const newlyDone = clean.filter((s) => s.status === "done" && !wasDone.has(s.title));
+  if (newlyDone.length) customersOf({ projectId: project.id }).then((ids) => ids.forEach((cid) => notifyCustomer(cid, { subject: `${project.name}: a stage is complete`,
+    lines: [`${project.name}: ${newlyDone.map((s) => s.title).join(", ")} completed.`, pct !== null ? `Overall progress: ${pct}%.` : ""].filter(Boolean), where: "My property" }))).catch(() => {});
+  res.json({ ok: true });
 }));
 
 // ---- Construction progress for customers (a dated note with photos) --------
@@ -2803,6 +2905,8 @@ router.post("/projects/:id/progress", uploadProgressImages, route(async (req, re
         [update.id, info.storedName, info.displayName, info.mimeType, info.size]);
     }
     await audit(req, "progress_published", "project", project.id, { update_id: update.id, photos: checked.length });
+    customersOf({ projectId: project.id, propertyId }).then((ids) => ids.forEach((id) => notifyCustomer(id, { subject: `new update on ${project.name}`,
+      lines: [`${project.name}: ${title}`, note ? note.slice(0, 400) : "New photos and notes are in your portal."], where: "My property" }))).catch(() => {});
     res.status(201).json((await progressList(project.id)).find((u) => u.id === update.id));
   } catch (error) { cleanup(); throw error; }
 }));

@@ -16,6 +16,7 @@ import crypto from "node:crypto";
 import PDFDocument from "pdfkit";
 import { query, queryOne } from "../db.js";
 import { mailConfigured, sendMail } from "../mail.js";
+import { recordVerificationEvent } from "../notify/diasporaNotices.js";
 import { broadcastChange } from "../live.js";
 import { clearTyping, DELETE_ALL_WINDOW_MS, EDIT_WINDOW_MS, isTyping, REACTIONS, setTyping } from "../typing.js";
 import { receiptCoverage, writeReceiptPdf } from "../payments/notices.js";
@@ -86,7 +87,7 @@ async function requireCustomer(req, res, next) {
     const token = readCookie(req, CUSTOMER_COOKIE);
     if (!token || token.length > 200) return res.status(401).json({ error: "please sign in" });
     const row = await queryOne(
-      `SELECT s.id AS session_id, ca.id, ca.client_id, ca.email, cl.name, cl.country, cl.verification_status, cl.verification_note, cl.citizenship_confirmed_at
+      `SELECT s.id AS session_id, ca.id, ca.client_id, ca.email, cl.name, cl.country, cl.verification_status, cl.verification_note, cl.citizenship_confirmed_at, cl.notify_email
          FROM customer_sessions s JOIN customer_accounts ca ON ca.id=s.account_id JOIN clients cl ON cl.id=ca.client_id
         WHERE s.token_hash=$1 AND s.expires_at > NOW() AND ca.status='active' AND cl.is_diaspora = TRUE`, [hash(token)]);
     if (!row) { clearCookie(req, res); return res.status(401).json({ error: "please sign in" }); }
@@ -402,7 +403,9 @@ function stagesFor(contract) {
 async function ownContracts(clientId) {
   return (await query(
     `SELECT c.id, c.contract_number, c.status, c.deal_type, c.value, c.project_id, c.property_id, c.customer_signed_at, c.legal_reviewed_at,
-            c.management_approved_at, c.signed_document_id, c.start_date, c.end_date, c.channel, c.customer_accepted_at, c.customer_accepted_name, c.generated_document_id,
+            c.management_approved_at, c.signed_document_id, c.start_date, c.end_date, c.channel, c.customer_accepted_at, c.customer_accepted_name, c.generated_document_id, c.transfer_stage, c.transfer_note, c.transfer_updated_at,
+            p.legal_status, p.title_deed_no, p.title_deed_kind, p.legal_note, p.legal_checked_at,
+            pr.progress_pct, pr.expected_completion,
             p.name AS property_name, p.location, p.property_type, pr.name AS project_name, pr.location AS project_location,
             (SELECT pi.id FROM property_images pi WHERE pi.property_id=p.id ORDER BY pi.id LIMIT 1) AS photo_id
        FROM contracts c LEFT JOIN properties p ON p.id=c.property_id LEFT JOIN projects pr ON pr.id=c.project_id
@@ -448,6 +451,48 @@ async function updatesFor(contract) {
     photos: images.filter((i) => i.update_id === u.id).map((i) => ({ url: `/customer/progress-photos/${i.id}` })) }));
 }
 
+
+const LEGAL_TEXT = { not_checked: "Legal has not checked this property yet", in_review: "Legal is reviewing this property", verified: "Title verified by MKUYU Legal", issues: "Legal has a note about this property" };
+const TRANSFER_STEPS = [["documents", "Transfer documents prepared"], ["tax_clearance", "Tax clearance"], ["registry", "Land registry"], ["transferred", "Transferred to you"]];
+
+/** What Legal has checked on the property the customer is buying. */
+function legalFor(c) {
+  if (!c.property_id) return null;
+  return { status: c.legal_status || "not_checked", label: LEGAL_TEXT[c.legal_status] || LEGAL_TEXT.not_checked,
+    deed_no: c.title_deed_no || null, deed_kind: c.title_deed_kind || null, note: c.legal_note || null, checked: fmtDate(c.legal_checked_at) };
+}
+/** Ownership transfer after a sale: the four registry steps and where they stand. */
+function transferFor(c) {
+  if ((c.deal_type && c.deal_type !== "buy") || !["active", "completed"].includes(c.status)) return null;
+  const at = TRANSFER_STEPS.findIndex(([key]) => key === c.transfer_stage);
+  const done = c.transfer_stage === "transferred";
+  return { stage: c.transfer_stage, note: c.transfer_note || null, updated: fmtDate(c.transfer_updated_at),
+    steps: TRANSFER_STEPS.map(([, label], i) => ({ label, state: done || i < at ? "done" : i === at ? "current" : "upcoming" })) };
+}
+/** The project's building stages and overall progress, when MKUYU keeps them. */
+async function projectFor(c) {
+  if (!c.project_id) return null;
+  const stages = (await query("SELECT title, status, done_date, planned_date FROM project_stages WHERE project_id=$1 ORDER BY position, id", [c.project_id])).rows;
+  if (!stages.length && c.progress_pct === null) return null;
+  const derived = stages.length ? Math.round(stages.reduce((sum, st) => sum + (st.status === "done" ? 1 : st.status === "current" ? 0.5 : 0), 0) / stages.length * 100) : null;
+  return { name: c.project_name || "", progress_pct: c.progress_pct ?? derived, expected: fmtDate(c.expected_completion),
+    stages: stages.map((st) => ({ title: st.title, state: st.status === "done" ? "done" : st.status === "current" ? "current" : "upcoming", date: fmtDate(st.status === "done" ? st.done_date : st.planned_date) })) };
+}
+
+/** The customer's whole way from verification to keys, with the step they are on. */
+function journeyFor({ verified, requests, contracts }) {
+  const signed = contracts.some((c) => ["active", "completed"].includes(c.status));
+  const paid = contracts.some((c) => c.status === "completed");
+  const bought = contracts.filter((c) => !c.deal_type || c.deal_type === "buy");
+  const transferred = bought.length > 0 && bought.some((c) => c.transfer_stage === "transferred");
+  const done = [verified, requests > 0 || contracts.length > 0, requests > 1 || contracts.length > 0, signed, paid, transferred, transferred && paid];
+  const labels = ["Verify your identity", "Choose a property", "Meet our team", "Sign your agreement", "Pay for your property", "Ownership transferred to you", "Handover"];
+  const advice = ["Upload your passport and proof of residence under Verify my identity.", "Browse the properties and press Request on the one you like.", "Our team contacts you to arrange a viewing or video meeting.",
+    "We prepare your agreement; you read and sign it in the portal.", "Pay by the agreed installments; every receipt appears in your portal.", "MKUYU Legal completes the transfer with the land registry.", "You receive your keys and documents."];
+  const current = done.findIndex((d) => !d);
+  return { steps: labels.map((label, i) => ({ key: i + 1, label, state: done[i] ? "done" : i === current ? "current" : "upcoming" })), next: current === -1 ? "Everything is complete. Welcome home." : advice[current] };
+}
+
 /** Where the customer's identity check stands, in their words. NULL = added by staff. */
 const VERIFY_TEXT = {
   unverified: "Upload your passport and proof of where you live so MKUYU can verify you.",
@@ -484,6 +529,7 @@ router.get("/portal", requireCustomer, route(async (req, res) => {
       contract: { number: c.contract_number || `#${c.id}`, status: STATUS_TEXT[c.status] || c.status, signed: fmtDate(c.customer_signed_at) },
       ...(key === "rent" ? { rental: { start: fmtDate(c.start_date) || "—", end: fmtDate(c.end_date) || "—", period: "" } } : {}),
       ownership: key === "buy" ? "Ownership transfer follows completion of payment, as set out in your contract." : null,
+      legal: legalFor(c), transfer: transferFor(c), project: await projectFor(c),
       payments: ["approved", "customer_pending", "active", "completed"].includes(c.status) ? payments : null,
       updates: await updatesFor(c),
       // A diaspora agreement waiting for the customer's electronic signature.
@@ -499,7 +545,9 @@ router.get("/portal", requireCustomer, route(async (req, res) => {
   const unread = await queryOne("SELECT COUNT(*)::int AS n FROM customer_messages WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [req.customer.client_id]);
   const requests = await queryOne(`SELECT COUNT(*)::int AS n FROM leads WHERE client_id=$1 AND source='diaspora-portal' AND status NOT IN ('lost','closed')`, [req.customer.client_id]);
   res.json({ customer: { name: req.customer.name, email: req.customer.email, country: req.customer.country || null }, contact, services, verification,
-    diaspora: true, desk: { name: desk?.name || null }, requests_open: requests?.n || 0, messages_unread: unread?.n || 0 });
+    diaspora: true, desk: { name: desk?.name || null }, requests_open: requests?.n || 0, messages_unread: unread?.n || 0,
+    journey: journeyFor({ verified: verification.verified, requests: requests?.n || 0, contracts }),
+    prefs: { notify_email: req.customer.notify_email !== false } });
 }));
 
 // ---- Requests from inside the portal ------------------------------------------
@@ -510,6 +558,13 @@ router.get("/portal", requireCustomer, route(async (req, res) => {
 const SERVICES = new Set(["buy", "rent"]);
 const CONTACT = new Set(["email", "whatsapp", "phone"]);
 const REQUEST_TEXT = { new: "Received · our sales team will contact you", handed_off: "Our customer team is contacting you", contacted: "Contacted", appointment: "Meeting / viewing arranged", converted: "Moving to an agreement", lost: "Closed", closed: "Closed" };
+
+router.post("/preferences", requireCustomer, route(async (req, res) => {
+  requireHeader(req);
+  const on = req.body?.notify_email !== false;
+  await query("UPDATE clients SET notify_email=$2 WHERE id=$1", [req.customer.client_id, on]);
+  res.json({ ok: true, notify_email: on });
+}));
 
 router.get("/requests", requireCustomer, route(async (req, res) => {
   const rows = (await query(
@@ -631,11 +686,14 @@ router.post("/contracts/:id/sign", requireCustomer, route(async (req, res) => {
 }));
 
 // ---- Identity documents (self sign-ups) ------------------------------------------
-const DOC_KINDS = { passport: "Passport (photo page) or NIDA", residence: "Proof of residence abroad (visa, residence card or permit)", other: "Other supporting document" };
+const DOC_KINDS = { passport: "Passport (photo page) or NIDA", selfie: "Selfie holding your passport open at the photo page (recommended)", residence: "Proof of residence abroad (visa, residence card or permit)", other: "Other supporting document" };
 
 router.get("/verification", requireCustomer, route(async (req, res) => {
   const docs = (await query(`SELECT id, category, original_filename, uploaded_at, to_char(expires_on,'YYYY-MM-DD') AS expires_on FROM documents WHERE client_id=$1 AND category LIKE 'kyc_%' AND status <> 'superseded' ORDER BY id DESC`, [req.customer.client_id])).rows;
+  const events = (await query("SELECT action, note, created_at FROM verification_events WHERE client_id=$1 ORDER BY id DESC LIMIT 30", [req.customer.client_id])).rows;
+  const EVENT_TEXT = { documents_submitted: "You sent documents", verify: "MKUYU verified your identity", reject: "Documents sent back to you", revoke: "Verification removed", confirm_citizenship: "Nationality confirmed", desk_ok: "Checked by the Diaspora Desk", expiry_reminder: "Reminder: a document is about to expire" };
   res.json({ ...verificationState(req.customer), kinds: DOC_KINDS,
+    history: events.map((e) => ({ text: EVENT_TEXT[e.action] || e.action, note: ["reject", "revoke", "expiry_reminder"].includes(e.action) ? e.note : null, date: fmtDate(e.created_at) })),
     documents: docs.map((d) => ({ kind: d.category.slice(4), name: d.original_filename, date: fmtDate(d.uploaded_at), expires_on: d.expires_on })) });
 }));
 
@@ -679,6 +737,7 @@ router.post("/verification/documents", requireCustomer, (req, res, next) => {
           text: `${req.customer.name} has uploaded identity documents and is waiting to be verified.\n\nOpen the system → Diaspora verification.\n\nMKUYU Africa`, kind: "kyc" }).catch(() => {}))))
         .catch(() => {});
     }
+    await recordVerificationEvent(req.customer.client_id, null, "documents_submitted", DOC_KINDS[kind]);
     // Open Diaspora Desk screens refresh by themselves.
     broadcastChange("diaspora");
     const now = await queryOne("SELECT verification_status, verification_note FROM clients WHERE id=$1", [req.customer.client_id]);
