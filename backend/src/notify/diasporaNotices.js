@@ -8,7 +8,7 @@
 import { query, queryOne } from "../db.js";
 import { mailConfigured, sendMail } from "../mail.js";
 
-const site = () => String(process.env.PUBLIC_SITE_URL || "").trim().replace(/\/+$/, "");
+const site = () => String(process.env.DIASPORA_SITE_URL || process.env.PUBLIC_SITE_URL || "").trim().replace(/\/+$/, "");
 const portalLink = (hash = "") => `${site() ? `${site()}/login.html` : "Website → Diaspora login"}${hash ? `  → ${hash}` : ""}`;
 
 /** Sends one notice to one customer (if they want e-mail and have an address). Never throws. */

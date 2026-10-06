@@ -2532,7 +2532,7 @@ router.post("/clients/:id/portal-invite", route(async (req, res) => {
      ON CONFLICT (client_id) DO UPDATE SET email=EXCLUDED.email, invited_by=EXCLUDED.invited_by, invited_at=NOW(),
        status=CASE WHEN customer_accounts.status='active' AND customer_accounts.email=EXCLUDED.email THEN 'active' ELSE 'invited' END
      RETURNING id, email, status`, [client.id, email, req.user.id]);
-  const site = String(process.env.PUBLIC_SITE_URL || "").trim().replace(/\/+$/, "");
+  const site = String(process.env.DIASPORA_SITE_URL || process.env.PUBLIC_SITE_URL || "").trim().replace(/\/+$/, "");
   const link = site ? `${site}/login.html` : "the MKUYU website (Diaspora login)";
   const mail = mailConfigured()
     ? await sendMail({ to: email, subject: "Your MKUYU diaspora portal",
@@ -2790,7 +2790,7 @@ router.post("/diaspora/verifications/:id", route(async (req, res) => {
   await audit(req, `kyc_${action}`, "client", clientId, { note });
   await recordVerificationEvent(clientId, req.user.id, action, note);
   if (mailConfigured() && client.email && client.notify_email !== false && ["verify", "reject", "revoke", "confirm_citizenship"].includes(action)) {
-    const site = String(process.env.PUBLIC_SITE_URL || "").trim().replace(/\/+$/, "");
+    const site = String(process.env.DIASPORA_SITE_URL || process.env.PUBLIC_SITE_URL || "").trim().replace(/\/+$/, "");
     sendMail({ to: client.email, subject: action === "verify" ? "MKUYU: you are verified" : action === "confirm_citizenship" ? "MKUYU: your nationality is confirmed" : "MKUYU: please check your documents",
       text: action === "confirm_citizenship"
         ? `Dear ${client.name},\n\nMKUYU's Legal team has confirmed your nationality. When your agreement is ready, you can read and sign it in your portal.\n\n${site ? `${site}/login.html` : "Website → Diaspora login"}\n\nMKUYU Africa`

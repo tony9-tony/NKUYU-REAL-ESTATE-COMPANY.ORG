@@ -44,8 +44,8 @@ app.use("/api", (req, res, next) => {
 
 // MK-08: the public website's origins. Only these may call the public API
 // from a browser. PUBLIC_SITE_ORIGINS in .env lists the real site (comma
-// separated); in development the local preview addresses are allowed too.
-const DEV_PUBLIC_ORIGINS = ["http://localhost:5500", "http://127.0.0.1:5500"];
+// separated, include the Diaspora Portal site too); in development the local preview addresses are allowed too.
+const DEV_PUBLIC_ORIGINS = ["http://localhost:5500", "http://127.0.0.1:5500", "http://localhost:5600", "http://127.0.0.1:5600"]; // 5500 = Tanzania website, 5600 = Diaspora Portal
 const publicSiteOrigins = [
   ...String(process.env.PUBLIC_SITE_ORIGINS || "").split(",").map((value) => value.trim()).filter(Boolean),
   ...(isProduction() ? [] : DEV_PUBLIC_ORIGINS),
