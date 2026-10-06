@@ -1760,7 +1760,7 @@ function handOffLead(leadId) {
   if (!lead) return;
   const means = { phone: "Phone call", whatsapp: "WhatsApp", email: "Email" }[lead.preferred_contact] || "Phone call";
   const lines = [
-    lead.service === "sell" ? `Website SELL submission: ${sellSummary(lead.sell_details)}.` : lead.service ? `Website request to ${lead.service === "rent" ? "RENT" : "BUY"}.` : "Website enquiry.",
+    lead.service === "sell" ? `Website SELL submission: ${sellSummary(lead.sell_details)}.` : lead.service ? `${lead.source === "diaspora-portal" ? "Diaspora portal request" : "Website request"} to ${lead.service === "rent" ? "RENT" : "BUY"}.` : "Website enquiry.",
     "",
     `Customer: ${lead.name}`,
     `Phone: ${lead.phone || "—"}`,
@@ -4051,7 +4051,7 @@ async function loadRequests() {
 function reloadRequests() {
   state.requests = null;
   state.requestsRequested = false;
-  return loadRequests();
+  return loadRequests().then((result) => { if (state.view === "diaspora-requests" && modalBackdrop.hidden) renderDiasporaRequests(); return result; });
 }
 
 /**
@@ -4509,6 +4509,8 @@ function render() {
   if (state.view === "diaspora-requests") {
     renderDiasporaRequests();
     if (!state.drRequested) loadDiasporaRequests();
+    // The hand-off flow needs the request stages too.
+    if (!state.requests && !state.requestsRequested) loadRequests().then(() => { if (state.view === "diaspora-requests" && modalBackdrop.hidden) renderDiasporaRequests(); });
   }
   if (state.view === "diaspora-report") {
     renderDiasporaReport();
@@ -5402,6 +5404,7 @@ async function handleFormSubmit(event) {
         catch (error) { showToast(error.message || "Assigned, but the request could not be updated."); }
         await reloadRequests();
         if (state.view === "requests") render();
+        if (state.view === "diaspora-requests") { await loadDiasporaRequests({ quiet: true }); }
       }
       showToast(requestId ? "Handed to Customer Service." : "Work assigned.");
     } catch (error) {
@@ -5992,6 +5995,35 @@ async function setDiasporaRequestStatus(id, status) {
   try { await api(`/diaspora/requests/${id}`, { method: "POST", body: JSON.stringify({ status }) }); showToast("Updated."); loadDiasporaRequests(); }
   catch (error) { showToast(error.message || "Could not update the request."); }
 }
+/**
+ * The Desk's flow for a portal request, right where the Desk reads it: hand it to
+ * Customer Service, follow the report, accept it. (Same steps and rules as
+ * Requests & leads; this just puts the buttons on this page too.)
+ */
+function deskLead(row) { return (state.requests || []).find((l) => Number(l.id) === Number(row.id)) || null; }
+function deskFlowStage(row) {
+  const lead = deskLead(row);
+  if (!lead) return "";
+  const key = requestStage(lead);
+  const found = REQUEST_STAGES.find(([k]) => k === key);
+  return found ? badge(found[1], found[2]) + (lead.task_assignee ? `<span class="cell-sub">With ${escapeHtml(lead.task_assignee)}</span>` : "") : "";
+}
+function deskFlowButtons(row) {
+  const lead = deskLead(row);
+  if (!lead || ["closed", "lost"].includes(row.status)) return "";
+  const key = requestStage(lead);
+  const hand = (label, primary = true) => mayHandOffRequests() ? `<button class="btn btn-small${primary ? " btn-primary" : ""}" data-action="hand-off-lead" data-id="${lead.id}">${label}</button>` : "";
+  const task = (label, primary) => lead.task_id ? `<button class="btn btn-small${primary ? " btn-primary" : ""}" data-action="open-task" data-id="${lead.task_id}">${label}</button>` : "";
+  const become = () => mayApproveClients() && !lead.client_id ? `<button class="btn btn-small btn-primary" data-action="convert-lead" data-id="${lead.id}">Become a client</button>` : "";
+  switch (key) {
+    case "new": case "existing": return hand("Hand to Customer Service");
+    case "unreachable": return hand("Hand off again") + task("View report", false);
+    case "with_cs": return task("Open assignment", false);
+    case "reported": return task("Review report", true);
+    case "contacted": case "answered": return become() + task("View report", false);
+    default: return "";
+  }
+}
 function renderDiasporaRequests() {
   const data = state.drRequests;
   if (!data) { content.innerHTML = `<div class="panel">${emptyState("Loading", "", { iconName: "inbox", compact: true })}</div>`; return; }
@@ -6004,8 +6036,8 @@ function renderDiasporaRequests() {
   const money = (n) => `TZS ${Number(n).toLocaleString("en-US")}`;
   const body = rows.map((r) => `<tr><td><span class="cell-main">${escapeHtml(r.client_name)}</span><span class="cell-sub">${escapeHtml([r.country, r.phone].filter(Boolean).join(" · "))}</span></td>
       <td><span class="cell-main">${escapeHtml(r.property_name || "Property")}</span><span class="cell-sub">${r.service === "rent" ? "Wants to rent" : "Wants to buy"}${r.property_location ? ` · ${escapeHtml(r.property_location)}` : ""}${r.budget ? ` · budget ${escapeHtml(money(r.budget))}` : ""}</span><span class="cell-sub">Prefers: ${escapeHtml(r.preferred_contact || "e-mail")}</span></td>
-      <td>${badge(r.status_text, r.status === "new" ? "pending" : isOpen(r) ? "active" : "approved")}<span class="cell-sub">${escapeHtml(formatDateTime(r.created_at, true))}</span></td>
-      <td class="align-right"><div class="row-actions"><button class="btn btn-small btn-primary" data-action="dr-message" data-client="${r.client_id}">${icon("mail")} Message</button>
+      <td>${deskFlowStage(r) || badge(r.status_text, r.status === "new" ? "pending" : isOpen(r) ? "active" : "approved")}<span class="cell-sub">${escapeHtml(formatDateTime(r.created_at, true))}</span></td>
+      <td class="align-right"><div class="row-actions">${deskFlowButtons(r)}<button class="btn btn-small" data-action="dr-message" data-client="${r.client_id}">${icon("mail")} Message</button>
         ${data.can_act && r.status === "new" ? `<button class="btn btn-small" data-action="dr-status" data-id="${r.id}" data-status="contacted">Mark contacted</button>` : ""}
         ${data.can_act && isOpen(r) ? `<button class="btn btn-small btn-danger-ghost" data-action="dr-status" data-id="${r.id}" data-status="closed">Close</button>` : ""}</div></td></tr>`).join("");
   content.innerHTML = `<div class="page-tip">${icon("info")}<span>Each time a verified customer presses <strong>Request</strong> in their portal it appears here, and the Desk is e-mailed. Press <strong>Message</strong> to answer in their portal chat.</span></div>
