@@ -25,7 +25,7 @@ import { documentUploadsDir, progressUploadsDir, resolveStoredFile, safeDisplayF
 import { isHttps, isProduction, readCookie } from "../security.js";
 import { hashPassword, verifyPassword } from "../auth.js";
 import { COUNTRIES, countryByCode, countryFromPhone, internationalDigits, phoneMatchesResidence } from "../customer/countries.js";
-import { documentExtensions, uploadDocumentFile, validateUploadedFile, cleanupUploadedFile } from "../uploads.js";
+import { documentExtensions, uploadDocumentFile, validateUploadedFile, cleanupUploadedFile, uploadProfileImageFile, profileUploadsDir, profileImageExtensions, removeStoredFile } from "../uploads.js";
 
 const router = Router();
 export const CUSTOMER_COOKIE = "mkuyu_customer";
@@ -88,7 +88,7 @@ async function requireCustomer(req, res, next) {
     const token = readCookie(req, CUSTOMER_COOKIE);
     if (!token || token.length > 200) return res.status(401).json({ error: "please sign in" });
     const row = await queryOne(
-      `SELECT s.id AS session_id, ca.id, ca.client_id, ca.email, cl.name, cl.country, cl.verification_status, cl.verification_note, cl.citizenship_confirmed_at, cl.notify_email
+      `SELECT s.id AS session_id, ca.id, ca.client_id, ca.email, ca.photo_stored_name, ca.photo_mime, cl.name, cl.country, cl.verification_status, cl.verification_note, cl.citizenship_confirmed_at, cl.notify_email
          FROM customer_sessions s JOIN customer_accounts ca ON ca.id=s.account_id JOIN clients cl ON cl.id=ca.client_id
         WHERE s.token_hash=$1 AND s.expires_at > NOW() AND ca.status='active' AND cl.is_diaspora = TRUE`, [hash(token)]);
     if (!row) { clearCookie(req, res); return res.status(401).json({ error: "please sign in" }); }
@@ -162,7 +162,38 @@ router.post("/auth/logout", route(async (req, res) => {
 }));
 
 router.get("/me", requireCustomer, route(async (req, res) => {
-  res.json({ name: req.customer.name, email: req.customer.email, country: req.customer.country || null, verification: verificationState(req.customer) });
+  res.json({ name: req.customer.name, email: req.customer.email, country: req.customer.country || null, photo_url: photoUrl(req.customer), verification: verificationState(req.customer) });
+}));
+
+
+// ---- The customer's own profile picture ---------------------------------------
+const photoUrl = (c) => (c.photo_stored_name ? `/customer/profile/photo?v=${encodeURIComponent(c.photo_stored_name.slice(0, 12))}` : null);
+router.get("/profile/photo", requireCustomer, route(async (req, res) => {
+  const full = resolveStoredFile(profileUploadsDir, req.customer.photo_stored_name);
+  if (!full) throw new HttpError(404, "No profile picture");
+  fileHeaders(res, req.customer.photo_mime, "profile-photo", false);
+  res.setHeader("Cache-Control", "private, max-age=300");
+  res.sendFile(full);
+}));
+router.post("/profile/photo", requireCustomer, (req, res, next) => {
+  if (req.get(CUSTOMER_HEADER) !== "1") return res.status(403).json({ error: "request refused" });
+  uploadProfileImageFile(req, res, (error) => (error ? next(error) : next()));
+}, route(async (req, res) => {
+  try {
+    if (tooMany(`photo:${req.customer.id}`, 10, 60 * 60 * 1000)) throw new HttpError(429, "Too many uploads. Please wait a little.");
+    const info = validateUploadedFile(req.file, profileImageExtensions);
+    const old = req.customer.photo_stored_name;
+    await query("UPDATE customer_accounts SET photo_stored_name=$1, photo_mime=$2 WHERE id=$3", [info.storedName, info.mimeType, req.customer.id]);
+    if (old && old !== info.storedName) removeStoredFile(profileUploadsDir, old);
+    res.json({ photo_url: photoUrl({ photo_stored_name: info.storedName }) });
+  } catch (error) { cleanupUploadedFile(req.file); throw error; }
+}));
+router.delete("/profile/photo", requireCustomer, route(async (req, res) => {
+  if (req.get(CUSTOMER_HEADER) !== "1") throw new HttpError(403, "request refused");
+  const old = req.customer.photo_stored_name;
+  await query("UPDATE customer_accounts SET photo_stored_name=NULL, photo_mime=NULL WHERE id=$1", [req.customer.id]);
+  if (old) removeStoredFile(profileUploadsDir, old);
+  res.json({ photo_url: null });
 }));
 
 // ---- Shared: the desk, sessions, code checks ----------------------------------
@@ -545,7 +576,7 @@ router.get("/portal", requireCustomer, route(async (req, res) => {
   const desk = await queryOne(`SELECT u.display_name AS name FROM clients c LEFT JOIN users u ON u.id=c.diaspora_officer_id WHERE c.id=$1`, [req.customer.client_id]);
   const unread = await queryOne("SELECT COUNT(*)::int AS n FROM customer_messages WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [req.customer.client_id]);
   const requests = await queryOne(`SELECT COUNT(*)::int AS n FROM leads WHERE client_id=$1 AND source='diaspora-portal' AND status NOT IN ('lost','closed')`, [req.customer.client_id]);
-  res.json({ customer: { name: req.customer.name, email: req.customer.email, country: req.customer.country || null }, contact, services, verification,
+  res.json({ customer: { name: req.customer.name, email: req.customer.email, country: req.customer.country || null, photo_url: photoUrl(req.customer) }, contact, services, verification,
     diaspora: true, desk: { name: desk?.name || null }, requests_open: requests?.n || 0, messages_unread: unread?.n || 0,
     journey: journeyFor({ verified: verification.verified, requests: requests?.n || 0, contracts }),
     prefs: { notify_email: req.customer.notify_email !== false } });

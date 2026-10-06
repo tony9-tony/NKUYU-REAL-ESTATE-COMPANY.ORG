@@ -880,6 +880,8 @@ async function migrateCustomerPortal() {
   // Sign in with a username or the e-mail, plus the password. The e-mailed code
   // is used only to sign up and to reset a forgotten password.
   await query("ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS username TEXT");
+  await query("ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS photo_stored_name TEXT");
+  await query("ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS photo_mime TEXT");
   // Diaspora contracts: their own wording and path, and the customer's
   // electronic signature in the portal (who, when, from where, which text).
   for (const column of ["channel TEXT NOT NULL DEFAULT 'standard'", "customer_accepted_at TIMESTAMPTZ", "customer_accepted_name TEXT",
