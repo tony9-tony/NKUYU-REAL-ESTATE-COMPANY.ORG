@@ -495,9 +495,10 @@ router.get("/portal", requireCustomer, route(async (req, res) => {
   const contact = { phone: process.env.MKUYU_CONTACT_PHONE || null, email: process.env.MKUYU_CONTACT_EMAIL || null, whatsapp: process.env.MKUYU_CONTACT_WHATSAPP || process.env.MKUYU_CONTACT_PHONE || null };
   // Who on the Diaspora Desk knows this customer (contact person; the whole desk can help).
   const desk = await queryOne(`SELECT u.display_name AS name FROM clients c LEFT JOIN users u ON u.id=c.diaspora_officer_id WHERE c.id=$1`, [req.customer.client_id]);
+  const unread = await queryOne("SELECT COUNT(*)::int AS n FROM customer_messages WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [req.customer.client_id]);
   const requests = await queryOne(`SELECT COUNT(*)::int AS n FROM leads WHERE client_id=$1 AND source='diaspora-portal' AND status NOT IN ('lost','closed')`, [req.customer.client_id]);
   res.json({ customer: { name: req.customer.name, email: req.customer.email, country: req.customer.country || null }, contact, services, verification,
-    diaspora: true, desk: { name: desk?.name || null }, requests_open: requests?.n || 0 });
+    diaspora: true, desk: { name: desk?.name || null }, requests_open: requests?.n || 0, messages_unread: unread?.n || 0 });
 }));
 
 // ---- Requests from inside the portal ------------------------------------------
@@ -692,6 +693,39 @@ const fileHeaders = (res, mime, filename, download) => {
   res.setHeader("Cache-Control", "private, no-store");
 };
 const idParam = (value) => { const n = Number(value); if (!Number.isSafeInteger(n) || n < 1) throw new HttpError(404, "not found"); return n; };
+
+// ---- Messages with the Diaspora Desk --------------------------------------------
+const messageRow = (m) => ({ id: m.id, from: m.sender, name: m.sender === "staff" ? (m.staff_name || "Diaspora Desk") : "You", body: m.body, at: m.created_at });
+
+router.get("/messages", requireCustomer, route(async (req, res) => {
+  const rows = (await query(`SELECT m.*, u.display_name AS staff_name FROM customer_messages m LEFT JOIN users u ON u.id=m.staff_user_id
+    WHERE m.client_id=$1 ORDER BY m.id DESC LIMIT 200`, [req.customer.client_id])).rows.reverse();
+  // Opening the conversation marks the desk's replies as read.
+  await query("UPDATE customer_messages SET read_at=NOW() WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [req.customer.client_id]);
+  res.json({ messages: rows.map(messageRow) });
+}));
+
+router.post("/messages", requireCustomer, (req, res, next) => {
+  if (req.get(CUSTOMER_HEADER) !== "1") return res.status(403).json({ error: "request refused" });
+  next();
+}, route(async (req, res) => {
+  const body = String(req.body?.body || "").replace(/\r\n/g, "\n").trim();
+  if (!body) throw new HttpError(400, "Write your message first.");
+  if (body.length > 2000) throw new HttpError(400, "Please keep the message under 2000 characters.");
+  if (tooMany(`msg:${req.customer.client_id}`, 20, 60 * 60 * 1000)) throw new HttpError(429, "Too many messages. Please wait a little.");
+  const row = (await query("INSERT INTO customer_messages (client_id, sender, body) VALUES ($1,'customer',$2) RETURNING *", [req.customer.client_id, body])).rows[0];
+  broadcastChange("diaspora");
+  // The desk is e-mailed for the first unanswered message only, so a long chat is not a long list of e-mails.
+  const earlier = await queryOne("SELECT COUNT(*)::int AS n FROM customer_messages WHERE client_id=$1 AND sender='customer' AND id<$2 AND id > COALESCE((SELECT MAX(id) FROM customer_messages WHERE client_id=$1 AND sender='staff'), 0)", [req.customer.client_id, row.id]);
+  if (!earlier?.n && mailConfigured()) {
+    query(`SELECT DISTINCT u.email FROM users u JOIN user_departments ud ON ud.user_id=u.id JOIN departments d ON d.id=ud.department_id
+            WHERE d.name='DIASPORA DESK' AND d.active=TRUE AND u.email IS NOT NULL AND u.email <> ''`)
+      .then(({ rows }) => Promise.all(rows.map((r) => sendMail({ to: r.email, subject: `MKUYU: new message from ${req.customer.name}`,
+        text: `${req.customer.name} wrote to the Diaspora Desk in the portal:\n\n${body.slice(0, 500)}\n\nOpen the system → Diaspora messages to reply.\n\nMKUYU Africa`, kind: "message" }).catch(() => {}))))
+      .catch(() => {});
+  }
+  res.status(201).json({ message: messageRow(row) });
+}));
 
 router.get("/receipts/:id", requireCustomer, route(async (req, res) => {
   const payment = await queryOne(

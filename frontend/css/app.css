@@ -2281,3 +2281,24 @@ label.btn { cursor: pointer; }
 @media (max-width: 720px) { .kyc-viewer { height: 58vh; } .kyc-file { max-width: 100%; flex-basis: 100%; } }
 
 .preset-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+
+/* Diaspora messages (staff) */
+.dm { display: grid; grid-template-columns: 320px 1fr; gap: 16px; align-items: start; }
+.dm-list { display: flex; flex-direction: column; gap: 6px; max-height: 70vh; overflow-y: auto; }
+.dm-thread-row { text-align: left; display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--line, #e3e6ea); border-radius: 10px; background: var(--surface, #fff); cursor: pointer; font: inherit; color: inherit; }
+.dm-thread-row.is-active { border-color: var(--primary, #1f6f4a); }
+.dm-name { font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.dm-unread { margin-left: auto; background: var(--primary, #1f6f4a); color: #fff; border-radius: 999px; font-size: 12px; padding: 1px 8px; }
+.dm-last, .dm-when { font-size: 13px; color: var(--muted, #6b7280); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-pane { border: 1px solid var(--line, #e3e6ea); border-radius: 12px; background: var(--surface, #fff); padding: 14px; display: flex; flex-direction: column; gap: 12px; min-height: 360px; }
+.dm-head { display: flex; align-items: center; gap: 10px; }
+.dm-back { display: none; }
+.dm-thread { display: flex; flex-direction: column; gap: 10px; max-height: 50vh; overflow-y: auto; padding-right: 4px; }
+.dm-msg { display: flex; flex-direction: column; max-width: 80%; gap: 2px; }
+.dm-msg.is-staff { align-self: flex-end; align-items: flex-end; }
+.dm-bubble { padding: 9px 12px; border-radius: 12px; background: #eef1f4; overflow-wrap: anywhere; }
+.dm-msg.is-staff .dm-bubble { background: var(--primary, #1f6f4a); color: #fff; }
+.dm-meta { font-size: 12px; color: var(--muted, #6b7280); }
+.dm-compose { display: flex; flex-direction: column; gap: 8px; }
+.dm-compose textarea { width: 100%; resize: vertical; }
+@media (max-width: 800px) { .dm { grid-template-columns: 1fr; } .dm.has-selection .dm-list { display: none; } .dm:not(.has-selection) .dm-pane { display: none; } .dm-back { display: inline-flex; } }

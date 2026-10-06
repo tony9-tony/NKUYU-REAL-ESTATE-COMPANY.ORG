@@ -269,6 +269,7 @@ const viewMeta = {
   properties: ["Properties", "The property portfolio: status, price, location and photos"],
   clients: ["Clients", "People and companies, from first enquiry to signed agreement"],
   verification: ["Diaspora verification", "Diaspora sign-ups prove who they are: the Diaspora Desk verifies them, Legal then confirms nationality"],
+  "diaspora-messages": ["Diaspora messages", "What diaspora customers write to the Diaspora Desk from their portal, and your replies"],
   contracts: ["Contracts", "Every agreement and where it sits in the approval workflow"],
   debts: ["Payments & debts", "Installments, balances, recorded payments and reminders"],
   reminders: ["Reminders", "Installments due now and falling due soon, so no payment date is missed"],
@@ -919,6 +920,7 @@ async function refresh() {
   // Payments falling due soon feed the Reminders badge and the bell.
   loadUpcomingReminders().then(() => { updateNavigation(); updateNotificationDot(); if (state.view === "reminders") render(); });
   // The Diaspora verification badge: customers waiting for this person.
+  if (canSeeVerification()) loadDiasporaMessages({ quiet: true }).then(() => updateNavigation());
   if (canSeeVerification()) loadVerification({ quiet: true }).then(() => { updateNavigation(); if (["verification", "dashboard"].includes(state.view) && modalBackdrop.hidden) render(); });
   // Keeps the Requests count in the navigation current.
   if (canModule("leads") && can("view")) reloadRequests().then(() => { updateNavigation(); if (state.view === "requests") render(); });
@@ -1071,6 +1073,7 @@ const NAV_ITEMS = [
   { view: "requests", label: "Requests & leads", icon: "inbox", module: "leads", permission: "view", group: "Business" },
   // Identity checks of diaspora sign-ups: the Diaspora Desk checks, Legal verifies.
   { view: "verification", label: "Diaspora verification", icon: "shield", group: "Business", diasporaVerification: true },
+  { view: "diaspora-messages", label: "Diaspora messages", icon: "mail", group: "Business", diasporaVerification: true },
   // Leads live under "Requests & leads" (a tab there), not as a second menu entry.
   { view: "leads", label: "Leads", icon: "spark", module: "leads", permission: "view", group: "Business", mergedInto: "requests" },
   { view: "appointments", label: "Appointments", icon: "calendar", module: "appointments", permission: "view", group: "Business" },
@@ -1181,6 +1184,8 @@ function navSources() {
     requests: (state.requests || []).filter(requestNeedsMe).map((row) => `${row.id}:${requestStage(row)}`),
     // Diaspora customers waiting for this person (documents in, or nationality to confirm).
     verification: verificationsNeedingMe().map((row) => `${row.id}:${row.verification_status}:${row.citizenship_confirmed_at ? 1 : 0}`),
+    // Customer messages not yet opened by the desk.
+    "diaspora-messages": (state.dmThreads?.rows || []).reduce((sum, row) => sum + Number(row.unread || 0), 0),
   };
 }
 
@@ -1218,7 +1223,7 @@ function updateNavigation() {
     // waiting on this person, which already falls as they act, so it stays
     // until the work is done rather than clearing on sight.
     const sources = navSources();
-    const live = new Set(["assignments", "verification"]);
+    const live = new Set(["assignments", "verification", "diaspora-messages"]);
     if (sources[activeView] !== undefined && !live.has(activeView)) markSeen(`nav:${activeView}`, sources[activeView]);
     let lastGroup = null;
     nav.innerHTML = allowed.map((item) => {
@@ -4450,6 +4455,10 @@ function render() {
   if (state.view === "leads") renderLeads();
   addRequestTabs();
   addPageTip();
+  if (state.view === "diaspora-messages") {
+    renderDiasporaMessages();
+    if (!state.dmRequested) loadDiasporaMessages();
+  }
   if (state.view === "verification") {
     renderVerification();
     if (!state.verificationRequested || Date.now() - (state.verificationAt || 0) > 10000) loadVerification();
@@ -4642,6 +4651,7 @@ async function refreshLive() {
     canModule("leads") && can("view") ? loadRequests() : null,
     state.view === "assignments" || state.tasks ? loadTasks() : null,
     canSeeVerification() ? loadVerification({ quiet: true }) : null,
+    canSeeVerification() ? loadDiasporaMessages({ quiet: true }) : null,
     state.view === "templates" ? (state.templatesLoaded = false, state.templatesRequested = false, null) : null,
   ]);
   updateNavigation();
@@ -5860,6 +5870,64 @@ const KYC_REASONS = [
   "The name on the document does not match the name on your account. Please upload a document with the same name.",
   "The document is cut off or has a corner missing. Please upload the whole page.",
 ];
+
+/* --------------------------------------------------------------------------
+   Diaspora messages: what customers write from their portal, and the desk's replies.
+   -------------------------------------------------------------------------- */
+async function loadDiasporaMessages({ quiet = false } = {}) {
+  state.dmRequested = true;
+  try {
+    state.dmThreads = await api("/diaspora/messages");
+    if (state.dmSelected) state.dmConversation = await api(`/diaspora/messages/${state.dmSelected}`);
+  } catch (error) { if (!quiet || !state.dmThreads) state.dmThreads = { rows: [], error: error.message || "Unable to load." }; }
+  if (state.view === "diaspora-messages" && !(document.activeElement?.id === "dm-reply" && document.activeElement.value)) render();
+  else updateNavigation();
+}
+
+async function openDiasporaConversation(clientId) {
+  state.dmSelected = clientId;
+  state.dmConversation = null;
+  render();
+  try { state.dmConversation = await api(`/diaspora/messages/${clientId}`); await loadDiasporaMessages({ quiet: true }); }
+  catch (error) { showToast(error.message || "Could not open the conversation."); }
+  render();
+  const box = document.getElementById("dm-thread");
+  if (box) box.scrollTop = box.scrollHeight;
+}
+
+async function sendDiasporaMessage() {
+  const field = document.getElementById("dm-reply");
+  const text = field?.value.trim();
+  if (!text || !state.dmSelected) return;
+  try {
+    await api(`/diaspora/messages/${state.dmSelected}`, { method: "POST", body: JSON.stringify({ body: text }) });
+    field.value = "";
+    state.dmConversation = await api(`/diaspora/messages/${state.dmSelected}`);
+    await loadDiasporaMessages({ quiet: true });
+    render();
+    const box = document.getElementById("dm-thread");
+    if (box) box.scrollTop = box.scrollHeight;
+    showToast("Reply sent. The customer is e-mailed.");
+  } catch (error) { showToast(error.message || "Could not send the reply."); }
+}
+
+function renderDiasporaMessages() {
+  const data = state.dmThreads;
+  if (!data) { content.innerHTML = `<div class="panel">${emptyState("Loading", "", { iconName: "mail", compact: true })}</div>`; return; }
+  const rows = data.rows || [];
+  const list = rows.map((row) => `<button type="button" class="dm-thread-row${String(state.dmSelected) === String(row.id) ? " is-active" : ""}" data-action="dm-open" data-id="${row.id}">
+      <span class="dm-name">${escapeHtml(row.name)}${row.verification_status === "verified" ? ` <span class="badge-verified" title="Identity verified">${icon("check")}</span>` : ""}${row.unread ? `<span class="dm-unread">${row.unread}</span>` : ""}</span>
+      <span class="dm-last">${row.last_from === "staff" ? "You: " : ""}${escapeHtml(String(row.last_body || "").slice(0, 80))}</span>
+      <span class="dm-when">${escapeHtml([row.country, row.last_at ? formatDateTime(row.last_at, true) : ""].filter(Boolean).join(" · "))}</span></button>`).join("");
+  const conv = state.dmConversation;
+  const thread = !state.dmSelected ? `<div class="dm-empty">${emptyState("Pick a conversation", "Customers' messages appear on the left. Open one to read it and reply.", { iconName: "mail", compact: true })}</div>`
+    : !conv ? `<div class="dm-empty">${emptyState("Loading", "", { iconName: "mail", compact: true })}</div>`
+    : `<div class="dm-head"><button type="button" class="btn btn-small btn-ghost dm-back" data-action="dm-back">Back</button><strong>${escapeHtml(conv.client.name)}</strong><span class="muted">${escapeHtml(conv.client.country || "")}</span></div>
+       <div class="dm-thread" id="dm-thread">${(conv.messages || []).map((m) => `<div class="dm-msg ${m.sender === "staff" ? "is-staff" : "is-customer"}"><div class="dm-bubble">${escapeHtml(m.body).replace(/\n/g, "<br>")}</div><span class="dm-meta">${escapeHtml(m.sender === "staff" ? (m.staff_name || "Diaspora Desk") : conv.client.name)} · ${escapeHtml(formatDateTime(m.created_at, true))}</span></div>`).join("") || `<p class="muted">No messages yet.</p>`}</div>
+       ${data.can_reply ? `<div class="dm-compose"><textarea id="dm-reply" rows="3" maxlength="2000" placeholder="Write your reply. The customer sees it in their portal and gets an e-mail."></textarea><button type="button" class="btn btn-primary" data-action="dm-send">Send reply</button></div>` : `<p class="muted">You can read these messages. Replies are sent by the Diaspora Desk.</p>`}`;
+  content.innerHTML = `<div class="page-tip">${icon("info")}<span>Customers write to the Diaspora Desk from the <strong>Messages</strong> tab of their portal. Opening a conversation marks it read; your reply is e-mailed to the customer.</span></div>
+    ${data.error ? `<div class="panel">${escapeHtml(data.error)}</div>` : rows.length || state.dmSelected ? `<div class="dm${state.dmSelected ? " has-selection" : ""}"><div class="dm-list">${list}</div><div class="dm-pane">${thread}</div></div>` : `<div class="panel">${emptyState("No messages yet", "When a diaspora customer writes from the portal, the conversation appears here.", { iconName: "mail", compact: true })}</div>`}`;
+}
 
 async function kycAction(clientId, kind) {
   const texts = {
@@ -7172,6 +7240,9 @@ document.addEventListener("click", async (event) => {
   if (action === "request-stage") { state.requestStage = target.dataset.stage || ""; render(); }
   if (action === "request-segment") { state.requestSegment = target.dataset.segment || ""; state.requestStage = ""; render(); }
   if (action === "client-segment") { state.clientSegment = target.dataset.segment || ""; render(); }
+  if (action === "dm-open") openDiasporaConversation(id);
+  if (action === "dm-send") sendDiasporaMessage();
+  if (action === "dm-back") { state.dmSelected = null; state.dmConversation = null; render(); }
   if (action === "kyc") kycAction(id, target.dataset.kyc);
   if (action === "kyc-doc") openKycDocument(id, target.dataset.doc || null);
   if (action === "kyc-zoom") target.classList.toggle("is-zoomed");

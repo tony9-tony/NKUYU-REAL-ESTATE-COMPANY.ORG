@@ -95,7 +95,7 @@ import { templateTextFromUpload } from "../contracts/docxText.js";
 import { generateFromWordTemplate, templateFileUnknownPlaceholders, templateWordFile } from "../contracts/docxFill.js";
 import { clearContractSignatureDocument, contractSignature, signContractDocument } from "../contracts/signature.js";
 import { docxToPreview } from "../contracts/docxPreview.js";
-import { announceWrites, liveStream } from "../live.js";
+import { announceWrites, broadcastChange, liveStream } from "../live.js";
 import { RENT_STATUSES, SALE_STATUSES, categoryStatusesFrom, overallStatus } from "../models/propertyStatus.js";
 
 const router = Router();
@@ -2592,6 +2592,47 @@ router.get("/diaspora/verifications/:id/documents/:docId", route(async (req, res
   if (!fullPath) throw new HttpError(404, "Document file not found");
   await audit(req, "kyc_document_viewed", "client", doc.client_id, { document_id: doc.id });
   return sendStoredFile(res, fullPath, doc.mime_type || null, doc.original_filename || doc.stored_name, false);
+}));
+// ---- Messages between diaspora customers and the Diaspora Desk -----------------
+router.get("/diaspora/messages", route(async (req, res) => {
+  const role = await verificationRole(req);
+  const rows = (await query(
+    `SELECT c.id, c.name, c.country, c.verification_status,
+            (SELECT body FROM customer_messages m WHERE m.client_id=c.id ORDER BY m.id DESC LIMIT 1) AS last_body,
+            (SELECT sender FROM customer_messages m WHERE m.client_id=c.id ORDER BY m.id DESC LIMIT 1) AS last_from,
+            (SELECT MAX(created_at) FROM customer_messages m WHERE m.client_id=c.id) AS last_at,
+            (SELECT COUNT(*)::int FROM customer_messages m WHERE m.client_id=c.id AND m.sender='customer' AND m.read_at IS NULL) AS unread
+       FROM clients c WHERE c.organization_id=$1 AND c.is_diaspora=TRUE AND EXISTS (SELECT 1 FROM customer_messages m WHERE m.client_id=c.id)
+      ORDER BY (SELECT MAX(created_at) FROM customer_messages m WHERE m.client_id=c.id) DESC LIMIT 200`, [await organizationId()])).rows;
+  res.json({ rows, can_reply: role.desk || role.legal });
+}));
+router.get("/diaspora/messages/:id", route(async (req, res) => {
+  await verificationRole(req);
+  const clientId = parseId(req.params.id);
+  const client = requireRecord(await queryOne("SELECT id, name, country, verification_status FROM clients WHERE id=$1 AND is_diaspora=TRUE AND organization_id=$2", [clientId, await organizationId()]), "Customer");
+  const messages = (await query(`SELECT m.id, m.sender, m.body, m.created_at, u.display_name AS staff_name FROM customer_messages m LEFT JOIN users u ON u.id=m.staff_user_id
+    WHERE m.client_id=$1 ORDER BY m.id DESC LIMIT 200`, [clientId])).rows.reverse();
+  await query("UPDATE customer_messages SET read_at=NOW() WHERE client_id=$1 AND sender='customer' AND read_at IS NULL", [clientId]);
+  res.json({ client, messages });
+}));
+router.post("/diaspora/messages/:id", route(async (req, res) => {
+  const role = await verificationRole(req);
+  if (!role.desk && !role.legal) throw new HttpError(403, "Only the Diaspora Desk or Legal can reply to customers.");
+  const clientId = parseId(req.params.id);
+  const client = requireRecord(await queryOne("SELECT id, name, email FROM clients WHERE id=$1 AND is_diaspora=TRUE AND organization_id=$2", [clientId, await organizationId()]), "Customer");
+  const body = String(req.body?.body || "").replace(/\r\n/g, "\n").trim();
+  if (!body) throw new HttpError(400, "Write the reply first.");
+  if (body.length > 2000) throw new HttpError(400, "Please keep the reply under 2000 characters.");
+  const row = (await query("INSERT INTO customer_messages (client_id, sender, staff_user_id, body) VALUES ($1,'staff',$2,$3) RETURNING id, created_at", [clientId, req.user.id, body])).rows[0];
+  // The customer's own messages up to now count as answered, so the desk's unread count falls.
+  await query("UPDATE customer_messages SET read_at=COALESCE(read_at, NOW()) WHERE client_id=$1 AND sender='customer'", [clientId]);
+  broadcastChange("diaspora");
+  if (mailConfigured() && client.email) {
+    const site = String(process.env.PUBLIC_SITE_URL || "").trim().replace(/\/+$/, "");
+    sendMail({ to: client.email, subject: "MKUYU: you have a new message",
+      text: `Dear ${client.name},\n\nThe Diaspora Desk replied to you in your portal.\n\n${site ? `${site}/login.html` : "Website → Diaspora login"}  → Messages\n\nMKUYU Africa`, kind: "message" }).catch(() => {});
+  }
+  res.status(201).json({ ok: true, id: row.id });
 }));
 router.post("/diaspora/verifications/:id", route(async (req, res) => {
   const role = await verificationRole(req);
