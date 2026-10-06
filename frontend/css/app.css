@@ -2278,6 +2278,8 @@ label.btn { cursor: pointer; }
 /* Diaspora verification: identity documents opened inside the app */
 .kyc-missing { display: inline-flex; align-items: center; gap: 6px; color: #ff9b94; font-size: 13px; font-weight: 600; }
 /* Identity document viewer: a dark overlay with the page shown upright, like a sheet of paper. */
+/* Behind the document viewer the blurred page is white, so the dark sheet stands out. */
+.modal-backdrop:has(.modal-kycv) { background: rgba(255, 255, 255, 0.82); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
 .modal.modal-kycv { width: min(1080px, 100%); height: min(94vh, 1000px); display: flex; flex-direction: column; padding: 0; overflow: hidden; background: #1c1a18; color: #ececec; border: 1px solid #34302c; }
 .kycv-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 16px; border-bottom: 1px solid #34302c; }
 .kycv-title { display: grid; min-width: 0; }
