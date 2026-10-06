@@ -6568,9 +6568,49 @@ async function showContractHistory(id) {
   }
 }
 
+/**
+ * Opens a stored file (a document, a signed contract, a receipt) inside the
+ * same overlay used for identity documents: a white sheet shown upright on a
+ * dark stage, with zoom, Download and Close. Nothing leaves the page.
+ */
+async function openFileOverlay(path, { title = "", subtitle = "" } = {}) {
+  const response = await fetch(`${API_ROOT}${path}`, { headers: { ...CSRF_HEADERS }, credentials: "same-origin" });
+  if (response.status === 401) { endSession("Your session has expired. Please sign in again."); throw new Error("session expired"); }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || "Unable to open file");
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const fromHeader = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)?.[1];
+  const filename = (() => { try { return decodeURIComponent(fromHeader || ""); } catch { return fromHeader || ""; } })() || title || "document";
+  if (kycViewerUrl) URL.revokeObjectURL(kycViewerUrl);
+  kycViewerUrl = URL.createObjectURL(blob);
+  kycViewerKind = { type: blob.type || "", label: title || filename, who: "" };
+  state.kycZoom = null;
+  state.fileOverlay = { path, filename };
+  modal.dataset.type = "file-overlay";
+  modal.classList.remove("modal-document");
+  modal.classList.add("modal-wide", "modal-kycv");
+  modal.innerHTML = `<div class="kycv-bar">
+      <div class="kycv-title"><strong>${escapeHtml(title || filename)}</strong>${subtitle ? `<span>${escapeHtml(subtitle)}</span>` : ""}</div>
+      <div class="kycv-tools" role="group" aria-label="View">
+        <button type="button" class="kycv-btn" data-action="kyc-zoom-out" aria-label="Zoom out">−</button>
+        <span class="kycv-zoom" id="kycv-zoom" aria-live="polite">Fit</span>
+        <button type="button" class="kycv-btn" data-action="kyc-zoom-in" aria-label="Zoom in">+</button>
+        <button type="button" class="kycv-btn kycv-text" data-action="kyc-zoom-fit">Fit</button>
+        <button type="button" class="kycv-btn kycv-text" data-action="file-overlay-download">Download</button>
+        <button type="button" class="kycv-btn kycv-close" data-action="close-modal" aria-label="Close">${closeIcon()}</button>
+      </div></div>
+    <div class="kycv-body" id="kyc-viewer"></div>
+    <div class="kycv-foot"><span class="kycv-file">${escapeHtml(filename)}</span><div class="kycv-actions"><button type="button" class="btn" data-action="close-modal">Close</button></div></div>`;
+  modalBackdrop.hidden = false;
+  drawKycPage();
+}
+
 async function openDocumentFile(id) {
   try {
-    await openFileInTab(`/documents/${id}/file`);
+    await openFileOverlay(`/documents/${id}/file`);
   } catch (error) {
     showToast(error.message || "Unable to open document.");
   }
@@ -7079,7 +7119,7 @@ document.addEventListener("click", async (event) => {
   if (action === "statement-upload") { closeModal(); openStatementUpload(); }
   if (action === "statement-save") await saveStatementRows(target.dataset.approve === "1");
   if (action === "signed-copy") { closeModal(); openSignedCopyForm(id); }
-  if (action === "open-signed-contract") openFileInTab(`/contracts/${id}/signed-document`).catch((error) => showToast(error.message || "Unable to open the signed contract."));
+  if (action === "open-signed-contract") openFileOverlay(`/contracts/${id}/signed-document`, { title: "Signed contract" }).catch((error) => showToast(error.message || "Unable to open the signed contract."));
   if (action === "edit-contract-from-view") {
     // Resolved by id: the contract being viewed may not be on the current page.
     closeModal();
@@ -7138,7 +7178,7 @@ document.addEventListener("click", async (event) => {
     const current = Number(state.pages[kind]?.page || 1);
     loadList(kind, { page: action === "page-next" ? current + 1 : Math.max(1, current - 1) });
   }
-  if (action === "open-receipt") openFileInTab(`/payments/${id}/receipt`).catch((error) => showToast(error.message));
+  if (action === "open-receipt") openFileOverlay(`/payments/${id}/receipt`, { title: "Receipt" }).catch((error) => showToast(error.message));
   if (action === "dismiss-reminder") dismissReminder(id);
   if (action === "remove-photo") removePropertyPhoto(target.dataset.property, target.dataset.image);
   // Small-screen navigation. The button existed in the markup with no handler,
@@ -7273,6 +7313,7 @@ document.addEventListener("click", async (event) => {
   if (action === "kyc") kycAction(id, target.dataset.kyc);
   if (action === "kyc-doc") openKycDocument(id, target.dataset.doc || null);
   if (action === "kyc-zoom-in" || action === "kyc-zoom-out") { state.kycZoom = Math.min(300, Math.max(50, (state.kycZoom || 100) + (action === "kyc-zoom-in" ? 25 : -25))); drawKycPage(); }
+  if (action === "file-overlay-download" && state.fileOverlay) downloadFile(state.fileOverlay.path + (state.fileOverlay.path.includes("?") ? "&" : "?") + "download=1", state.fileOverlay.filename).catch((error) => showToast(error.message || "Download failed."));
   if (action === "kyc-zoom-fit") { state.kycZoom = null; drawKycPage(); }
   if (action === "kyc-doc-download") downloadFile(`/diaspora/verifications/${id}/documents/${target.dataset.doc}`, target.dataset.filename).catch((error) => showToast(error.message || "Download failed"));
   if (action === "verification-filter") { state.verificationFilter = target.dataset.filterKey || "todo"; render(); }
