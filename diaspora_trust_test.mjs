@@ -140,6 +140,19 @@ try {
     const h = await staff(`/diaspora/verifications/${cid}/history`, { token: desk });
     assert.ok(h.payload.some((e) => e.action === "expiry_reminder"));
   });
+  await test("the Diaspora report returns the Desk's numbers and is closed to other teams", async () => {
+    for (const days of [7, 30, 90]) {
+      const r = await staff(`/diaspora/report?days=${days}`, { token: desk });
+      assert.equal(r.status, 200, JSON.stringify(r.payload));
+      assert.equal(r.payload.days, days);
+      assert.ok(r.payload.customers.reduce((s, x) => s + x.n, 0) >= 1);
+      assert.ok(r.payload.requests.reduce((s, x) => s + x.n, 0) >= 1, "the request made earlier is counted");
+      assert.ok(r.payload.expiring >= 1, "the passport about to expire is counted");
+      assert.equal(typeof r.payload.calls.total, "number");
+    }
+    assert.equal((await staff("/diaspora/report", { token: legal })).status, 200);
+    assert.equal((await staff("/diaspora/report", { token: sales })).status, 403);
+  });
 } finally {
   await server.stop();
   await closeDatabase();

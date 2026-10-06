@@ -2834,6 +2834,50 @@ router.post("/diaspora/requests/:id", route(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ---- Diaspora report: numbers for the Desk, Legal and the MD ------------------------
+router.get("/diaspora/report", route(async (req, res) => {
+  await verificationRole(req);
+  const org = await organizationId();
+  const days = [7, 30, 90].includes(Number(req.query.days)) ? Number(req.query.days) : 30;
+  const one = async (sql, params = []) => (await queryOne(sql, params)) || {};
+  const customers = (await query(
+    `SELECT COALESCE(verification_status,'new') AS status, COUNT(*)::int AS n FROM clients WHERE is_diaspora=TRUE GROUP BY 1`)).rows;
+  const joined = await one(`SELECT COUNT(*)::int AS n FROM clients WHERE is_diaspora=TRUE AND created_at >= NOW() - ($1 || ' days')::interval`, [days]);
+  const requests = (await query(
+    `SELECT l.status, COUNT(*)::int AS n FROM leads l JOIN clients c ON c.id=l.client_id AND c.is_diaspora=TRUE
+      WHERE l.source='diaspora-portal' AND l.organization_id=$1 AND l.created_at >= NOW() - ($2 || ' days')::interval GROUP BY 1`, [org, days])).rows;
+  const response = await one(
+    `SELECT COUNT(*)::int AS answered,
+            ROUND(AVG(EXTRACT(EPOCH FROM (r.at - m.created_at)) / 60))::int AS avg_minutes,
+            ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (r.at - m.created_at)) / 60))::numeric)::int AS median_minutes
+       FROM customer_messages m
+       JOIN LATERAL (SELECT MIN(s.created_at) AS at FROM customer_messages s WHERE s.client_id=m.client_id AND s.sender='staff' AND s.id > m.id) r ON r.at IS NOT NULL
+      WHERE m.sender='customer' AND m.deleted_at IS NULL AND m.created_at >= NOW() - ($1 || ' days')::interval
+        AND NOT EXISTS (SELECT 1 FROM customer_messages p WHERE p.client_id=m.client_id AND p.sender='customer' AND p.id < m.id AND p.id > COALESCE((SELECT MAX(x.id) FROM customer_messages x WHERE x.client_id=m.client_id AND x.sender='staff' AND x.id < m.id), 0))`, [days]);
+  const waiting = await one(
+    `SELECT COUNT(*)::int AS n FROM (SELECT DISTINCT ON (client_id) client_id, sender FROM customer_messages WHERE deleted_at IS NULL ORDER BY client_id, id DESC) t
+       JOIN clients c ON c.id=t.client_id AND c.is_diaspora=TRUE WHERE t.sender='customer'`);
+  const calls = await one(
+    `SELECT COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE answered_at IS NOT NULL)::int AS answered,
+            COUNT(*) FILTER (WHERE status='missed')::int AS missed,
+            COUNT(*) FILTER (WHERE status='declined')::int AS declined,
+            COALESCE(ROUND(AVG(EXTRACT(EPOCH FROM (ended_at - answered_at)) / 60) FILTER (WHERE answered_at IS NOT NULL AND ended_at IS NOT NULL))::int, 0) AS avg_minutes
+       FROM video_calls WHERE created_at >= NOW() - ($1 || ' days')::interval`, [days]);
+  const expiring = await one(
+    `SELECT COUNT(*)::int AS n FROM documents d JOIN clients c ON c.id=d.client_id AND c.is_diaspora=TRUE
+      WHERE d.category LIKE 'kyc\\_%' AND d.status <> 'superseded' AND d.expires_on IS NOT NULL AND d.expires_on <= CURRENT_DATE + 30`);
+  const transfers = (await query(
+    `SELECT COALESCE(ct.transfer_stage,'not_started') AS stage, COUNT(*)::int AS n FROM contracts ct JOIN clients c ON c.id=ct.client_id AND c.is_diaspora=TRUE
+      WHERE ct.organization_id=$1 AND ct.status NOT IN ('cancelled','draft') GROUP BY 1`, [org])).rows;
+  res.json({
+    days, customers, joined: joined.n || 0, requests, waiting: waiting.n || 0,
+    response: { answered: response.answered || 0, avg_minutes: response.avg_minutes ?? null, median_minutes: response.median_minutes ?? null },
+    calls: { total: calls.total || 0, answered: calls.answered || 0, missed: calls.missed || 0, declined: calls.declined || 0, avg_minutes: calls.avg_minutes || 0 },
+    expiring: expiring.n || 0, transfers,
+  });
+}));
+
 // ---- Verification history ------------------------------------------------------
 const EVENT_TEXT = { documents_submitted: "Documents sent", verify: "Verified", reject: "Sent back", revoke: "Verification removed", confirm_citizenship: "Nationality confirmed by Legal", desk_ok: "Checked by the Desk", expiry_reminder: "Reminder: a document is about to expire" };
 router.get("/diaspora/verifications/:id/history", route(async (req, res) => {

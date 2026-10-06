@@ -270,6 +270,7 @@ const viewMeta = {
   clients: ["Clients", "People and companies, from first enquiry to signed agreement"],
   verification: ["Diaspora verification", "Diaspora sign-ups prove who they are: the Diaspora Desk verifies them, Legal then confirms nationality"],
   "diaspora-requests": ["Diaspora requests", "Properties diaspora customers asked to buy or rent from their portal, for the Diaspora Desk to answer"],
+  "diaspora-report": ["Diaspora report", "How the Diaspora Desk is doing: customers, requests, replies, calls and transfers"],
   "diaspora-legal": ["Property legal", "Legal records each property's title and where every ownership transfer stands; diaspora customers read it in their portal"],
   "diaspora-messages": ["Diaspora messages", "What diaspora customers write to the Diaspora Desk from their portal, and your replies"],
   contracts: ["Contracts", "Every agreement and where it sits in the approval workflow"],
@@ -1080,6 +1081,7 @@ const NAV_ITEMS = [
   { view: "diaspora-requests", label: "Diaspora requests", icon: "inbox", group: "Business", diasporaVerification: true },
   { view: "diaspora-messages", label: "Diaspora messages", icon: "mail", group: "Business", diasporaVerification: true },
   { view: "diaspora-legal", label: "Property legal", icon: "shield", group: "Business", diasporaVerification: true },
+  { view: "diaspora-report", label: "Diaspora report", icon: "chart", group: "Business", diasporaVerification: true },
   // Leads live under "Requests & leads" (a tab there), not as a second menu entry.
   { view: "leads", label: "Leads", icon: "spark", module: "leads", permission: "view", group: "Business", mergedInto: "requests" },
   { view: "appointments", label: "Appointments", icon: "calendar", module: "appointments", permission: "view", group: "Business" },
@@ -4471,6 +4473,10 @@ function render() {
     renderDiasporaRequests();
     if (!state.drRequested) loadDiasporaRequests();
   }
+  if (state.view === "diaspora-report") {
+    renderDiasporaReport();
+    if (!state.reportRequested || Date.now() - (state.reportAt || 0) > 15000) loadDiasporaReport();
+  }
   if (state.view === "diaspora-legal") {
     renderDiasporaLegal();
     if (!state.legalRequested) loadDiasporaLegal();
@@ -5968,6 +5974,46 @@ function renderDiasporaRequests() {
   content.innerHTML = `<div class="page-tip">${icon("info")}<span>Each time a verified customer presses <strong>Request</strong> in their portal it appears here, and the Desk is e-mailed. Press <strong>Message</strong> to answer in their portal chat.</span></div>
     <div class="toolbar"><div class="toolbar-filters"><div class="segmented" role="group" aria-label="Requests">${tabs.map(([key, label]) => `<button class="seg-btn${filter === key ? " active" : ""}" data-action="dr-filter" data-filter-key="${key}">${label} (${data.rows.filter((r) => matches(r, key)).length})</button>`).join("")}</div></div></div>
     ${rows.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Customer</th><th>Request</th><th>Status</th><th class="align-right"></th></tr></thead><tbody>${body}</tbody></table></div>` : `<div class="panel">${emptyState("No requests here", "When a customer asks for a property from the portal, it appears here.", { iconName: "inbox", compact: true })}</div>`}`;
+}
+
+/* --------------------------------------------------------------------------
+   Diaspora report: plain numbers for the Desk, Legal and the MD.
+   -------------------------------------------------------------------------- */
+async function loadDiasporaReport() {
+  state.reportRequested = true; state.reportAt = Date.now();
+  try { state.report = await api(`/diaspora/report?days=${state.reportDays || 30}`); }
+  catch (error) { state.report = { error: error.message || "Unable to load." }; }
+  if (state.view === "diaspora-report" && modalBackdrop.hidden) renderDiasporaReport();
+}
+function renderDiasporaReport() {
+  const r = state.report;
+  if (!r) { content.innerHTML = `<div class="panel">${emptyState("Loading", "", { iconName: "chart", compact: true })}</div>`; return; }
+  if (r.error) { content.innerHTML = `<div class="panel">${escapeHtml(r.error)}</div>`; return; }
+  const n = (list, key, field = "status") => Number((list.find((x) => x[field] === key) || {}).n || 0);
+  const total = r.customers.reduce((s, x) => s + x.n, 0);
+  const verified = n(r.customers, "verified");
+  const reqTotal = r.requests.reduce((s, x) => s + x.n, 0);
+  const mins = (v) => v === null || v === undefined ? "No replies yet" : v < 60 ? `${v} min` : v < 1440 ? `${(v / 60).toFixed(1)} h` : `${(v / 1440).toFixed(1)} days`;
+  const tile = (label, value, iconName, tone, foot) => `<article class="stat-tile"><div class="stat-icon ${tone}">${icon(iconName)}</div><div class="stat-copy"><div class="stat-label">${escapeHtml(label)}</div><div class="stat-value">${value}</div>${foot ? `<div class="stat-foot">${escapeHtml(foot)}</div>` : ""}</div></article>`;
+  const days = r.days;
+  const STAGES = { not_started: "Not started" };
+  const stageText = (key) => STAGES[key] || String(key || "").replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+  const transferRows = r.transfers.length ? r.transfers.map((t) => `<tr><td>${escapeHtml(stageText(t.stage))}</td><td class="align-right">${t.n}</td></tr>`).join("") : `<tr><td colspan="2" class="cell-sub">No agreements with diaspora customers yet.</td></tr>`;
+  const reqRows = r.requests.length ? r.requests.map((t) => `<tr><td>${escapeHtml(stageText(t.status))}</td><td class="align-right">${t.n}</td></tr>`).join("") : `<tr><td colspan="2" class="cell-sub">No requests in this period.</td></tr>`;
+  content.innerHTML = `<div class="toolbar"><div class="toolbar-filters"><div class="segmented" role="group" aria-label="Period">${[[7, "7 days"], [30, "30 days"], [90, "90 days"]].map(([d, label]) => `<button class="seg-btn${days === d ? " active" : ""}" data-action="report-days" data-days="${d}">${label}</button>`).join("")}</div></div></div>
+    <div class="stat-grid">
+      ${tile("Diaspora customers", total, "users", "blue", `${verified} verified · ${r.joined} joined in ${days} days`)}
+      ${tile("Waiting for verification", total - verified, "shield", total - verified ? "amber" : "", "Not verified yet")}
+      ${tile("Requests", reqTotal, "inbox", "blue", `In the last ${days} days`)}
+      ${tile("Chats waiting for a reply", r.waiting, "mail", r.waiting ? "amber" : "", "Customer wrote last")}
+      ${tile("Typical reply time", escapeHtml(mins(r.response.median_minutes)), "clock", "blue", r.response.answered ? `Average ${mins(r.response.avg_minutes)} · ${r.response.answered} answered` : "")}
+      ${tile("Video calls", r.calls.total, "phone", "blue", `${r.calls.answered} answered · ${r.calls.missed} missed · ${r.calls.declined} declined${r.calls.avg_minutes ? ` · avg ${r.calls.avg_minutes} min` : ""}`)}
+      ${tile("Documents expiring soon", r.expiring, "folder", r.expiring ? "amber" : "", "Within 30 days or already expired")}
+    </div>
+    <div class="two-col" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-top:16px">
+      <div class="table-wrap"><table class="data-table"><thead><tr><th>Requests by status (${days} days)</th><th class="align-right">Number</th></tr></thead><tbody>${reqRows}</tbody></table></div>
+      <div class="table-wrap"><table class="data-table"><thead><tr><th>Ownership transfers</th><th class="align-right">Agreements</th></tr></thead><tbody>${transferRows}</tbody></table></div>
+    </div>`;
 }
 
 /* --------------------------------------------------------------------------
@@ -7815,6 +7861,7 @@ document.addEventListener("click", async (event) => {
   if (action === "kyc-history") openKycHistory(id);
   if (action === "dr-message") { state.dmSelected = Number(target.dataset.client); state.dmConversation = null; state.dmRequested = false; state.view = "diaspora-messages"; updateNavigation(); render(); openDiasporaConversation(state.dmSelected); }
   if (action === "dr-status") setDiasporaRequestStatus(id, target.dataset.status);
+  if (action === "report-days") { state.reportDays = Number(target.dataset.days); loadDiasporaReport(); }
   if (action === "dr-filter") { state.drFilter = target.dataset.filterKey; render(); }
   if (action === "legal-filter") { state.legalFilter = target.dataset.filterKey; render(); }
   if (action === "legal-edit") openLegalModal(id);
