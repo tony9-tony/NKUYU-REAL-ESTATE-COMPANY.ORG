@@ -558,7 +558,7 @@ router.get("/portal", requireCustomer, route(async (req, res) => {
 // Diaspora and already linked to the client.
 const SERVICES = new Set(["buy", "rent"]);
 const CONTACT = new Set(["email", "whatsapp", "phone"]);
-const REQUEST_TEXT = { new: "Received · our sales team will contact you", handed_off: "Our customer team is contacting you", contacted: "Contacted", appointment: "Meeting / viewing arranged", converted: "Moving to an agreement", lost: "Closed", closed: "Closed" };
+const REQUEST_TEXT = { new: "Received · our Diaspora Desk will contact you", handed_off: "Our customer team is contacting you", contacted: "Contacted", appointment: "Meeting / viewing arranged", converted: "Moving to an agreement", lost: "Closed", closed: "Closed" };
 
 router.post("/preferences", requireCustomer, route(async (req, res) => {
   requireHeader(req);
