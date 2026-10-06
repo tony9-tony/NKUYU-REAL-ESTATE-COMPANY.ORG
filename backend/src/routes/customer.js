@@ -543,6 +543,12 @@ function verificationState(customer) {
 
 router.get("/portal", requireCustomer, route(async (req, res) => {
   const verification = verificationState(req.customer);
+  // Until verified, say exactly which documents are still missing, on every page of the portal.
+  if (!verification.verified) {
+    const have = new Set((await query(`SELECT category FROM documents WHERE client_id=$1 AND category LIKE 'kyc_%' AND status <> 'superseded'`, [req.customer.client_id])).rows.map((d) => d.category.slice(4)));
+    verification.required = [["passport", true], ["residence", true], ["selfie", false]].map(([kind, required]) => ({ kind, label: DOC_KINDS[kind], required, have: have.has(kind) }));
+    verification.needs_upload = ["unverified", "rejected"].includes(verification.status) || verification.required.some((d) => d.required && !d.have);
+  }
   // Contracts, money and documents only after MKUYU has verified who they are.
   const contracts = verification.verified ? await ownContracts(req.customer.client_id) : [];
   const services = { buy: [], rent: [], sell: [] };
