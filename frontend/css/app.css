@@ -2427,3 +2427,12 @@ label.btn { cursor: pointer; }
 #stages-box { padding: 0 8px; }
 .stages-form { padding: 0; }
 .stages-form .stages-top label { text-align: left; }
+
+/* Video call strip */
+.dm-call { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 8px 14px; background: #1d2024; color: #fff; }
+.dm-call[hidden] { display: none; }
+.dm-call-text.is-ringing { animation: dm-ring 1.2s infinite; }
+@keyframes dm-ring { 50% { opacity: .55; } }
+.dm-call-actions { display: inline-flex; gap: 6px; }
+.dm-videocall { margin-left: auto; }
+.dm-videocall + .dm-wa { margin-left: 8px; }

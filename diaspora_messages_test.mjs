@@ -51,6 +51,7 @@ try {
   const tag = `DM${Date.now()}`;
   const mail = (who) => `${who}.${tag.toLowerCase()}@example.com`;
   const desk = await signIn("diaspora@demo.mkuyu.local");
+  const sales = await signIn("sales@demo.mkuyu.local");
   const deskB = await signIn("diaspora.manager@demo.mkuyu.local");
   const r0 = await signUp({ name: "Neema Joseph", email: mail("neema"), phone: "+44 7700 900123", residence: "GB", nationality: "TZ" });
   assert.equal(r0.status, 200, JSON.stringify(r0.payload));
@@ -128,6 +129,25 @@ try {
     const r = await customer("/messages", { cookie, method: "POST", body: { body: "old one" } });
     await query("UPDATE customer_messages SET created_at = NOW() - INTERVAL '3 days' WHERE id=$1", [r.payload.message.id]);
     assert.equal((await customer(`/messages/${r.payload.message.id}/delete`, { cookie, method: "POST", body: { scope: "all" } })).status, 409);
+  });
+  await test("video call: the desk rings, the customer answers and ends; the customer can ring too", async () => {
+    const start = await staff(`/diaspora/calls/${cid}`, { token: desk, method: "POST", body: {} });
+    assert.equal(start.status, 201, JSON.stringify(start.payload));
+    assert.equal(start.payload.call.status, "ringing"); assert.match(start.payload.call.url, /^https:\/\/meet\.jit\.si\/MKUYU-[0-9a-f]{24}#/);
+    const seen = (await customer(`/messages/poll?after=0&peek=1`, { cookie })).payload.call;
+    assert.equal(seen.status, "ringing"); assert.equal(seen.mine, false);
+    assert.equal(seen.url.split("#")[0], start.payload.call.url.split("#")[0], "the same room");
+    assert.equal((await customer(`/calls/${seen.id}/answer`, { cookie, method: "POST", body: {} })).status, 200);
+    assert.equal((await conv()).payload.call.status, "active");
+    assert.equal((await customer(`/calls/${seen.id}/end`, { cookie, method: "POST", body: {} })).status, 200);
+    assert.equal((await conv()).payload.call, null);
+    const up = await customer("/calls", { cookie, method: "POST", body: {} });
+    assert.equal(up.status, 201, JSON.stringify(up.payload)); assert.equal(up.payload.call.mine, true);
+    assert.equal((await staff("/diaspora/messages", { token: desk })).payload.rows.find((r) => r.id === cid).calling, true);
+    const c = (await conv()).payload.call;
+    assert.equal((await staff(`/diaspora/calls/${c.id}/answer`, { token: desk, method: "POST", body: {} })).status, 200);
+    assert.equal((await staff(`/diaspora/calls/${c.id}/end`, { token: desk, method: "POST", body: {} })).status, 200);
+    assert.equal((await staff(`/diaspora/calls/${cid}`, { token: sales, method: "POST", body: {} })).status, 403);
   });
 } finally {
   await server.stop();

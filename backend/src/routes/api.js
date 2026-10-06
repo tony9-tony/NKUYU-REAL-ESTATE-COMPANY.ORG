@@ -96,6 +96,7 @@ import { generateFromWordTemplate, templateFileUnknownPlaceholders, templateWord
 import { clearContractSignatureDocument, contractSignature, signContractDocument } from "../contracts/signature.js";
 import { docxToPreview } from "../contracts/docxPreview.js";
 import { announceWrites, broadcastChange, liveStream } from "../live.js";
+import { callView, currentCall, newRoom } from "../calls.js";
 import { customersOf, notifyCustomer, recordVerificationEvent } from "../notify/diasporaNotices.js";
 import { clearTyping, isTyping, REACTIONS, setTyping, DELETE_ALL_WINDOW_MS, EDIT_WINDOW_MS } from "../typing.js";
 import { RENT_STATUSES, SALE_STATUSES, categoryStatusesFrom, overallStatus } from "../models/propertyStatus.js";
@@ -2603,7 +2604,8 @@ router.get("/diaspora/messages", route(async (req, res) => {
             (SELECT CASE WHEN m.deleted_at IS NOT NULL THEN 'This message was deleted' ELSE m.body END FROM customer_messages m WHERE m.client_id=c.id ORDER BY m.id DESC LIMIT 1) AS last_body,
             (SELECT sender FROM customer_messages m WHERE m.client_id=c.id ORDER BY m.id DESC LIMIT 1) AS last_from,
             (SELECT MAX(created_at) FROM customer_messages m WHERE m.client_id=c.id) AS last_at,
-            (SELECT COUNT(*)::int FROM customer_messages m WHERE m.client_id=c.id AND m.sender='customer' AND m.read_at IS NULL) AS unread
+            (SELECT COUNT(*)::int FROM customer_messages m WHERE m.client_id=c.id AND m.sender='customer' AND m.read_at IS NULL) AS unread,
+            EXISTS (SELECT 1 FROM video_calls v WHERE v.client_id=c.id AND v.started_by='customer' AND v.status='ringing' AND v.created_at > NOW() - INTERVAL '60 seconds') AS calling
        FROM clients c WHERE c.organization_id=$1 AND c.is_diaspora=TRUE AND EXISTS (SELECT 1 FROM customer_messages m WHERE m.client_id=c.id)
       ORDER BY (SELECT MAX(created_at) FROM customer_messages m WHERE m.client_id=c.id) DESC LIMIT 200`, [await organizationId()])).rows;
   await query("UPDATE customer_messages SET delivered_at=NOW() WHERE sender='customer' AND delivered_at IS NULL AND client_id = ANY($1::int[])", [rows.map((r) => r.id)]);
@@ -2628,7 +2630,43 @@ router.get("/diaspora/messages/:id", route(async (req, res) => {
     reactions: { me: m.reaction_staff || null, them: m.reaction_customer || null },
     reply: m.reply_to && m.reply_body ? { id: m.reply_to, from: m.reply_sender, name: m.reply_sender === "staff" ? (m.reply_staff_name || "Diaspora Desk") : client.name, body: m.reply_deleted ? "" : String(m.reply_body).slice(0, 140), deleted: Boolean(m.reply_deleted) } : null,
   }));
-  res.json({ client, messages, typing: isTyping(clientId, "customer"), reactions: REACTIONS });
+  const call = callView(await currentCall(clientId), "staff", { desk: req.user.display_name || "Diaspora Desk", customer: client.name });
+  res.json({ client, messages, typing: isTyping(clientId, "customer"), reactions: REACTIONS, call });
+}));
+
+// ---- Video calls (Jitsi room per call) ---------------------------------------------
+router.post("/diaspora/calls/:id", route(async (req, res) => {
+  const role = await verificationRole(req);
+  if (!role.desk && !role.legal) throw new HttpError(403, "Only the Diaspora Desk or Legal can call customers.");
+  const clientId = parseId(req.params.id);
+  const client = requireRecord(await queryOne("SELECT id, name FROM clients WHERE id=$1 AND is_diaspora=TRUE AND organization_id=$2", [clientId, await organizationId()]), "Customer");
+  let call = await currentCall(clientId);
+  if (call && call.started_by === "customer" && call.status === "ringing") {
+    // The customer is already calling: answering it is the same as joining.
+    await query("UPDATE video_calls SET status='active', answered_at=NOW(), staff_user_id=$2 WHERE id=$1", [call.id, req.user.id]);
+  } else if (!call) {
+    await query("INSERT INTO video_calls (client_id, started_by, staff_user_id, room) VALUES ($1,'staff',$2,$3)", [clientId, req.user.id, newRoom()]);
+    await query("INSERT INTO customer_messages (client_id, sender, staff_user_id, body) VALUES ($1,'staff',$2,'📹 Video call: the Diaspora Desk is calling you')", [clientId, req.user.id]);
+    notifyCustomer(clientId, { subject: "the Diaspora Desk is calling you", lines: "Open your portal now and press Join to talk by video. If you miss the call, write to us in Messages.", where: "Messages" });
+  }
+  call = await currentCall(clientId);
+  broadcastChange("diaspora");
+  res.status(201).json({ call: callView(call, "staff", { desk: req.user.display_name || "Diaspora Desk", customer: client.name }) });
+}));
+router.post("/diaspora/calls/:id/answer", route(async (req, res) => {
+  const role = await verificationRole(req);
+  if (!role.desk && !role.legal) throw new HttpError(403, "Only the Diaspora Desk or Legal can answer calls.");
+  const done = await query("UPDATE video_calls SET status='active', answered_at=NOW(), staff_user_id=$2 WHERE id=$1 AND status='ringing' AND started_by='customer' RETURNING id", [parseId(req.params.id), req.user.id]);
+  if (!done.rows.length) throw new HttpError(409, "The call has ended.");
+  broadcastChange("diaspora");
+  res.json({ ok: true });
+}));
+router.post("/diaspora/calls/:id/end", route(async (req, res) => {
+  const role = await verificationRole(req);
+  if (!role.desk && !role.legal) throw new HttpError(403, "Only the Diaspora Desk or Legal can end calls.");
+  await query("UPDATE video_calls SET status=CASE WHEN status='ringing' AND started_by='customer' AND $2 THEN 'declined' WHEN status='ringing' THEN 'missed' ELSE 'ended' END, ended_at=NOW() WHERE id=$1 AND status IN ('ringing','active')", [parseId(req.params.id), req.body?.decline === true]);
+  broadcastChange("diaspora");
+  res.json({ ok: true });
 }));
 router.post("/diaspora/messages/:id/typing", route(async (req, res) => {
   const role = await verificationRole(req);

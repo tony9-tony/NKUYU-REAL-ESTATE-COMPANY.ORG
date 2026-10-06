@@ -17,6 +17,7 @@ import PDFDocument from "pdfkit";
 import { query, queryOne } from "../db.js";
 import { mailConfigured, sendMail } from "../mail.js";
 import { recordVerificationEvent } from "../notify/diasporaNotices.js";
+import { callView, currentCall, newRoom } from "../calls.js";
 import { broadcastChange } from "../live.js";
 import { clearTyping, DELETE_ALL_WINDOW_MS, EDIT_WINDOW_MS, isTyping, REACTIONS, setTyping } from "../typing.js";
 import { receiptCoverage, writeReceiptPdf } from "../payments/notices.js";
@@ -566,6 +567,41 @@ router.post("/preferences", requireCustomer, route(async (req, res) => {
   res.json({ ok: true, notify_email: on });
 }));
 
+
+// ---- Video calls ------------------------------------------------------------------
+router.post("/calls", requireCustomer, route(async (req, res) => {
+  requireHeader(req);
+  if (tooMany(`call:${req.customer.client_id}`, 6, 10 * 60 * 1000)) throw new HttpError(429, "Please wait a little before calling again.");
+  const existing = await currentCall(req.customer.client_id);
+  if (!existing) {
+    await query("INSERT INTO video_calls (client_id, started_by, room) VALUES ($1,'customer',$2)", [req.customer.client_id, newRoom()]);
+    await query("INSERT INTO customer_messages (client_id, sender, body) VALUES ($1,'customer','📹 Video call: I would like to talk')", [req.customer.client_id]);
+    broadcastChange("diaspora");
+    if (mailConfigured()) {
+      query(`SELECT DISTINCT u.email FROM users u JOIN user_departments ud ON ud.user_id=u.id JOIN departments d ON d.id=ud.department_id
+              WHERE d.name='DIASPORA DESK' AND d.active=TRUE AND u.email IS NOT NULL AND u.email <> ''`)
+        .then(({ rows }) => Promise.all(rows.map((r) => sendMail({ to: r.email, subject: `MKUYU: ${req.customer.name} is calling`,
+          text: `${req.customer.name} pressed Video call in the portal and is waiting.\n\nOpen the system → Diaspora messages to join.\n\nMKUYU Africa`, kind: "call" }).catch(() => {}))))
+        .catch(() => {});
+    }
+  }
+  res.status(201).json({ call: callView(await currentCall(req.customer.client_id), "customer", { desk: "Diaspora Desk", customer: req.customer.name }) });
+}));
+router.post("/calls/:id/answer", requireCustomer, route(async (req, res) => {
+  requireHeader(req);
+  const done = await query("UPDATE video_calls SET status='active', answered_at=NOW() WHERE id=$1 AND client_id=$2 AND status='ringing' AND started_by='staff' RETURNING id", [idParam(req.params.id), req.customer.client_id]);
+  if (!done.rows.length) throw new HttpError(409, "The call has ended.");
+  broadcastChange("diaspora");
+  res.json({ ok: true });
+}));
+router.post("/calls/:id/end", requireCustomer, route(async (req, res) => {
+  requireHeader(req);
+  await query("UPDATE video_calls SET status=CASE WHEN status='ringing' AND started_by='staff' AND $3 THEN 'declined' WHEN status='ringing' THEN 'missed' ELSE 'ended' END, ended_at=NOW() WHERE id=$1 AND client_id=$2 AND status IN ('ringing','active')",
+    [idParam(req.params.id), req.customer.client_id, req.body?.decline === true]);
+  broadcastChange("diaspora");
+  res.json({ ok: true });
+}));
+
 router.get("/requests", requireCustomer, route(async (req, res) => {
   const rows = (await query(
     `SELECT l.id, l.service, l.status, l.budget, l.created_at, l.appointment_at, p.id AS property_id, p.name AS property_name, p.location
@@ -801,7 +837,8 @@ router.get("/messages/poll", requireCustomer, route(async (req, res) => {
   // The desk's open page learns at once that its messages were delivered or read.
   if (delivered.rowCount || seen?.rowCount) broadcastChange("diaspora");
   const unread = peek ? (await queryOne("SELECT COUNT(*)::int AS n FROM customer_messages WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [clientId]))?.n || 0 : 0;
-  res.json({ messages: fresh.map(messageRow), state: recent.map(messageState), typing: isTyping(clientId, "staff"), unread });
+  const call = callView(await currentCall(clientId), "customer", { desk: "Diaspora Desk", customer: req.customer.name });
+  res.json({ messages: fresh.map(messageRow), state: recent.map(messageState), typing: isTyping(clientId, "staff"), unread, call });
 }));
 
 router.post("/messages/typing", requireCustomer, (req, res) => {

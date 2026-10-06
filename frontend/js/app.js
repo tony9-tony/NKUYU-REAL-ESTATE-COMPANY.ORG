@@ -6252,6 +6252,35 @@ function dmDayLabel(iso) {
 function dmInitials(name) { return String(name || "?").trim().split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?"; }
 
 const DM_REACTIONS = ["👍", "❤️", "😂", "😮", "🙏", "✅"];
+/** The call strip above the conversation: ringing, waiting or in progress. */
+function dmCallHtml(call) {
+  if (!call) return "";
+  const forMe = call.status === "ringing" && !call.mine;
+  const text = forMe ? `${call.who} is calling` : call.status === "ringing" ? "Calling… waiting for the customer to answer" : "Video call in progress";
+  return `<span class="dm-call-text${forMe ? " is-ringing" : ""}">📹 <strong>${escapeHtml(text)}</strong></span>
+    <span class="dm-call-actions">${call.status === "ringing" && call.mine ? "" : `<button type="button" class="btn btn-small btn-primary" data-action="dm-call-join" data-id="${call.id}" data-url="${escapeHtml(call.url)}" data-ring="${forMe ? 1 : 0}">${forMe ? "Join" : "Join again"}</button>`}
+      <button type="button" class="btn btn-small btn-danger-ghost" data-action="dm-call-end" data-id="${call.id}" data-decline="${forMe ? 1 : 0}">${forMe ? "Decline" : call.status === "ringing" ? "Cancel" : "End"}</button></span>`;
+}
+async function startDmCall() {
+  if (!state.dmSelected) return;
+  // The window is opened by the click itself (browsers block pop-ups opened later).
+  const win = window.open("about:blank", "_blank");
+  try {
+    const { call } = await api(`/diaspora/calls/${state.dmSelected}`, { method: "POST", body: JSON.stringify({}) });
+    if (win && call?.url) win.location.href = call.url; else win?.close();
+    state.dmConversation = await api(`/diaspora/messages/${state.dmSelected}`);
+    paintDiasporaMessages();
+  } catch (error) { win?.close(); showToast(error.message || "Could not start the call."); }
+}
+async function joinDmCall(target) {
+  window.open(target.dataset.url, "_blank");
+  if (target.dataset.ring === "1") { try { await api(`/diaspora/calls/${target.dataset.id}/answer`, { method: "POST", body: JSON.stringify({}) }); } catch (error) { showToast(error.message || "The call has ended."); } }
+  loadDiasporaMessages({ quiet: true });
+}
+async function endDmCall(target) {
+  try { await api(`/diaspora/calls/${target.dataset.id}/end`, { method: "POST", body: JSON.stringify({ decline: target.dataset.decline === "1" }) }); } catch (error) { showToast(error.message || "Could not end the call."); }
+  loadDiasporaMessages({ quiet: true });
+}
 /** A WhatsApp chat with the customer, opened from the Desk's own WhatsApp (no API needed). */
 function dmWhatsApp(client) {
   const digits = String(client?.phone || "").replace(/\D/g, "");
@@ -6294,7 +6323,7 @@ function dmListHtml(rows) {
   return rows.map((row) => `<button type="button" class="dm-thread-row${String(state.dmSelected) === String(row.id) ? " is-active" : ""}" data-action="dm-open" data-id="${row.id}">
       <span class="dmc-avatar" aria-hidden="true">${escapeHtml(dmInitials(row.name))}</span>
       <span class="dm-rowtext"><span class="dm-name">${escapeHtml(row.name)}${row.verification_status === "verified" ? ` <span class="badge-verified" title="Identity verified">${icon("check")}</span>` : ""}</span>
-        <span class="dm-last">${row.last_from === "staff" ? "You: " : ""}${escapeHtml(String(row.last_body || "").slice(0, 70))}</span></span>
+        <span class="dm-last">${row.calling ? "📹 Calling you… " : ""}${row.last_from === "staff" ? "You: " : ""}${escapeHtml(String(row.last_body || "").slice(0, 70))}</span></span>
       <span class="dm-side"><span class="dm-when">${escapeHtml(row.last_at ? (dmSameDay(row.last_at, new Date()) ? dmClock(row.last_at) : dmDayLabel(row.last_at)) : "")}</span>${row.unread ? `<span class="dm-unread">${row.unread}</span>` : ""}</span></button>`).join("");
 }
 
@@ -6303,6 +6332,12 @@ function paintDiasporaMessages() {
   const data = state.dmThreads;
   const list = document.querySelector(".dm-list");
   if (list && data) list.innerHTML = dmListHtml(data.rows || []);
+  const callBox = document.getElementById("dm-call");
+  if (callBox && state.dmConversation) {
+    const html = dmCallHtml(state.dmConversation.call);
+    if (callBox.dataset.sig !== html) { callBox.innerHTML = html; callBox.dataset.sig = html; }
+    callBox.hidden = !state.dmConversation.call;
+  }
   const statusLine = document.getElementById("dm-status");
   if (statusLine && state.dmConversation) statusLine.textContent = state.dmConversation.typing ? "typing…" : (state.dmConversation.client.country || "");
   const box = document.getElementById("dm-thread");
@@ -6328,7 +6363,8 @@ function renderDiasporaMessages() {
   const thread = !state.dmSelected ? `<div class="dm-empty">${emptyState("Pick a conversation", "Customers' messages appear on the left. Open one to read it and reply.", { iconName: "mail", compact: true })}</div>`
     : !conv ? `<div class="dm-empty">${emptyState("Loading", "", { iconName: "mail", compact: true })}</div>`
     : `<div class="dm-head"><button type="button" class="btn btn-small btn-ghost dm-back" data-action="dm-back">Back</button><span class="dmc-avatar dmc-avatar--lg" aria-hidden="true">${escapeHtml(dmInitials(conv.client.name))}</span>
-         <div class="dm-headtext"><strong>${escapeHtml(conv.client.name)}${conv.client.verification_status === "verified" ? ` <span class="badge-verified" title="Identity verified">${icon("check")}</span>` : ""}</strong><span class="muted" id="dm-status">${conv.typing ? "typing…" : escapeHtml(conv.client.country || "")}</span></div>${dmWhatsApp(conv.client)}</div>
+         <div class="dm-headtext"><strong>${escapeHtml(conv.client.name)}${conv.client.verification_status === "verified" ? ` <span class="badge-verified" title="Identity verified">${icon("check")}</span>` : ""}</strong><span class="muted" id="dm-status">${conv.typing ? "typing…" : escapeHtml(conv.client.country || "")}</span></div>${data.can_reply ? `<button type="button" class="btn btn-small btn-primary dm-videocall" data-action="dm-call-start" title="Call ${escapeHtml(conv.client.name)} by video">Video call</button>` : ""}${dmWhatsApp(conv.client)}</div>
+       <div class="dm-call" id="dm-call"${conv.call ? "" : " hidden"}>${dmCallHtml(conv.call)}</div>
        <div class="dm-thread" id="dm-thread" role="log" aria-live="polite">${dmThreadHtml(conv)}</div>
        ${data.can_reply ? `<div class="dm-replying" id="dm-replying" hidden><div><strong id="dm-replying-name"></strong><span id="dm-replying-text"></span></div><button type="button" data-action="dm-reply-cancel" aria-label="Cancel reply">✕</button></div><div class="dm-compose"><textarea id="dm-reply" rows="1" maxlength="2000" placeholder="Write a reply… (Enter to send, Shift+Enter for a new line)"></textarea><button type="button" class="dmc-send" data-action="dm-send" aria-label="Send reply">${icon("send")}</button></div>` : `<p class="muted dm-readonly">You can read these messages. Replies are sent by the Diaspora Desk.</p>`}`;
   content.innerHTML = `<div class="page-tip">${icon("info")}<span>Customers write to the Diaspora Desk from the <strong>Messages</strong> tab of their portal. New messages appear here by themselves; your reply is e-mailed to the customer too.</span></div>
@@ -7713,6 +7749,9 @@ document.addEventListener("click", async (event) => {
   if (action === "dm-picker") openDmPicker(target, id);
   if (action === "dm-react") reactDmMessage(id, target.dataset.emoji);
   if (action === "dm-menu") openDmMenu(target, id);
+  if (action === "dm-call-start") startDmCall();
+  if (action === "dm-call-join") joinDmCall(target);
+  if (action === "dm-call-end") endDmCall(target);
   if (action === "dm-edit") startDmEdit(id);
   if (action === "dm-delete-me") deleteDmMessage(id, "me");
   if (action === "dm-delete-all") deleteDmMessage(id, "all");
