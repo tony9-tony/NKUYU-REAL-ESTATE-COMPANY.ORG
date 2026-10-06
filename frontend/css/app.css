@@ -2276,17 +2276,38 @@ label.btn { cursor: pointer; }
 .modal-sub .badge-verified, .modal-sub .badge { margin-left: 4px; }
 
 /* Diaspora verification: identity documents opened inside the app */
-.kyc-viewer-tabs { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
-.kyc-missing { display: inline-flex; align-items: center; gap: 6px; color: var(--danger); font-size: 13px; font-weight: 600; }
-.kyc-viewer { display: grid; place-items: center; height: clamp(420px, calc(100vh - 300px), 900px); margin: 0 -4px 14px; padding: 12px; overflow: auto; border-radius: var(--radius); background: #2a2622; }
-.kyc-viewer .loading, .kyc-viewer .empty { color: #eee; }
-.kyc-image { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; cursor: zoom-in; box-shadow: 0 4px 18px rgba(0,0,0,.35); }
-.kyc-image.is-zoomed { max-width: none; max-height: none; cursor: zoom-out; }
-.kyc-viewer:has(.kyc-image.is-zoomed) { place-items: start; }
-/* A document is shown upright, like a sheet of paper (A4 proportions), as tall as the screen allows. */
-.kyc-pdf { height: 100%; width: auto; max-width: 100%; aspect-ratio: 210 / 297; border: 0; border-radius: 4px; background: #fff; box-shadow: 0 4px 18px rgba(0,0,0,.35); }
-.kyc-file { margin-right: auto; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch; }
-@media (max-width: 720px) { .kyc-viewer { height: clamp(380px, 72vh, 760px); } .kyc-pdf { width: 100%; aspect-ratio: auto; } .kyc-file { max-width: 100%; flex-basis: 100%; } }
+.kyc-missing { display: inline-flex; align-items: center; gap: 6px; color: #ff9b94; font-size: 13px; font-weight: 600; }
+/* Identity document viewer: a dark overlay with the page shown upright, like a sheet of paper. */
+.modal.modal-kycv { width: min(1080px, 100%); height: min(94vh, 1000px); display: flex; flex-direction: column; padding: 0; overflow: hidden; background: #1c1a18; color: #ececec; border: 1px solid #34302c; }
+.kycv-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 16px; border-bottom: 1px solid #34302c; }
+.kycv-title { display: grid; min-width: 0; }
+.kycv-title strong { font-size: 16px; text-transform: uppercase; letter-spacing: .02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kycv-title span { font-size: 12.5px; color: #b9b2aa; }
+.kycv-tools { display: flex; align-items: center; gap: 4px; }
+.kycv-btn { min-width: 34px; height: 34px; padding: 0 10px; border: 0; border-radius: 999px; background: #2a2724; color: #ececec; font: inherit; font-weight: 600; font-size: 14px; cursor: pointer; display: inline-grid; place-items: center; }
+.kycv-btn:hover { background: #38342f; }
+.kycv-btn:focus-visible { outline: 2px solid #8fd1ac; outline-offset: 2px; }
+.kycv-text { font-size: 13px; }
+.kycv-close svg { width: 16px; height: 16px; }
+.kycv-zoom { min-width: 52px; text-align: center; font-size: 13px; color: #cfc9c1; }
+.kycv-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 10px 16px 0; }
+.kycv-tabs .segmented { background: #2a2724; border-color: #34302c; }
+.kycv-tabs .seg-btn { color: #b9b2aa; }
+.kycv-tabs .seg-btn.active { background: #ececec; color: #1c1a18; box-shadow: none; }
+.kycv-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 18px 16px; background: #1c1a18; }
+.kycv-body .loading, .kycv-body .empty { color: #eee; }
+.kycv-stage { margin: 0 auto; width: 100%; max-width: 840px; display: flex; justify-content: center; }
+.kycv-stage--pdf { height: 100%; }
+.kycv-pdf { width: 100%; height: 100%; min-height: 60vh; border: 0; border-radius: 4px; background: #525659; }
+.kycv-sheet { display: block; height: auto; border-radius: 3px; background: #fff; box-shadow: 0 6px 24px rgba(0,0,0,.5); }
+.kycv-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 16px; border-top: 1px solid #34302c; }
+.kycv-file { font-size: 13px; color: #b9b2aa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 200px; }
+.kycv-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.kycv-actions .btn-danger-ghost { color: #ff9b94; }
+.kycv-actions .btn-primary { background: #2f8f5f; border-color: #2f8f5f; color: #fff; }
+.kycv-actions .btn-primary:hover { background: #38a36d; }
+.kycv-actions .btn[disabled] { opacity: .45; }
+@media (max-width: 720px) { .modal.modal-kycv { height: 96vh; border-radius: 14px; } .kycv-tools { width: 100%; justify-content: flex-end; } .kycv-file { flex-basis: 100%; } }
 
 .preset-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 

@@ -5249,7 +5249,7 @@ function closeModal() {
   }
   modalBackdrop.hidden = true;
   modal.innerHTML = "";
-  modal.classList.remove("modal-wide", "modal-document");
+  modal.classList.remove("modal-wide", "modal-document", "modal-kycv");
 }
 
 /**
@@ -5825,16 +5825,25 @@ async function openKycDocument(clientId, docId = null) {
     (role.desk || role.legal) && row.verification_status === "verified" ? `<button type="button" class="btn btn-danger-ghost" data-action="kyc" data-kyc="revoke" data-id="${row.id}">Remove verification</button>` : "",
     ((role.desk || role.legal) && ["submitted", "desk_checked", "unverified"].includes(row.verification_status)) || (role.legal && nationalityDue) ? `<button type="button" class="btn btn-danger-ghost" data-action="kyc" data-kyc="reject" data-id="${row.id}">Send back</button>` : "",
   ].join("");
-  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(row.name)}</h2>
-      <p class="modal-sub">Declared: lives in ${escapeHtml(row.country || "?")} · nationality ${escapeHtml(row.nationality || "?")}${row.residence_check === "check" ? ` · <strong style="color:var(--danger)">phone is ${escapeHtml(row.phone_country || "unknown")}</strong>` : ""}</p></div>
-      <button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
-    <div class="kyc-viewer-tabs"><div class="segmented" role="group" aria-label="Documents">${tabs}</div>
+  const label = KYC_DOC_LABELS[doc.kind] || doc.kind;
+  state.kycZoom = null;
+  modal.classList.add("modal-kycv");
+  modal.innerHTML = `<div class="kycv-bar">
+      <div class="kycv-title"><strong>${escapeHtml(row.name)}</strong><span>Declared: lives in ${escapeHtml(row.country || "?")} · nationality ${escapeHtml(row.nationality || "?")}${row.residence_check === "check" ? ` · <strong style="color:var(--danger)">phone is ${escapeHtml(row.phone_country || "unknown")}</strong>` : ""}</span></div>
+      <div class="kycv-tools" role="group" aria-label="View">
+        <button type="button" class="kycv-btn" data-action="kyc-zoom-out" aria-label="Zoom out">−</button>
+        <span class="kycv-zoom" id="kycv-zoom" aria-live="polite">Fit</span>
+        <button type="button" class="kycv-btn" data-action="kyc-zoom-in" aria-label="Zoom in">+</button>
+        <button type="button" class="kycv-btn kycv-text" data-action="kyc-zoom-fit">Fit</button>
+        <button type="button" class="kycv-btn kycv-text" data-action="kyc-doc-download" data-id="${row.id}" data-doc="${doc.id}" data-filename="${escapeHtml(doc.name || "document")}">Download</button>
+        <button type="button" class="kycv-btn kycv-close" data-action="close-modal" aria-label="Close">${closeIcon()}</button>
+      </div></div>
+    <div class="kycv-tabs"><div class="segmented" role="group" aria-label="Documents">${tabs}</div>
       ${missing.length && row.verification_status !== "verified" ? `<span class="kyc-missing">${icon("alert")}Missing: ${escapeHtml(missing.map((k) => KYC_DOC_LABELS[k]).join(", "))}</span>` : ""}</div>
-    <div class="kyc-viewer" id="kyc-viewer"><div class="loading" role="status"><div class="spinner" aria-hidden="true"></div><span>Opening ${escapeHtml(doc.name || "document")}…</span></div></div>
-    <div class="row-actions docx-actions">
-      <span class="muted kyc-file">${escapeHtml(doc.name || "")}${doc.uploaded_at ? ` · uploaded ${escapeHtml(formatDateTime(doc.uploaded_at, true))}` : ""}${kycExpiry(doc, true)}</span>
-      <button type="button" class="btn btn-ghost" data-action="kyc-doc-download" data-id="${row.id}" data-doc="${doc.id}" data-filename="${escapeHtml(doc.name || "document")}">Download</button>
-      ${actions}
+    <div class="kycv-body" id="kyc-viewer"><div class="loading" role="status"><div class="spinner" aria-hidden="true"></div><span>Opening ${escapeHtml(doc.name || "document")}…</span></div></div>
+    <div class="kycv-foot">
+      <span class="kycv-file">${escapeHtml(doc.name || "")}${doc.uploaded_at ? ` · uploaded ${escapeHtml(formatDateTime(doc.uploaded_at, true))}` : ""}${kycExpiry(doc, true)}</span>
+      <div class="kycv-actions">${actions}</div>
     </div>`;
   modalBackdrop.hidden = false;
   const host = document.getElementById("kyc-viewer");
@@ -5845,16 +5854,29 @@ async function openKycDocument(clientId, docId = null) {
     const blob = await response.blob();
     if (kycViewerUrl) URL.revokeObjectURL(kycViewerUrl);
     kycViewerUrl = URL.createObjectURL(blob);
+    kycViewerKind = { type: blob.type || "", label, who: row.name };
     if (!document.getElementById("kyc-viewer")) return; // closed meanwhile
-    const type = blob.type || "";
-    host.innerHTML = type.startsWith("image/")
-      ? `<img class="kyc-image" src="${kycViewerUrl}" alt="${escapeHtml(KYC_DOC_LABELS[doc.kind] || "Document")} of ${escapeHtml(row.name)}" data-action="kyc-zoom" title="Click to zoom">`
-      : type === "application/pdf"
-        ? `<iframe class="kyc-pdf" src="${kycViewerUrl}#view=Fit&pagemode=none" title="${escapeHtml(KYC_DOC_LABELS[doc.kind] || "Document")}"></iframe>`
-        : `<div class="empty">This file type cannot be shown here. Use Download.</div>`;
+    drawKycPage();
   } catch (error) {
     host.innerHTML = `<div class="empty">${escapeHtml(error.message || "The document could not be opened.")}</div>`;
   }
+}
+
+/** The page itself: a white sheet on a dark stage, upright like paper. Zoom redraws it. */
+let kycViewerKind = null;
+function drawKycPage() {
+  const host = document.getElementById("kyc-viewer");
+  if (!host || !kycViewerUrl || !kycViewerKind) return;
+  const zoom = state.kycZoom;
+  const label = document.getElementById("kycv-zoom");
+  if (label) label.textContent = zoom ? `${zoom}%` : "Fit";
+  const { type, label: title, who } = kycViewerKind;
+  if (type.startsWith("image/")) {
+    host.innerHTML = `<div class="kycv-stage"><img class="kycv-sheet" src="${kycViewerUrl}" alt="${escapeHtml(title)} of ${escapeHtml(who)}" style="${zoom ? `width:${zoom}%;max-width:none` : "max-width:100%"}"></div>`;
+  } else if (type === "application/pdf") {
+    const view = zoom ? `zoom=${zoom}` : "view=FitH";
+    host.innerHTML = `<div class="kycv-stage kycv-stage--pdf"><iframe class="kycv-pdf" src="${kycViewerUrl}#${view}&toolbar=0&navpanes=0&pagemode=none" title="${escapeHtml(title)}"></iframe></div>`;
+  } else host.innerHTML = `<div class="empty">This file type cannot be shown here. Use Download.</div>`;
 }
 
 /** "expires 12 Mar 2027" - in red when it is over or ends within six months. */
@@ -5944,7 +5966,7 @@ async function kycAction(clientId, kind) {
   }[kind];
   if (!texts) return;
   // Opened from the document viewer: the question takes the dialog's normal size.
-  modal.classList.remove("modal-wide", "modal-document");
+  modal.classList.remove("modal-wide", "modal-document", "modal-kycv");
   const presets = kind === "reject" || kind === "revoke" ? KYC_REASONS : null;
   const ok = await confirmDialog({ title: texts[0], message: texts[1], confirmLabel: texts[2], tone: texts[3], noteLabel: texts[4], presets });
   const note = String(state.transitionNotes || "").trim();
@@ -7250,7 +7272,8 @@ document.addEventListener("click", async (event) => {
   if (action === "dm-back") { state.dmSelected = null; state.dmConversation = null; render(); }
   if (action === "kyc") kycAction(id, target.dataset.kyc);
   if (action === "kyc-doc") openKycDocument(id, target.dataset.doc || null);
-  if (action === "kyc-zoom") target.classList.toggle("is-zoomed");
+  if (action === "kyc-zoom-in" || action === "kyc-zoom-out") { state.kycZoom = Math.min(300, Math.max(50, (state.kycZoom || 100) + (action === "kyc-zoom-in" ? 25 : -25))); drawKycPage(); }
+  if (action === "kyc-zoom-fit") { state.kycZoom = null; drawKycPage(); }
   if (action === "kyc-doc-download") downloadFile(`/diaspora/verifications/${id}/documents/${target.dataset.doc}`, target.dataset.filename).catch((error) => showToast(error.message || "Download failed"));
   if (action === "verification-filter") { state.verificationFilter = target.dataset.filterKey || "todo"; render(); }
   if (action === "open-task") openTask(id);
