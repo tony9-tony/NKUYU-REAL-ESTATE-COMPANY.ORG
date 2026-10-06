@@ -847,6 +847,10 @@ async function migrateCustomerPortal() {
     read_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
   await query("CREATE INDEX IF NOT EXISTS idx_customer_messages_client ON customer_messages(client_id, id)");
+  await query("ALTER TABLE customer_messages ADD COLUMN IF NOT EXISTS reply_to INTEGER REFERENCES customer_messages(id) ON DELETE SET NULL");
+  await query("ALTER TABLE customer_messages ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ");
+  await query("ALTER TABLE customer_messages ADD COLUMN IF NOT EXISTS reaction_customer TEXT");
+  await query("ALTER TABLE customer_messages ADD COLUMN IF NOT EXISTS reaction_staff TEXT");
   if (!hadCitizenship) {
     await query("UPDATE clients SET citizenship_confirmed_at=verified_at, citizenship_confirmed_by=verified_by WHERE verification_status='verified' AND citizenship_confirmed_at IS NULL");
   }

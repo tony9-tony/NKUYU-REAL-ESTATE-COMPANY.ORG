@@ -96,6 +96,7 @@ import { generateFromWordTemplate, templateFileUnknownPlaceholders, templateWord
 import { clearContractSignatureDocument, contractSignature, signContractDocument } from "../contracts/signature.js";
 import { docxToPreview } from "../contracts/docxPreview.js";
 import { announceWrites, broadcastChange, liveStream } from "../live.js";
+import { clearTyping, isTyping, REACTIONS, setTyping } from "../typing.js";
 import { RENT_STATUSES, SALE_STATUSES, categoryStatusesFrom, overallStatus } from "../models/propertyStatus.js";
 
 const router = Router();
@@ -2604,16 +2605,46 @@ router.get("/diaspora/messages", route(async (req, res) => {
             (SELECT COUNT(*)::int FROM customer_messages m WHERE m.client_id=c.id AND m.sender='customer' AND m.read_at IS NULL) AS unread
        FROM clients c WHERE c.organization_id=$1 AND c.is_diaspora=TRUE AND EXISTS (SELECT 1 FROM customer_messages m WHERE m.client_id=c.id)
       ORDER BY (SELECT MAX(created_at) FROM customer_messages m WHERE m.client_id=c.id) DESC LIMIT 200`, [await organizationId()])).rows;
+  await query("UPDATE customer_messages SET delivered_at=NOW() WHERE sender='customer' AND delivered_at IS NULL AND client_id = ANY($1::int[])", [rows.map((r) => r.id)]);
   res.json({ rows, can_reply: role.desk || role.legal });
 }));
 router.get("/diaspora/messages/:id", route(async (req, res) => {
   await verificationRole(req);
   const clientId = parseId(req.params.id);
   const client = requireRecord(await queryOne("SELECT id, name, country, verification_status FROM clients WHERE id=$1 AND is_diaspora=TRUE AND organization_id=$2", [clientId, await organizationId()]), "Customer");
-  const messages = (await query(`SELECT m.id, m.sender, m.body, m.created_at, (m.read_at IS NOT NULL) AS read, u.display_name AS staff_name FROM customer_messages m LEFT JOIN users u ON u.id=m.staff_user_id
+  const rows = (await query(`SELECT m.id, m.sender, m.body, m.created_at, m.read_at, m.delivered_at, m.reply_to, m.reaction_customer, m.reaction_staff,
+      u.display_name AS staff_name, r.body AS reply_body, r.sender AS reply_sender, ru.display_name AS reply_staff_name
+    FROM customer_messages m LEFT JOIN users u ON u.id=m.staff_user_id
+    LEFT JOIN customer_messages r ON r.id=m.reply_to LEFT JOIN users ru ON ru.id=r.staff_user_id
     WHERE m.client_id=$1 ORDER BY m.id DESC LIMIT 200`, [clientId])).rows.reverse();
-  await query("UPDATE customer_messages SET read_at=NOW() WHERE client_id=$1 AND sender='customer' AND read_at IS NULL", [clientId]);
-  res.json({ client, messages });
+  await query("UPDATE customer_messages SET read_at=NOW(), delivered_at=COALESCE(delivered_at, NOW()) WHERE client_id=$1 AND sender='customer' AND read_at IS NULL", [clientId]);
+  // Seen from the desk: "me" is the desk member, "them" the customer.
+  const messages = rows.map((m) => ({
+    id: m.id, sender: m.sender, body: m.body, created_at: m.created_at, staff_name: m.staff_name,
+    read: Boolean(m.read_at), delivered: Boolean(m.delivered_at || m.read_at),
+    reactions: { me: m.reaction_staff || null, them: m.reaction_customer || null },
+    reply: m.reply_to && m.reply_body ? { id: m.reply_to, from: m.reply_sender, name: m.reply_sender === "staff" ? (m.reply_staff_name || "Diaspora Desk") : client.name, body: String(m.reply_body).slice(0, 140) } : null,
+  }));
+  res.json({ client, messages, typing: isTyping(clientId, "customer"), reactions: REACTIONS });
+}));
+router.post("/diaspora/messages/:id/typing", route(async (req, res) => {
+  const role = await verificationRole(req);
+  if (!role.desk && !role.legal) return res.json({ ok: true });
+  setTyping(parseId(req.params.id), "staff");
+  res.json({ ok: true });
+}));
+router.post("/diaspora/messages/:id/react", route(async (req, res) => {
+  const role = await verificationRole(req);
+  if (!role.desk && !role.legal) throw new HttpError(403, "Only the Diaspora Desk or Legal can react.");
+  const clientId = parseId(req.params.id);
+  const messageId = Number.parseInt(req.body?.message_id, 10);
+  const emoji = req.body?.emoji ? String(req.body.emoji) : null;
+  if (!Number.isSafeInteger(messageId)) throw new HttpError(400, "Choose a message.");
+  if (emoji && !REACTIONS.includes(emoji)) throw new HttpError(400, "That reaction is not available.");
+  const done = await query("UPDATE customer_messages SET reaction_staff=$3 WHERE id=$1 AND client_id=$2 RETURNING id", [messageId, clientId, emoji]);
+  if (!done.rows.length) throw new HttpError(404, "Message not found.");
+  broadcastChange("diaspora");
+  res.json({ ok: true });
 }));
 router.post("/diaspora/messages/:id", route(async (req, res) => {
   const role = await verificationRole(req);
@@ -2623,9 +2654,15 @@ router.post("/diaspora/messages/:id", route(async (req, res) => {
   const body = String(req.body?.body || "").replace(/\r\n/g, "\n").trim();
   if (!body) throw new HttpError(400, "Write the reply first.");
   if (body.length > 2000) throw new HttpError(400, "Please keep the reply under 2000 characters.");
-  const row = (await query("INSERT INTO customer_messages (client_id, sender, staff_user_id, body) VALUES ($1,'staff',$2,$3) RETURNING id, created_at", [clientId, req.user.id, body])).rows[0];
+  let replyTo = null;
+  if (req.body?.reply_to) {
+    const target = await queryOne("SELECT id FROM customer_messages WHERE id=$1 AND client_id=$2", [Number.parseInt(req.body.reply_to, 10) || 0, clientId]);
+    replyTo = target?.id || null;
+  }
+  const row = (await query("INSERT INTO customer_messages (client_id, sender, staff_user_id, body, reply_to) VALUES ($1,'staff',$2,$3,$4) RETURNING id, created_at", [clientId, req.user.id, body, replyTo])).rows[0];
+  clearTyping(clientId, "staff");
   // The customer's own messages up to now count as answered, so the desk's unread count falls.
-  await query("UPDATE customer_messages SET read_at=COALESCE(read_at, NOW()) WHERE client_id=$1 AND sender='customer'", [clientId]);
+  await query("UPDATE customer_messages SET read_at=COALESCE(read_at, NOW()), delivered_at=COALESCE(delivered_at, NOW()) WHERE client_id=$1 AND sender='customer'", [clientId]);
   broadcastChange("diaspora");
   if (mailConfigured() && client.email) {
     const site = String(process.env.PUBLIC_SITE_URL || "").trim().replace(/\/+$/, "");

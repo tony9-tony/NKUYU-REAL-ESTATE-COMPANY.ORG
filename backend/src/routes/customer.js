@@ -17,6 +17,7 @@ import PDFDocument from "pdfkit";
 import { query, queryOne } from "../db.js";
 import { mailConfigured, sendMail } from "../mail.js";
 import { broadcastChange } from "../live.js";
+import { clearTyping, isTyping, REACTIONS, setTyping } from "../typing.js";
 import { receiptCoverage, writeReceiptPdf } from "../payments/notices.js";
 import { documentUploadsDir, progressUploadsDir, resolveStoredFile, safeDisplayFilename } from "../uploads.js";
 import { isHttps, isProduction, readCookie } from "../security.js";
@@ -695,28 +696,58 @@ const fileHeaders = (res, mime, filename, download) => {
 const idParam = (value) => { const n = Number(value); if (!Number.isSafeInteger(n) || n < 1) throw new HttpError(404, "not found"); return n; };
 
 // ---- Messages with the Diaspora Desk --------------------------------------------
-const messageRow = (m) => ({ id: m.id, from: m.sender, name: m.sender === "staff" ? (m.staff_name || "Diaspora Desk") : "You", body: m.body, at: m.created_at, read: Boolean(m.read_at) });
+const MESSAGE_SELECT = `SELECT m.*, u.display_name AS staff_name, r.body AS reply_body, r.sender AS reply_sender, ru.display_name AS reply_staff_name
+    FROM customer_messages m LEFT JOIN users u ON u.id=m.staff_user_id
+    LEFT JOIN customer_messages r ON r.id=m.reply_to LEFT JOIN users ru ON ru.id=r.staff_user_id`;
+// Seen from the customer's side: "me" is the customer, "desk" the other party.
+const messageRow = (m) => ({
+  id: m.id, from: m.sender, name: m.sender === "staff" ? (m.staff_name || "Diaspora Desk") : "You", body: m.body, at: m.created_at,
+  read: Boolean(m.read_at), delivered: Boolean(m.delivered_at || m.read_at),
+  reactions: { me: m.reaction_customer || null, desk: m.reaction_staff || null },
+  reply: m.reply_to && m.reply_body ? { id: m.reply_to, from: m.reply_sender, name: m.reply_sender === "staff" ? (m.reply_staff_name || "Diaspora Desk") : "You", body: String(m.reply_body).slice(0, 140) } : null,
+});
+const messageState = (m) => ({ id: m.id, read: Boolean(m.read_at), delivered: Boolean(m.delivered_at || m.read_at), reactions: { me: m.reaction_customer || null, desk: m.reaction_staff || null } });
 
 router.get("/messages", requireCustomer, route(async (req, res) => {
-  const rows = (await query(`SELECT m.*, u.display_name AS staff_name FROM customer_messages m LEFT JOIN users u ON u.id=m.staff_user_id
-    WHERE m.client_id=$1 ORDER BY m.id DESC LIMIT 200`, [req.customer.client_id])).rows.reverse();
-  // Opening the conversation marks the desk's replies as read.
-  await query("UPDATE customer_messages SET read_at=NOW() WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [req.customer.client_id]);
-  res.json({ messages: rows.map(messageRow) });
+  const rows = (await query(`${MESSAGE_SELECT} WHERE m.client_id=$1 ORDER BY m.id DESC LIMIT 200`, [req.customer.client_id])).rows.reverse();
+  // Opening the conversation marks the desk's replies as delivered and read.
+  await query("UPDATE customer_messages SET read_at=NOW(), delivered_at=COALESCE(delivered_at, NOW()) WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [req.customer.client_id]);
+  res.json({ messages: rows.map(messageRow), reactions: REACTIONS });
 }));
 
-// Light check the open portal makes every few seconds: only what is new since the
-// last message the page has, which of the customer's own messages the desk has
-// read, and how many replies are waiting. "peek" counts without marking as read.
+// Light check the open portal makes every few seconds: what is new since the last
+// message the page has, the current state (seen, reactions) of recent messages,
+// whether the desk is typing, and how many replies are waiting. "peek" counts
+// without marking as read.
 router.get("/messages/poll", requireCustomer, route(async (req, res) => {
+  const clientId = req.customer.client_id;
   const after = Math.max(0, Number.parseInt(req.query.after, 10) || 0);
   const peek = req.query.peek === "1";
-  const fresh = (await query(`SELECT m.*, u.display_name AS staff_name FROM customer_messages m LEFT JOIN users u ON u.id=m.staff_user_id
-    WHERE m.client_id=$1 AND m.id > $2 ORDER BY m.id LIMIT 100`, [req.customer.client_id, after])).rows;
-  const seen = (await query("SELECT id FROM customer_messages WHERE client_id=$1 AND sender='customer' AND read_at IS NOT NULL ORDER BY id DESC LIMIT 100", [req.customer.client_id])).rows.map((r) => r.id);
-  if (!peek) await query("UPDATE customer_messages SET read_at=NOW() WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [req.customer.client_id]);
-  const unread = peek ? (await queryOne("SELECT COUNT(*)::int AS n FROM customer_messages WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [req.customer.client_id]))?.n || 0 : 0;
-  res.json({ messages: fresh.map(messageRow), seen, unread });
+  // The page has the desk's messages the moment it receives them: delivered.
+  await query("UPDATE customer_messages SET delivered_at=NOW() WHERE client_id=$1 AND sender='staff' AND delivered_at IS NULL", [clientId]);
+  const fresh = (await query(`${MESSAGE_SELECT} WHERE m.client_id=$1 AND m.id > $2 ORDER BY m.id LIMIT 100`, [clientId, after])).rows;
+  const recent = (await query("SELECT id, read_at, delivered_at, reaction_customer, reaction_staff FROM customer_messages WHERE client_id=$1 ORDER BY id DESC LIMIT 100", [clientId])).rows;
+  if (!peek) await query("UPDATE customer_messages SET read_at=NOW() WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [clientId]);
+  const unread = peek ? (await queryOne("SELECT COUNT(*)::int AS n FROM customer_messages WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [clientId]))?.n || 0 : 0;
+  res.json({ messages: fresh.map(messageRow), state: recent.map(messageState), typing: isTyping(clientId, "staff"), unread });
+}));
+
+router.post("/messages/typing", requireCustomer, (req, res) => {
+  if (req.get(CUSTOMER_HEADER) !== "1") return res.status(403).json({ error: "request refused" });
+  setTyping(req.customer.client_id, "customer");
+  res.json({ ok: true });
+});
+
+router.post("/messages/react", requireCustomer, route(async (req, res) => {
+  if (req.get(CUSTOMER_HEADER) !== "1") throw new HttpError(403, "request refused");
+  const id = Number.parseInt(req.body?.message_id, 10);
+  const emoji = req.body?.emoji ? String(req.body.emoji) : null;
+  if (!Number.isSafeInteger(id)) throw new HttpError(400, "Choose a message.");
+  if (emoji && !REACTIONS.includes(emoji)) throw new HttpError(400, "That reaction is not available.");
+  const done = await query("UPDATE customer_messages SET reaction_customer=$3 WHERE id=$1 AND client_id=$2 RETURNING id", [id, req.customer.client_id, emoji]);
+  if (!done.rows.length) throw new HttpError(404, "Message not found.");
+  broadcastChange("diaspora");
+  res.json({ ok: true });
 }));
 
 router.post("/messages", requireCustomer, (req, res, next) => {
@@ -726,8 +757,15 @@ router.post("/messages", requireCustomer, (req, res, next) => {
   const body = String(req.body?.body || "").replace(/\r\n/g, "\n").trim();
   if (!body) throw new HttpError(400, "Write your message first.");
   if (body.length > 2000) throw new HttpError(400, "Please keep the message under 2000 characters.");
-  if (tooMany(`msg:${req.customer.client_id}`, 20, 60 * 60 * 1000)) throw new HttpError(429, "Too many messages. Please wait a little.");
-  const row = (await query("INSERT INTO customer_messages (client_id, sender, body) VALUES ($1,'customer',$2) RETURNING *", [req.customer.client_id, body])).rows[0];
+  if (tooMany(`msg:${req.customer.client_id}`, 40, 60 * 60 * 1000)) throw new HttpError(429, "Too many messages. Please wait a little.");
+  let replyTo = null;
+  if (req.body?.reply_to) {
+    const target = await queryOne("SELECT id FROM customer_messages WHERE id=$1 AND client_id=$2", [Number.parseInt(req.body.reply_to, 10) || 0, req.customer.client_id]);
+    replyTo = target?.id || null;
+  }
+  const inserted = (await query("INSERT INTO customer_messages (client_id, sender, body, reply_to) VALUES ($1,'customer',$2,$3) RETURNING id", [req.customer.client_id, body, replyTo])).rows[0];
+  clearTyping(req.customer.client_id, "customer");
+  const row = (await query(`${MESSAGE_SELECT} WHERE m.id=$1`, [inserted.id])).rows[0];
   broadcastChange("diaspora");
   // The desk is e-mailed for the first unanswered message only, so a long chat is not a long list of e-mails.
   const earlier = await queryOne("SELECT COUNT(*)::int AS n FROM customer_messages WHERE client_id=$1 AND sender='customer' AND id<$2 AND id > COALESCE((SELECT MAX(id) FROM customer_messages WHERE client_id=$1 AND sender='staff'), 0)", [req.customer.client_id, row.id]);

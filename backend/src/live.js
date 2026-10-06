@@ -81,7 +81,8 @@ export function announceWrites() {
     if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) {
       // originalUrl: req.path is rewritten inside nested routers (/org/...).
       const path = String(req.originalUrl || req.url).split("?")[0].replace(/^\/api\/v1/, "");
-      res.on("finish", () => { if (res.statusCode < 400) broadcastChange(areaForPath(path)); });
+      // "typing…" hints are sent every couple of seconds and change nothing stored: they must not refresh every open screen.
+      if (!/\/typing$/.test(path)) res.on("finish", () => { if (res.statusCode < 400) broadcastChange(areaForPath(path)); });
     }
     next();
   };
