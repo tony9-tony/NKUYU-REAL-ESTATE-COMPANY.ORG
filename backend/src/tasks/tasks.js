@@ -85,7 +85,7 @@ export async function listTasks({ status = null, priority = null, box = null, se
 /** Backend-driven attention count: items the caller must act on now. */
 export async function attentionCount(access = null) {
   const who = access || (await currentAccess());
-  if (!who) return { total: 0, mine: 0, review: 0 };
+  if (!who) return { total: 0, mine: 0, review: 0, sides: { internal: 0, diaspora: 0 } };
   const org = await organizationId();
   const mine = await query(
     "SELECT COUNT(*)::int AS n FROM tasks t WHERE t.organization_id=$1 AND t.assigned_to=$2 AND t.status IN ('assigned','changes_requested')",
@@ -97,7 +97,15 @@ export async function attentionCount(access = null) {
   );
   const mineCount = mine.rows[0]?.n || 0;
   const reviewCount = review.rows[0]?.n || 0;
-  return { total: mineCount + reviewCount, mine: mineCount, review: reviewCount };
+  // Where the waiting work belongs: a task about a diaspora request goes to the Diaspora tab, everything else to Internal.
+  const bySide = await query(
+    `SELECT COALESCE(rq.source = 'diaspora-portal', FALSE) AS diaspora, COUNT(*)::int AS n
+       FROM tasks t LEFT JOIN LATERAL (SELECT l.source FROM leads l WHERE l.task_id = t.id ORDER BY l.id LIMIT 1) rq ON TRUE
+      WHERE t.organization_id=$1 AND ((t.assigned_to=$2 AND t.status IN ('assigned','changes_requested')) OR (t.reviewer_id=$2 AND t.status IN ('submitted','under_review')))
+      GROUP BY 1`, [org, who.userId]);
+  const sides = { internal: 0, diaspora: 0 };
+  for (const row of bySide.rows) sides[row.diaspora ? "diaspora" : "internal"] = row.n;
+  return { total: mineCount + reviewCount, mine: mineCount, review: reviewCount, sides };
 }
 
 export async function listComments(taskId) {

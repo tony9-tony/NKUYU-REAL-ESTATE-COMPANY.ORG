@@ -93,6 +93,8 @@ export const DEFAULT_STAFF_ROLE = "Staff Member";
  */
 export const TASK_HANDOFF = {
   "SALES, MARKETING & OPERATIONS": ["CUSTOMER SERVICE"],
+  // The Diaspora Desk runs diaspora requests like Sales runs Tanzanian ones: Customer Service calls the customer.
+  "DIASPORA DESK": ["CUSTOMER SERVICE"],
 };
 
 /** Placeholder roles being retired, mapped to the role that absorbs members. */
@@ -237,6 +239,7 @@ export const ROLE_DUTIES = {
     { key: "diaspora_reporting", label: "Report on the diaspora desk", description: "Reports sign-ups, requests, verification and conversion to management.", permissions: ["access_reports", "view_reports", "export"] },
   ],
   "Diaspora Desk Officer": [
+    { key: "lead_handoff", label: "Hand diaspora requests to Customer Service", description: "Receives requests from the diaspora portal and assigns Customer Service to contact the customer by the means they chose, then reviews the outcome. May assign within the desk and to Customer Service only.", permissions: ["access_leads", "assign_tasks", "review_tasks"] },
     { key: "diaspora_contracts", label: "Prepare diaspora contracts", description: "Prepares the Diaspora Sale or Lease Agreement for a verified customer and submits it to Legal; answers Legal's corrections. Never approves it.", permissions: ["submit_contract", "access_contracts", "request_changes"] },
     { key: "diaspora_customer_service", label: "Serve diaspora customers", description: "Works the shared queue: answers sign-ups and portal requests by the customer's chosen channel.", permissions: ["access_clients", "access_leads", "view", "create", "edit"] },
     { key: "diaspora_document_check", label: "First check of identity documents", description: "Checks that the passport and proof of residence match what the customer declared, before Legal verifies citizenship.", permissions: ["access_documents", "access_clients", "view", "edit"] },

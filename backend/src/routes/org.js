@@ -1097,9 +1097,10 @@ router.get("/requests", requireModuleAccess("leads"), async(req,res,next)=>{try{
 }catch(e){next(e);}});
 // Sales arranges the agreed appointment for a request once Customer Service
 // has reported back (or moves it). It goes straight into Appointments.
-/** Whether a user works in Sales (who own website requests end to end). */
+/** Whether a user works in Sales (who own website requests end to end) or in the Diaspora Desk, which
+ * runs the same flow for diaspora requests (the record scope keeps the desk to diaspora work only). */
 async function inSalesDepartment(userId){
-  return Boolean(await queryOne("SELECT 1 FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=$1 AND d.active=TRUE AND d.name='SALES, MARKETING & OPERATIONS'",[userId]));
+  return Boolean(await queryOne("SELECT 1 FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=$1 AND d.active=TRUE AND d.name IN ('SALES, MARKETING & OPERATIONS','DIASPORA DESK')",[userId]));
 }
 router.post("/requests/:id/appointment", requireModuleAccess("leads"), requireModuleAccess("appointments"), requirePermission("assign_tasks"), async(req,res,next)=>{try{
   if(!await inSalesDepartment(req.user.id))return res.status(403).json({error:"Sales arranges the appointment; the MD can see it under Appointments"});
@@ -1153,6 +1154,8 @@ router.post("/requests/:id/handed-off", requireModuleAccess("leads"), requirePer
   const inCs=await queryOne("SELECT 1 FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=$1 AND d.active=TRUE AND d.name='CUSTOMER SERVICE'",[task.assigned_to]);
   if(!inCs)return res.status(400).json({error:"a request can only be handed to a Customer Service officer"});
   const r=await queryOne("UPDATE leads SET task_id=$1,handed_off_at=NOW(),status='handed_off',outcome=NULL,outcome_note=NULL,outcome_at=NULL,outcome_by=NULL,appointment_at=NULL,appointment_type=NULL WHERE id=$2 RETURNING *",[taskId,leadId]);
+  // The Customer Service officer must be able to open the request they were asked to call about (a diaspora request is otherwise the Desk's alone).
+  if(lead.source==="diaspora-portal")await addRecordShare({entity:"lead",recordId:leadId,userId:task.assigned_to,createdBy:req.user.id}).catch(()=>{});
   await audit(req,"handed_off","lead",leadId,{task_id:taskId});res.json(r);
 }catch(e){next(e);}});
 // Conversion registers a person as a client record; it is NOT a signature. The

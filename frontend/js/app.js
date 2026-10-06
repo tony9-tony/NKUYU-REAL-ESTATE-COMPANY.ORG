@@ -1479,7 +1479,7 @@ function taskActionButtons(task) {
   const mine = Number(task.assigned_to) === Number(state.organization.me?.user?.id);
   if (task.request_id && task.request_source !== "website-contact" && mine && (task.available_actions || []).some((a) => a === "start" || a === "submit")) {
     const rest = (task.available_actions || []).filter((a) => a !== "start" && a !== "submit");
-    return `<button class="btn btn-primary btn-small" data-action="request-outcome" data-id="${task.id}">Report outcome to Sales</button>` + taskActionButtons({ ...task, request_id: null, available_actions: rest });
+    return `<button class="btn btn-primary btn-small" data-action="request-outcome" data-id="${task.id}">Report outcome to ${isDiasporaRow(task) ? "the Desk" : "Sales"}</button>` + taskActionButtons({ ...task, request_id: null, available_actions: rest });
   }
   return (task.available_actions || []).map((action) => `<button class="btn btn-${action === "request_changes" || action === "cancel" ? "soft" : "primary"} btn-small" data-action="task-action" data-id="${task.id}" data-task-action="${action}">${escapeHtml(TASK_ACTION_LABELS[action] || action)}</button>`).join("");
 }
@@ -1512,7 +1512,15 @@ function renderAssignments() {
   const tabs = TASK_BOXES.map((box) => `<button class="seg-btn${state.taskBox === box.key ? " active" : ""}" data-action="task-box" data-box="${box.key}" aria-pressed="${state.taskBox === box.key}">${escapeHtml(box.label)}</button>`).join("");
   const priorityFilter = `<select id="task-priority" class="filter-input" data-action="task-priority-filter" aria-label="Filter by priority"><option value="">All priorities</option>${TASK_PRIORITIES.map((value) => `<option value="${value}" ${state.taskPriority === value ? "selected" : ""}>${escapeHtml(TASK_PRIORITY_LABELS[value])}</option>`).join("")}</select>`;
   const statusFilter = `<select id="task-status" class="filter-input" data-action="task-status-filter" aria-label="Filter by status"><option value="">All statuses</option>${TASK_STATUSES.map((value) => `<option value="${value}" ${state.taskStatus === value ? "selected" : ""}>${escapeHtml(TASK_STATUS_LABELS[value])}</option>`).join("")}</select>`;
-  const tasks = state.tasks || [];
+  // Customer Service and the MD see two tabs: work about Tanzanian customers (Internal) and about diaspora ones.
+  const both = hasBothSides();
+  const sideNow = state.taskSide ?? ((attention.sides?.diaspora && !attention.sides?.internal) ? "diaspora" : "local");
+  const side = sideNow === "diaspora" ? "diaspora" : "local";
+  const everyTask = state.tasks || [];
+  const tasks = both ? everyTask.filter((task) => isDiasporaRow(task) === (side === "diaspora")) : everyTask;
+  const sideTabsHtml = both ? `<div class="toolbar"><div class="toolbar-filters"><div class="segmented" role="group" aria-label="Customer type">${sideTabs("task-side", side,
+    { local: everyTask.filter((task) => !isDiasporaRow(task)).length, diaspora: everyTask.filter(isDiasporaRow).length },
+    { local: attention.sides?.internal || 0, diaspora: attention.sides?.diaspora || 0 })}</div></div></div>` : "";
   const rows = tasks.map(taskRow).join("");
   const table = rows
     ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Task</th><th>Assigned by</th><th>Assigned to</th><th>Priority</th><th>Due</th><th>Status</th><th class="align-right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`
@@ -1524,6 +1532,7 @@ function renderAssignments() {
       ${tile("Assigned to you", attention.mine, "tasks", "green")}
       ${tile("Awaiting your review", attention.review, "check", "amber")}
     </div>
+    ${sideTabsHtml}
     <div class="toolbar">
       <div class="toolbar-filters"><div class="segmented" role="group" aria-label="Task sections">${tabs}</div>${priorityFilter}${statusFilter}</div>
       <div class="toolbar-end">${mayAssign ? `<button class="btn btn-primary" data-action="new-task">${icon("plus")}New Task</button>` : ""}</div>
@@ -1554,7 +1563,7 @@ async function refreshAttention() {
   try {
     state.attention = await api("/org/tasks/attention");
   } catch (error) {
-    state.attention = { total: 0, mine: 0, review: 0 };
+    state.attention = { total: 0, mine: 0, review: 0, sides: { internal: 0, diaspora: 0 } };
   }
   if (state.organization.me) state.organization.me.attention = state.attention;
   updateNavigation();
@@ -3101,7 +3110,7 @@ const WORK_FLOW = {
   sales: ["Website request arrives", "Customer Service calls the customer", "You prepare the contract", "Legal → Finance → MD", "Customer signs"],
   md: ["Sales prepares", "Legal reviews", "Finance checks the money", "You approve", "Legal releases to the customer"],
   legal: ["Sales submits", "You review and approve", "Finance checks the money", "You send it to the MD", "You release it and record the signature"],
-  desk: ["Diaspora customer signs up or asks in the portal", "You check their documents", "Legal verifies them", "You prepare the diaspora contract", "Customer signs in the portal"],
+  desk: ["Diaspora customer signs up or asks in the portal", "You check their documents", "Legal verifies them", "You hand the request to Customer Service", "You accept their report and prepare the contract"],
   cs: ["Sales hands you a request", "You contact the customer", "You write a short report", "Sales accepts it", "The customer becomes a client"],
 };
 
@@ -3867,7 +3876,7 @@ function renderClients() {
   const mayCreate = canModule("clients") && can("create");
   const filtered = Boolean(filters.project || filters.clientStatus);
   const all = state.clients || [];
-  const segTabs = [["", "All", all.length], ["local", "Ndani ya nchi", all.filter((c) => !c.is_diaspora).length], ["diaspora", "Diaspora", all.filter((c) => c.is_diaspora).length]]
+  const segTabs = [["", "All", all.length], ["local", "Internal", all.filter((c) => !c.is_diaspora).length], ["diaspora", "Diaspora", all.filter((c) => c.is_diaspora).length]]
     .map(([key, label, n]) => `<button class="seg-btn${segment === key ? " active" : ""}" data-action="client-segment" data-segment="${key}" aria-pressed="${segment === key}">${escapeHtml(label)} (${n})</button>`).join("");
   content.innerHTML = `
     ${diasporaDeskOnly() ? `<p class="muted notice-text">Diaspora Desk: you see diaspora customers only.</p>` : `<div class="toolbar"><div class="toolbar-filters"><div class="segmented" role="group" aria-label="Client type">${segTabs}</div></div></div>`}
@@ -3970,7 +3979,31 @@ function inSales() {
   return (state.organization.me?.user?.departments || []).some((department) => String(department.name).toUpperCase() === "SALES, MARKETING & OPERATIONS");
 }
 function mayHandOffRequests() {
-  return can("assign_tasks") && inSales();
+  // Sales hands Tanzanian requests to Customer Service; the Diaspora Desk does the same for diaspora ones.
+  return can("assign_tasks") && (inSales() || inDiasporaDesk());
+}
+
+/**
+ * Two sides of the business, Internal (Tanzania) and Diaspora. Customer Service
+ * and the MD see both and get one tab each; Sales sees Internal only and the
+ * Diaspora Desk Diaspora only, so for them there is nothing to switch.
+ */
+/** Which side has more waiting for me (so the tabs open where the work is). */
+function everythingNeeds(rows) {
+  const mine = (rows || []).filter(requestNeedsMe);
+  return mine.some((r) => !isDiasporaRow(r)) ? "local" : mine.some(isDiasporaRow) ? "diaspora" : "local";
+}
+function hasBothSides() {
+  if (diasporaDeskOnly()) return false;
+  const me = state.organization?.me;
+  return inCustomerService() || me?.scope === "organization" || isAdmin();
+}
+const deskOrSales = (row) => (isDiasporaRow(row) ? "the Diaspora Desk" : "Sales"); // who owns a request
+const isDiasporaRow = (row) => (row?.source ?? row?.request_source) === "diaspora-portal";
+/** The Internal / Diaspora tabs. A blinking dot says "there is work for you in this tab". */
+function sideTabs(action, current, counts, needs) {
+  return [["local", "Internal"], ["diaspora", "Diaspora"]].map(([key, label]) =>
+    `<button class="seg-btn${current === key ? " active" : ""}" data-action="${action}" data-segment="${key}" aria-pressed="${current === key}">${escapeHtml(label)} (${counts[key] || 0})${needs[key] ? `<span class="seg-dot" title="${needs[key]} waiting for you" aria-label="${needs[key]} waiting for you"></span>` : ""}</button>`).join("");
 }
 
 function requestStage(row) {
@@ -4028,7 +4061,7 @@ function reloadRequests() {
  * the contract made later belongs to the right client.
  */
 function mayApproveClients() {
-  return canModule("leads") && (inSales() || can("approve_management"));
+  return canModule("leads") && (inSales() || inDiasporaDesk() || can("approve_management"));
 }
 async function openBecomeClient(leadId) {
   const row = [...(state.requests || []), ...(state.organization.leads || [])].find((entry) => String(entry.id) === String(leadId));
@@ -4066,7 +4099,7 @@ function requestProgress(row, key) {
   switch (key) {
     case "new":
     case "existing":
-      return { done: row.task_status === "cancelled" ? "The last hand-off was cancelled" : "", next: "Waiting for Sales to hand it to Customer Service" };
+      return { done: row.task_status === "cancelled" ? "The last hand-off was cancelled" : "", next: `Waiting for ${deskOrSales(row)} to hand it to Customer Service` };
     case "message":
       return { done: "Message from the Contact page", next: "Waiting for Customer Service to answer" };
     case "with_cs":
@@ -4076,13 +4109,13 @@ function requestProgress(row, key) {
     case "reported":
       return { done: `${cs} reported back${when(row.task_submitted_at)}`, next: `Waiting for ${sales} (Sales) to approve the report` };
     case "contacted":
-      return { done: `Report approved by ${row.task_approved_by || sales}${when(row.task_approved_at)}`, next: "Waiting for Sales to arrange the appointment" };
+      return { done: `Report approved by ${row.task_approved_by || sales}${when(row.task_approved_at)}`, next: `Waiting for ${deskOrSales(row)} to arrange the appointment` };
     case "answered":
-      return { done: row.task_id ? `Report approved by ${row.task_approved_by || sales}` : "Answered by Customer Service", next: row.task_id ? "Waiting for Sales to arrange the appointment" : "Done" };
+      return { done: row.task_id ? `Report approved by ${row.task_approved_by || sales}` : "Answered by Customer Service", next: row.task_id ? `Waiting for ${deskOrSales(row)} to arrange the appointment` : "Done" };
     case "appointment":
       return { done: `Appointment booked${row.appointment_starts_at ? ` for ${formatDateTime(row.appointment_starts_at, true)}` : ""}`, next: "Sales meets the customer" };
     case "unreachable":
-      return { done: `${cs} could not reach the customer`, next: "Waiting for Sales to decide" };
+      return { done: `${cs} could not reach the customer`, next: `Waiting for ${deskOrSales(row)} to decide` };
     case "closed":
       return { done: "The customer declined", next: "Closed" };
     case "client":
@@ -4095,7 +4128,8 @@ function requestProgress(row, key) {
 function renderRequests() {
   if (!state.requests) { content.innerHTML = `<div class="panel">${emptyState("Loading requests", "", { iconName: "inbox", compact: true })}</div>`; return; }
   // Ndani ya nchi / Diaspora: each desk works its own side.
-  const segment = diasporaDeskOnly() ? "" : (state.requestSegment ?? (inDiasporaDesk() ? "diaspora" : ""));
+  const both = hasBothSides();
+  const segment = diasporaDeskOnly() ? "" : both ? ((state.requestSegment ?? (everythingNeeds(state.requests) === "diaspora" ? "diaspora" : "local")) === "diaspora" ? "diaspora" : "local") : (state.requestSegment ?? (inDiasporaDesk() ? "diaspora" : ""));
   const everything = state.requests;
   const all = everything.filter((row) => !segment || (segment === "diaspora" ? row.source === "diaspora-portal" : row.source !== "diaspora-portal"));
   const stage = state.requestStage || "";
@@ -4103,7 +4137,7 @@ function renderRequests() {
   // Only Sales hands requests to Customer Service; the MD follows, read only.
   const mayHandOff = mayHandOffRequests();
   // Converting a request into a client is Sales's step too.
-  const mayCreate = can("create") && (inSales() || inCustomerService());
+  const mayCreate = can("create") && (inSales() || inDiasporaDesk() || inCustomerService());
   const means = { phone: "Phone", whatsapp: "WhatsApp", email: "Email" };
   const count = (key) => all.filter((row) => requestStage(row) === key).length;
   // Only stages that hold requests (plus All and the one chosen), so the row
@@ -4127,7 +4161,7 @@ function renderRequests() {
     const cancelled = !row.client_id && row.task_status === "cancelled" ? `<span class="cell-sub">The last hand-off was cancelled</span>` : "";
     const openTaskBtn = (primary) => row.task_id ? `<button class="btn btn-small${primary ? " btn-primary" : ""}" data-action="open-task" data-id="${row.task_id}">${primary ? (mayHandOff ? "Review report" : "View report") : (mayHandOff ? "Open assignment" : "View")}</button>` : "";
     // Only Sales (assign_tasks) hands requests over; everyone else is told who acts next.
-    const handOff = mayHandOff ? `<button class="btn btn-small btn-primary" data-action="hand-off-lead" data-id="${row.id}">Hand to Customer Service</button>` : note("Waiting for Sales to hand it to Customer Service");
+    const handOff = mayHandOff ? `<button class="btn btn-small btn-primary" data-action="hand-off-lead" data-id="${row.id}">Hand to Customer Service</button>` : note(`Waiting for ${deskOrSales(row)} to hand it to Customer Service`);
     const convert = (primary) => mayApproveClients() && !row.client_id ? `<button class="btn btn-small${primary ? " btn-primary" : ""}" data-action="convert-lead" data-id="${row.id}" title="${row.service === "sell" ? "MKUYU accepts this owner as a Seller Client" : "Approve this customer as a client (only Sales and the MD can)"}">${row.service === "sell" ? "Accept as seller client" : "Become a client"}</button>` : "";
     // An accepted seller (a Seller Client) goes on to a Sell contract.
     const sellContractBtn = row.service === "sell" && row.client_id && canAuthorContracts()
@@ -4139,11 +4173,11 @@ function renderRequests() {
     let next = {
       new: handOff,
       existing: handOff + convert(false),
-      with_cs: mineToReport ? `<button class="btn btn-small btn-primary" data-action="request-outcome" data-id="${row.task_id}">Report outcome to Sales</button>` : openTaskBtn(false),
-      reported: mineToReport ? note("Waiting for Sales to approve") + openTaskBtn(false) : openTaskBtn(true),
+      with_cs: mineToReport ? `<button class="btn btn-small btn-primary" data-action="request-outcome" data-id="${row.task_id}">Report outcome to ${isDiasporaRow(row) ? "the Desk" : "Sales"}</button>` : openTaskBtn(false),
+      reported: mineToReport ? note(`Waiting for ${deskOrSales(row)} to approve`) + openTaskBtn(false) : openTaskBtn(true),
       contacted: arrangeBtn(true) + convert(!arrangeBtn(true)) + openTaskBtn(false),
       appointment: `${sellContractBtn}${arrangeBtn(false)}<button class="btn btn-small" data-action="open-alert-view" data-view="appointments">Open Appointments</button>`,
-      unreachable: (mayHandOff ? handOff.replace("Hand to Customer Service", "Hand off again") : note("Waiting for Sales to decide")) + openTaskBtn(false),
+      unreachable: (mayHandOff ? handOff.replace("Hand to Customer Service", "Hand off again") : note(`Waiting for ${deskOrSales(row)} to decide`)) + openTaskBtn(false),
       closed: openTaskBtn(false),
       client: sellContractBtn || arrangeBtn(true) || `<span class="muted cell-plain">Continue under Clients</span>`,
       message: inCustomerService() && can("edit")
@@ -4180,8 +4214,11 @@ function renderRequests() {
       <td class="align-right"><div class="row-actions">${next}</div></td>
     </tr>`;
   }).join("");
-  const segTabs = [["", "All", everything.length], ["local", "Ndani ya nchi", everything.filter((r) => r.source !== "diaspora-portal").length], ["diaspora", "Diaspora", everything.filter((r) => r.source === "diaspora-portal").length]]
-    .map(([key, label, n]) => `<button class="seg-btn${segment === key ? " active" : ""}" data-action="request-segment" data-segment="${key}" aria-pressed="${segment === key}">${escapeHtml(label)} (${n})</button>`).join("");
+  const sideCounts = { local: everything.filter((r) => !isDiasporaRow(r)).length, diaspora: everything.filter(isDiasporaRow).length };
+  const sideNeeds = { local: everything.filter((r) => !isDiasporaRow(r) && requestNeedsMe(r)).length, diaspora: everything.filter((r) => isDiasporaRow(r) && requestNeedsMe(r)).length };
+  const segTabs = both ? sideTabs("request-segment", segment, sideCounts, sideNeeds)
+    : [["", "All", everything.length], ["local", "Internal", sideCounts.local], ["diaspora", "Diaspora", sideCounts.diaspora]]
+      .map(([key, label, n]) => `<button class="seg-btn${segment === key ? " active" : ""}" data-action="request-segment" data-segment="${key}" aria-pressed="${segment === key}">${escapeHtml(label)} (${n})</button>`).join("");
   content.innerHTML = `
     ${diasporaDeskOnly() ? `<p class="muted notice-text">Diaspora Desk: you see diaspora requests only.</p>` : `<div class="toolbar"><div class="toolbar-filters"><div class="segmented" role="group" aria-label="Customer type">${segTabs}</div></div></div>`}
     <div class="toolbar"><div class="toolbar-filters"><div class="segmented" role="group" aria-label="Request stages">${tabs}</div></div><div class="toolbar-end"><span class="toolbar-count">${rows.length} request${rows.length === 1 ? "" : "s"}</span></div></div>
@@ -7841,6 +7878,7 @@ document.addEventListener("click", async (event) => {
   if (action === "hand-off-lead") handOffLead(target.dataset.id);
   if (action === "request-stage") { state.requestStage = target.dataset.stage || ""; render(); }
   if (action === "request-segment") { state.requestSegment = target.dataset.segment || ""; state.requestStage = ""; render(); }
+  if (action === "task-side") { state.taskSide = target.dataset.segment === "diaspora" ? "diaspora" : "local"; render(); }
   if (action === "client-segment") { state.clientSegment = target.dataset.segment || ""; render(); }
   if (action === "dm-open") openDiasporaConversation(id);
   if (action === "dm-send") sendDiasporaMessage();

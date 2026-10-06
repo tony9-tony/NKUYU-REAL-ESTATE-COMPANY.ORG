@@ -234,7 +234,7 @@ export const defaultRoles = [
   // purpose: the desk works as ONE shared queue, so every desk member sees every
   // diaspora customer and several can work at the same time.
   ["Diaspora Desk Manager", "Runs the diaspora desk: its shared customer queue, document checks, diaspora contracts and the team's work", 32, "department", ["submit_contract", "access_contracts", "request_changes", "access_clients", "access_leads", "access_appointments", "access_follow_ups", "access_documents", "view_properties", "view_projects", "access_reports", "view", "create", "edit", "delete", "approve", "export", "view_reports", ...taskWorkflow]],
-  ["Diaspora Desk Officer", "Serves diaspora customers from the shared desk queue: requests, follow-up, the first document check and preparing their contracts", 15, "department", ["submit_contract", "access_contracts", "request_changes", "access_clients", "access_leads", "access_appointments", "access_follow_ups", "access_documents", "view_properties", "view_projects", "access_reports", "view", "create", "edit", "view_reports"]],
+  ["Diaspora Desk Officer", "Serves diaspora customers from the shared desk queue: requests, follow-up, the first document check and preparing their contracts", 15, "department", ["submit_contract", "access_contracts", "request_changes", "access_clients", "access_leads", "access_appointments", "access_follow_ups", "access_documents", "view_properties", "view_projects", "access_reports", "view", "create", "edit", "view_reports", ...taskWorkflow]],
 
   ["Staff Member", "Basic operational access to own records", 10, "own", ["access_clients", "access_appointments", "view", "create", "edit"]],
 
