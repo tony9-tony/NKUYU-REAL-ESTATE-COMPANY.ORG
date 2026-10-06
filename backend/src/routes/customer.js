@@ -589,7 +589,7 @@ router.get("/portal", requireCustomer, route(async (req, res) => {
 // Diaspora and already linked to the client.
 const SERVICES = new Set(["buy", "rent"]);
 const CONTACT = new Set(["email", "whatsapp", "phone"]);
-const REQUEST_TEXT = { new: "Received · our Diaspora Desk will contact you", handed_off: "Our customer team is contacting you", contacted: "Contacted", appointment: "Meeting / viewing arranged", converted: "Moving to an agreement", lost: "Closed", closed: "Closed" };
+const REQUEST_TEXT = { new: "Pending · MKUYU has your request and will contact you soon", handed_off: "Our customer team is contacting you", contacted: "Contacted", appointment: "Meeting / viewing arranged", converted: "Moving to an agreement", lost: "Closed", closed: "Closed" };
 
 router.post("/preferences", requireCustomer, route(async (req, res) => {
   requireHeader(req);
@@ -639,6 +639,7 @@ router.get("/requests", requireCustomer, route(async (req, res) => {
       WHERE l.client_id=$1 AND l.source='diaspora-portal' ORDER BY l.id DESC LIMIT 50`, [req.customer.client_id])).rows;
   res.json(rows.map((r) => ({ reference: `D-${r.id}`, property_id: r.property_id, property: r.property_name || "Property", location: r.location || "",
     service: r.service, budget: r.budget === null ? null : Number(r.budget), date: fmtDate(r.created_at),
+    open: !['lost', 'closed'].includes(r.status), state: ['lost', 'closed'].includes(r.status) ? 'closed' : r.status === 'new' ? 'pending' : 'active',
     status: r.appointment_at ? `Meeting / viewing on ${fmtDate(r.appointment_at)}` : (REQUEST_TEXT[r.status] || "In progress") })));
 }));
 
