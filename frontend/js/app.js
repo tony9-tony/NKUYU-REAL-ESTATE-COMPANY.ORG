@@ -5850,7 +5850,7 @@ async function openKycDocument(clientId, docId = null) {
     host.innerHTML = type.startsWith("image/")
       ? `<img class="kyc-image" src="${kycViewerUrl}" alt="${escapeHtml(KYC_DOC_LABELS[doc.kind] || "Document")} of ${escapeHtml(row.name)}" data-action="kyc-zoom" title="Click to zoom">`
       : type === "application/pdf"
-        ? `<iframe class="kyc-pdf" src="${kycViewerUrl}" title="${escapeHtml(KYC_DOC_LABELS[doc.kind] || "Document")}"></iframe>`
+        ? `<iframe class="kyc-pdf" src="${kycViewerUrl}#view=Fit&pagemode=none" title="${escapeHtml(KYC_DOC_LABELS[doc.kind] || "Document")}"></iframe>`
         : `<div class="empty">This file type cannot be shown here. Use Download.</div>`;
   } catch (error) {
     host.innerHTML = `<div class="empty">${escapeHtml(error.message || "The document could not be opened.")}</div>`;
