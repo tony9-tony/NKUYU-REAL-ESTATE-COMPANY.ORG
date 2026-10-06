@@ -2415,3 +2415,15 @@ label.btn { cursor: pointer; }
 .dmc-menu button:hover { background: var(--surface-sunken, #f1f1f1); }
 .dmc-menu button.is-danger { color: #b3261e; }
 .dmc-deleted { font-style: italic; opacity: .75; font-size: 13.5px; }
+
+/* Stages editor, history, legal */
+.stages-form .stages-top { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 10px; }
+.stage-row { display: grid; grid-template-columns: 1fr 130px 150px auto; gap: 8px; margin-bottom: 8px; align-items: center; }
+.stage-row input, .stage-row select { min-width: 0; }
+@media (max-width: 640px) { .stage-row { grid-template-columns: 1fr 1fr; } .stage-row [name="title"] { grid-column: 1 / -1; } .stages-form .stages-top { grid-template-columns: 1fr; } }
+.history-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.history-list li { padding: 8px 12px; border-left: 3px solid #2f6f4f; background: var(--surface-sunken, #f6f6f4); border-radius: 8px; }
+.dm-head .dm-wa { margin-left: auto; }
+#stages-box { padding: 0 8px; }
+.stages-form { padding: 0; }
+.stages-form .stages-top label { text-align: left; }

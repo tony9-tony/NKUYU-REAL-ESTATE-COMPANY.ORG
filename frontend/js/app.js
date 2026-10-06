@@ -269,6 +269,7 @@ const viewMeta = {
   properties: ["Properties", "The property portfolio: status, price, location and photos"],
   clients: ["Clients", "People and companies, from first enquiry to signed agreement"],
   verification: ["Diaspora verification", "Diaspora sign-ups prove who they are: the Diaspora Desk verifies them, Legal then confirms nationality"],
+  "diaspora-legal": ["Property legal", "Legal records each property's title and where every ownership transfer stands; diaspora customers read it in their portal"],
   "diaspora-messages": ["Diaspora messages", "What diaspora customers write to the Diaspora Desk from their portal, and your replies"],
   contracts: ["Contracts", "Every agreement and where it sits in the approval workflow"],
   debts: ["Payments & debts", "Installments, balances, recorded payments and reminders"],
@@ -1075,6 +1076,7 @@ const NAV_ITEMS = [
   // Identity checks of diaspora sign-ups: the Diaspora Desk checks, Legal verifies.
   { view: "verification", label: "Diaspora verification", icon: "shield", group: "Business", diasporaVerification: true },
   { view: "diaspora-messages", label: "Diaspora messages", icon: "mail", group: "Business", diasporaVerification: true },
+  { view: "diaspora-legal", label: "Property legal", icon: "shield", group: "Business", diasporaVerification: true },
   // Leads live under "Requests & leads" (a tab there), not as a second menu entry.
   { view: "leads", label: "Leads", icon: "spark", module: "leads", permission: "view", group: "Business", mergedInto: "requests" },
   { view: "appointments", label: "Appointments", icon: "calendar", module: "appointments", permission: "view", group: "Business" },
@@ -4460,6 +4462,10 @@ function render() {
     renderDiasporaMessages();
     if (!state.dmRequested) loadDiasporaMessages();
   }
+  if (state.view === "diaspora-legal") {
+    renderDiasporaLegal();
+    if (!state.legalRequested) loadDiasporaLegal();
+  }
   if (state.view === "verification") {
     renderVerification();
     if (!state.verificationRequested || Date.now() - (state.verificationAt || 0) > 10000) loadVerification();
@@ -5299,7 +5305,7 @@ async function handleFormSubmit(event) {
   event.preventDefault();
   const form = event.target;
   // Forms with their own submit handler (the signed contract upload).
-  if (form.id === "signed-copy-form" || form.id === "statement-form" || form.id === "progress-form") return;
+  if (["signed-copy-form", "statement-form", "progress-form", "stages-form", "legal-form", "transfer-form"].includes(form.id)) return;
   const data = Object.fromEntries(new FormData(form));
   const type = modal.dataset.type;
   const id = form.dataset.id;
@@ -5770,7 +5776,7 @@ function renderVerification() {
   const rows = (data.rows || []).filter((row) => matches(row, filter));
   const tabs = [["todo", "Waiting for me"], ["submitted", "To verify"], ["nationality", "Legal: nationality"], ["unverified", "No documents yet"], ["rejected", "Sent back"], ["verified", "Verified"], ["all", "All"]]
     .map(([key, label]) => `<button class="seg-btn${filter === key ? " active" : ""}" data-action="verification-filter" data-filter-key="${key}">${escapeHtml(label)} (${(data.rows || []).filter((r) => matches(r, key)).length})</button>`).join("");
-  const docLabel = { passport: "Passport / NIDA", residence: "Residence abroad", other: "Other" };
+  const docLabel = { passport: "Passport / NIDA", selfie: "Selfie with passport", residence: "Residence abroad", other: "Other" };
   const list = rows.map((row) => {
     const missing = ["passport", "residence"].filter((kind) => !(row.documents || []).some((d) => d.kind === kind));
     const docs = ((row.documents || []).map((d) => `<button type="button" class="btn btn-ghost btn-small" data-action="kyc-doc" data-id="${row.id}" data-doc="${d.id}">${icon("file")}${escapeHtml(docLabel[d.kind] || d.kind)}${kycExpiry(d)}</button>`).join(" ") || `<span class="muted">None yet</span>`)
@@ -5778,6 +5784,7 @@ function renderVerification() {
     const check = row.residence_check === "check" ? `<span class="cell-sub" style="color:var(--danger)">Phone is ${escapeHtml(row.phone_country || "unknown")}, lives in ${escapeHtml(row.country || "?")}: ask the customer</span>` : `<span class="cell-sub">Phone matches ${escapeHtml(row.country || "")}</span>`;
     const actions = [
       (row.documents || []).length ? `<button class="btn btn-small" data-action="kyc-doc" data-id="${row.id}">Review documents</button>` : "",
+      `<button class="btn btn-small btn-ghost" data-action="kyc-history" data-id="${row.id}">History</button>`,
       (role.desk || role.legal) && docsIn(row) ? `<button class="btn btn-small btn-primary" data-action="kyc" data-kyc="verify" data-id="${row.id}">${icon("check")} Verify customer</button>` : "",
       role.legal && nationalityDue(row) ? `<button class="btn btn-small btn-primary" data-action="kyc" data-kyc="confirm_citizenship" data-id="${row.id}">Confirm nationality</button>` : "",
       (role.desk || role.legal) && row.verification_status === "verified" ? `<button class="btn btn-small btn-danger-ghost" data-action="kyc" data-kyc="revoke" data-id="${row.id}">Remove verification</button>` : "",
@@ -5804,7 +5811,7 @@ function renderVerification() {
 /* The customer's identity documents, opened inside the app: a photo or a PDF
    shown in a viewer, with the decision buttons beside it, so the Desk checks
    and verifies without downloading anything or leaving the page. */
-const KYC_DOC_LABELS = { passport: "Passport / NIDA", residence: "Proof of residence abroad", other: "Other document" };
+const KYC_DOC_LABELS = { passport: "Passport / NIDA", selfie: "Selfie with passport", residence: "Proof of residence abroad", other: "Other document" };
 let kycViewerUrl = null;
 
 async function openKycDocument(clientId, docId = null) {
@@ -5898,6 +5905,148 @@ const KYC_REASONS = [
   "The name on the document does not match the name on your account. Please upload a document with the same name.",
   "The document is cut off or has a corner missing. Please upload the whole page.",
 ];
+
+
+/* --------------------------------------------------------------------------
+   Verification history: what happened to a customer's identity check, in order.
+   -------------------------------------------------------------------------- */
+async function openKycHistory(clientId) {
+  const row = (state.verification?.rows || []).find((r) => String(r.id) === String(clientId));
+  modal.dataset.type = "kyc-history";
+  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">Verification history</h2><p class="modal-sub">${escapeHtml(row?.name || "Customer")}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div><div id="kyc-history" class="empty">Loading…</div>`;
+  modalBackdrop.hidden = false;
+  const host = document.getElementById("kyc-history");
+  try {
+    const list = await api(`/diaspora/verifications/${clientId}/history`);
+    host.className = "";
+    host.innerHTML = list.length ? `<ol class="history-list">${list.map((e) => `<li><strong>${escapeHtml(e.text)}</strong><span class="muted"> · ${escapeHtml(e.who)} · ${escapeHtml(formatDateTime(e.at, true))}</span>${e.note ? `<div class="field-help">${escapeHtml(e.note)}</div>` : ""}</li>`).join("")}</ol>` : `<div class="empty">Nothing recorded yet.</div>`;
+  } catch (error) { host.textContent = error.message || "Could not load the history."; }
+}
+
+/* --------------------------------------------------------------------------
+   Property legal: Legal's record of each title, and the ownership transfers.
+   -------------------------------------------------------------------------- */
+const LEGAL_LABELS = { not_checked: "Not checked", in_review: "In review", verified: "Verified", issues: "Issue found" };
+const LEGAL_TONES = { not_checked: "pending", in_review: "pending", verified: "approved", issues: "overdue" };
+const DEED_KINDS = ["Granted Right of Occupancy", "Certificate of Title", "Sectional title", "Customary right (CCRO)", "Other"];
+
+async function loadDiasporaLegal({ quiet = false } = {}) {
+  state.legalRequested = true;
+  try { state.legal = await api("/diaspora/legal"); }
+  catch (error) { state.legal = { properties: [], transfers: [], error: error.message || "Unable to load." }; }
+  if (state.view === "diaspora-legal" && modalBackdrop.hidden) render();
+}
+
+function renderDiasporaLegal() {
+  const data = state.legal;
+  if (!data) { content.innerHTML = `<div class="panel">${emptyState("Loading", "", { iconName: "shield", compact: true })}</div>`; return; }
+  if (data.error) { content.innerHTML = `<div class="panel">${escapeHtml(data.error)}</div>`; return; }
+  const filter = state.legalFilter || "todo";
+  const tabs = [["todo", "To check"], ["verified", "Verified"], ["issues", "Issues"], ["all", "All"]];
+  const matches = (p) => filter === "all" || (filter === "todo" ? ["not_checked", "in_review"].includes(p.legal_status) : p.legal_status === filter);
+  const rows = data.properties.filter(matches);
+  const count = (key) => data.properties.filter((p) => key === "all" || (key === "todo" ? ["not_checked", "in_review"].includes(p.legal_status) : p.legal_status === key)).length;
+  const propertyRows = rows.map((p) => `<tr><td><span class="cell-main">${escapeHtml(p.name)}</span><span class="cell-sub">${escapeHtml([p.project_name, p.location].filter(Boolean).join(" · "))}</span></td>
+      <td>${badge(LEGAL_LABELS[p.legal_status] || p.legal_status, LEGAL_TONES[p.legal_status] || "pending")}${p.legal_note ? `<span class="cell-sub">${escapeHtml(p.legal_note)}</span>` : ""}</td>
+      <td>${p.title_deed_no ? `<span class="cell-main">${escapeHtml(p.title_deed_no)}</span><span class="cell-sub">${escapeHtml(p.title_deed_kind || "")}</span>` : `<span class="muted">—</span>`}</td>
+      <td>${p.legal_checked_at ? `<span class="cell-sub">${escapeHtml(p.legal_checked_by_name || "")} · ${escapeHtml(formatDate(p.legal_checked_at))}</span>` : `<span class="muted">—</span>`}</td>
+      <td class="align-right">${data.can_edit ? `<button class="btn btn-small" data-action="legal-edit" data-id="${p.id}">Record</button>` : ""}</td></tr>`).join("");
+  const stageLabel = Object.fromEntries(data.stages.map((s) => [s.key, s.label]));
+  const transferRows = data.transfers.map((t) => `<tr><td><span class="cell-main">${escapeHtml(t.client_name)}</span><span class="cell-sub">${escapeHtml([t.contract_number, t.property_name].filter(Boolean).join(" · "))}</span></td>
+      <td>${badge(stageLabel[t.transfer_stage] || t.transfer_stage, t.transfer_stage === "transferred" ? "approved" : t.transfer_stage === "not_started" ? "pending" : "active")}${t.transfer_note ? `<span class="cell-sub">${escapeHtml(t.transfer_note)}</span>` : ""}</td>
+      <td>${t.transfer_updated_at ? `<span class="cell-sub">${escapeHtml(formatDate(t.transfer_updated_at))}</span>` : `<span class="muted">—</span>`}</td>
+      <td class="align-right">${data.can_edit ? `<button class="btn btn-small" data-action="transfer-edit" data-id="${t.id}">Update</button>` : ""}</td></tr>`).join("");
+  content.innerHTML = `<div class="page-tip">${icon("info")}<span><strong>Legal</strong> records what it has checked on each property. Diaspora customers who buy it read the status, the title deed number and your note in their portal, and are e-mailed when it changes.${data.can_edit ? "" : " You can read this page; Legal makes the changes."}</span></div>
+    <div class="toolbar"><div class="toolbar-filters"><div class="segmented" role="group" aria-label="Legal status">${tabs.map(([key, label]) => `<button class="seg-btn${filter === key ? " active" : ""}" data-action="legal-filter" data-filter-key="${key}">${label} (${count(key)})</button>`).join("")}</div></div></div>
+    ${rows.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Property</th><th>Legal status</th><th>Title deed</th><th>Checked</th><th class="align-right"></th></tr></thead><tbody>${propertyRows}</tbody></table></div>` : `<div class="panel">${emptyState("Nothing here", "No property in this group.", { iconName: "shield", compact: true })}</div>`}
+    <h3 class="section-title" style="margin:24px 0 8px">Ownership transfers</h3>
+    ${data.transfers.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Customer</th><th>Transfer stage</th><th>Updated</th><th class="align-right"></th></tr></thead><tbody>${transferRows}</tbody></table></div>` : `<div class="panel">${emptyState("No transfers yet", "A purchase appears here once the customer has signed the agreement.", { iconName: "contract", compact: true })}</div>`}`;
+}
+
+function openLegalModal(propertyId) {
+  const p = (state.legal?.properties || []).find((x) => String(x.id) === String(propertyId));
+  if (!p) return;
+  modal.dataset.type = "legal";
+  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">Legal status</h2><p class="modal-sub">${escapeHtml(p.name)}${p.location ? ` · ${escapeHtml(p.location)}` : ""}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
+    <form id="legal-form" class="form-grid" data-id="${p.id}">
+      <div class="field"><label for="legal-status">Status</label><select id="legal-status" name="legal_status">${Object.entries(LEGAL_LABELS).map(([k, v]) => `<option value="${k}"${p.legal_status === k ? " selected" : ""}>${v}</option>`).join("")}</select></div>
+      <div class="field"><label for="legal-deed">Title deed number</label><input id="legal-deed" name="title_deed_no" maxlength="80" value="${escapeHtml(p.title_deed_no || "")}"></div>
+      <div class="field full"><label for="legal-kind">Kind of title</label><input id="legal-kind" name="title_deed_kind" maxlength="80" list="deed-kinds" value="${escapeHtml(p.title_deed_kind || "")}"><datalist id="deed-kinds">${DEED_KINDS.map((k) => `<option value="${escapeHtml(k)}">`).join("")}</datalist></div>
+      <div class="field full"><label for="legal-note">Note the customer reads</label><textarea id="legal-note" name="legal_note" rows="3" maxlength="1000" placeholder="e.g. Title checked at the Land Registry; no encumbrances">${escapeHtml(p.legal_note || "")}</textarea><span class="field-help">Required when an issue is found. Customers with this property are e-mailed when it becomes Verified or Issue.</span></div>
+      <div class="form-actions"><button type="button" class="btn" data-action="close-modal">Cancel</button><button type="submit" class="btn btn-primary">Save</button></div>
+    </form>`;
+  modalBackdrop.hidden = false;
+}
+function openTransferModal(contractId) {
+  const t = (state.legal?.transfers || []).find((x) => String(x.id) === String(contractId));
+  if (!t) return;
+  modal.dataset.type = "transfer";
+  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">Ownership transfer</h2><p class="modal-sub">${escapeHtml(t.client_name)} · ${escapeHtml([t.contract_number, t.property_name].filter(Boolean).join(" · "))}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
+    <form id="transfer-form" class="form-grid" data-id="${t.id}">
+      <div class="field full"><label for="transfer-stage">Where the transfer stands</label><select id="transfer-stage" name="stage">${state.legal.stages.map((s) => `<option value="${s.key}"${t.transfer_stage === s.key ? " selected" : ""}>${escapeHtml(s.label)}</option>`).join("")}</select></div>
+      <div class="field full"><label for="transfer-note">Note (the customer reads it)</label><textarea id="transfer-note" name="note" rows="2" maxlength="500">${escapeHtml(t.transfer_note || "")}</textarea></div>
+      <div class="form-actions"><button type="button" class="btn" data-action="close-modal">Cancel</button><button type="submit" class="btn btn-primary">Save and notify the customer</button></div>
+    </form>`;
+  modalBackdrop.hidden = false;
+}
+document.addEventListener("submit", async (event) => {
+  const form = event.target;
+  if (form.id !== "legal-form" && form.id !== "transfer-form") return;
+  event.preventDefault();
+  const data = Object.fromEntries(new FormData(form));
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  try {
+    await api(form.id === "legal-form" ? `/diaspora/legal/properties/${form.dataset.id}` : `/diaspora/legal/contracts/${form.dataset.id}/transfer`, { method: "POST", body: JSON.stringify(data) });
+    showToast("Saved.");
+    closeModal();
+    loadDiasporaLegal();
+  } catch (error) { showToast(error.message || "Could not save."); button.disabled = false; }
+});
+
+/* --------------------------------------------------------------------------
+   Project stages: the building steps and overall progress diaspora buyers follow.
+   -------------------------------------------------------------------------- */
+const STANDARD_STAGES = ["Land clearing and survey", "Foundation", "Structure and walls", "Roofing", "Finishing", "Handover"];
+function stageRowHtml(s = {}) {
+  return `<div class="stage-row"><input name="title" maxlength="100" placeholder="Stage, e.g. Foundation" value="${escapeHtml(s.title || "")}" aria-label="Stage">
+    <select name="status" aria-label="Status"><option value="upcoming"${s.status === "upcoming" || !s.status ? " selected" : ""}>Upcoming</option><option value="current"${s.status === "current" ? " selected" : ""}>In progress</option><option value="done"${s.status === "done" ? " selected" : ""}>Done</option></select>
+    <input name="date" type="date" value="${escapeHtml(s.status === "done" ? (s.done_date || "") : (s.planned_date || ""))}" aria-label="Date" title="Planned date, or the date it was completed">
+    <button type="button" class="btn btn-danger-ghost btn-small" data-action="stage-remove" aria-label="Remove stage">✕</button></div>`;
+}
+function addStageRow() { document.getElementById("stage-rows")?.insertAdjacentHTML("beforeend", stageRowHtml()); }
+function fillStandardStages() {
+  const host = document.getElementById("stage-rows");
+  if (!host || (host.children.length && !window.confirm("Replace the stages below with the standard list?"))) return;
+  host.innerHTML = STANDARD_STAGES.map((title, i) => stageRowHtml({ title, status: i === 0 ? "current" : "upcoming" })).join("");
+}
+async function loadStagesEditor(projectId) {
+  const host = document.getElementById("stages-box");
+  if (!host) return;
+  try {
+    const d = await api(`/projects/${projectId}/stages`);
+    host.innerHTML = `<form id="stages-form" data-project="${escapeHtml(String(projectId))}" class="stages-form">
+      <div class="stages-top"><div class="field"><label for="stages-pct">Overall progress (%)</label><input id="stages-pct" name="progress_pct" type="number" min="0" max="100" step="1" value="${d.progress_pct ?? ""}" placeholder="auto"></div>
+        <div class="field"><label for="stages-expected">Expected completion</label><input id="stages-expected" name="expected_completion" type="date" value="${escapeHtml(d.expected_completion || "")}"></div></div>
+      <div id="stage-rows">${d.stages.map(stageRowHtml).join("")}</div>
+      <div class="form-actions"><button type="button" class="btn btn-ghost btn-small" data-action="stage-add">+ Add stage</button><button type="button" class="btn btn-ghost btn-small" data-action="stage-standard">Standard stages</button><span class="spacer"></span><button type="submit" class="btn btn-primary">Save stages</button></div>
+      <span class="field-help">Leave progress empty to work it out from the stages. When a stage is marked Done, customers with a contract here are e-mailed.</span></form>`;
+  } catch (error) { host.textContent = error.message || "Could not load the stages."; }
+}
+document.addEventListener("submit", async (event) => {
+  if (event.target.id !== "stages-form") return;
+  event.preventDefault();
+  const form = event.target;
+  const rows = [...form.querySelectorAll(".stage-row")].map((row) => {
+    const status = row.querySelector('[name="status"]').value, date = row.querySelector('[name="date"]').value || null;
+    return { title: row.querySelector('[name="title"]').value, status, planned_date: status === "done" ? null : date, done_date: status === "done" ? date : null };
+  });
+  try {
+    await api(`/projects/${form.dataset.project}/stages`, { method: "PUT", body: JSON.stringify({ stages: rows, progress_pct: form.progress_pct.value === "" ? null : Number(form.progress_pct.value), expected_completion: form.expected_completion.value || null }) });
+    showToast("Stages saved.");
+    loadStagesEditor(form.dataset.project);
+  } catch (error) { showToast(error.message || "Could not save the stages."); }
+});
 
 /* --------------------------------------------------------------------------
    Diaspora messages: what customers write from their portal, and the desk's replies.
@@ -6056,6 +6205,13 @@ function dmDayLabel(iso) {
 function dmInitials(name) { return String(name || "?").trim().split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?"; }
 
 const DM_REACTIONS = ["👍", "❤️", "😂", "😮", "🙏", "✅"];
+/** A WhatsApp chat with the customer, opened from the Desk's own WhatsApp (no API needed). */
+function dmWhatsApp(client) {
+  const digits = String(client?.phone || "").replace(/\D/g, "");
+  if (digits.length < 8) return "";
+  const text = encodeURIComponent(`Hello ${String(client.name || "").split(" ")[0]}, this is the MKUYU Diaspora Desk.`);
+  return `<a class="btn btn-small btn-ghost dm-wa" href="https://wa.me/${digits}?text=${text}" target="_blank" rel="noopener noreferrer" title="Open a WhatsApp chat with ${escapeHtml(client.name)}">WhatsApp</a>`;
+}
 function dmTick(m) {
   if (m.read) return `<span class="dmc-tick is-seen" title="Read by the customer">✓✓</span>`;
   if (m.delivered) return `<span class="dmc-tick" title="Delivered">✓✓</span>`;
@@ -6125,7 +6281,7 @@ function renderDiasporaMessages() {
   const thread = !state.dmSelected ? `<div class="dm-empty">${emptyState("Pick a conversation", "Customers' messages appear on the left. Open one to read it and reply.", { iconName: "mail", compact: true })}</div>`
     : !conv ? `<div class="dm-empty">${emptyState("Loading", "", { iconName: "mail", compact: true })}</div>`
     : `<div class="dm-head"><button type="button" class="btn btn-small btn-ghost dm-back" data-action="dm-back">Back</button><span class="dmc-avatar dmc-avatar--lg" aria-hidden="true">${escapeHtml(dmInitials(conv.client.name))}</span>
-         <div class="dm-headtext"><strong>${escapeHtml(conv.client.name)}${conv.client.verification_status === "verified" ? ` <span class="badge-verified" title="Identity verified">${icon("check")}</span>` : ""}</strong><span class="muted" id="dm-status">${conv.typing ? "typing…" : escapeHtml(conv.client.country || "")}</span></div></div>
+         <div class="dm-headtext"><strong>${escapeHtml(conv.client.name)}${conv.client.verification_status === "verified" ? ` <span class="badge-verified" title="Identity verified">${icon("check")}</span>` : ""}</strong><span class="muted" id="dm-status">${conv.typing ? "typing…" : escapeHtml(conv.client.country || "")}</span></div>${dmWhatsApp(conv.client)}</div>
        <div class="dm-thread" id="dm-thread" role="log" aria-live="polite">${dmThreadHtml(conv)}</div>
        ${data.can_reply ? `<div class="dm-replying" id="dm-replying" hidden><div><strong id="dm-replying-name"></strong><span id="dm-replying-text"></span></div><button type="button" data-action="dm-reply-cancel" aria-label="Cancel reply">✕</button></div><div class="dm-compose"><textarea id="dm-reply" rows="1" maxlength="2000" placeholder="Write a reply… (Enter to send, Shift+Enter for a new line)"></textarea><button type="button" class="dmc-send" data-action="dm-send" aria-label="Send reply">${icon("send")}</button></div>` : `<p class="muted dm-readonly">You can read these messages. Replies are sent by the Diaspora Desk.</p>`}`;
   content.innerHTML = `<div class="page-tip">${icon("info")}<span>Customers write to the Diaspora Desk from the <strong>Messages</strong> tab of their portal. New messages appear here by themselves; your reply is e-mailed to the customer too.</span></div>
@@ -6304,6 +6460,9 @@ async function openProgress(projectId) {
   modal.dataset.type = "progress";
   modal.classList.add("modal-wide");
   modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">Construction updates</h2><p class="modal-sub">${escapeHtml(project?.name || "Project")} · diaspora customers with a contract here see these in their portal</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
+    <h3 class="section-title" style="margin:4px 24px 8px">Stages and progress</h3>
+    <div id="stages-box" class="empty">Loading…</div>
+    <h3 class="section-title" style="margin:20px 24px 8px">Publish an update</h3>
     <form id="progress-form" class="form-grid" data-project="${escapeHtml(String(projectId))}">
       <div class="field full"><label for="progress-title">Title</label><input id="progress-title" name="title" required maxlength="160" placeholder="e.g. Foundation completed"></div>
       <div class="field"><label for="progress-date">Date</label><input id="progress-date" name="update_date" type="date" value="${new Date().toISOString().slice(0, 10)}"></div>
@@ -6313,6 +6472,7 @@ async function openProgress(projectId) {
     </form>
     <div id="progress-list" class="empty">Loading…</div>`;
   modalBackdrop.hidden = false;
+  loadStagesEditor(projectId);
   await loadProgressList(projectId);
 }
 
@@ -7511,6 +7671,14 @@ document.addEventListener("click", async (event) => {
   if (action === "dm-delete-all") deleteDmMessage(id, "all");
   if (action === "dm-back") { state.dmEditing = null; state.dmReplyTo = null; state.dmSelected = null; state.dmConversation = null; render(); }
   if (action === "kyc") kycAction(id, target.dataset.kyc);
+  if (action === "kyc-history") openKycHistory(id);
+  if (action === "legal-filter") { state.legalFilter = target.dataset.filterKey; render(); }
+  if (action === "legal-edit") openLegalModal(id);
+  if (action === "transfer-edit") openTransferModal(id);
+  if (action === "stage-add") addStageRow();
+  if (action === "stage-remove") target.closest(".stage-row")?.remove();
+  if (action === "stage-standard") fillStandardStages();
+  if (action === "project-stages-open") openProgress(id);
   if (action === "kyc-doc") openKycDocument(id, target.dataset.doc || null);
   if (action === "kyc-zoom-in" || action === "kyc-zoom-out") { state.kycZoom = Math.min(300, Math.max(50, (state.kycZoom || 100) + (action === "kyc-zoom-in" ? 25 : -25))); drawKycPage(); }
   if (action === "file-overlay-download" && state.fileOverlay) downloadFile(state.fileOverlay.path + (state.fileOverlay.path.includes("?") ? "&" : "?") + "download=1", state.fileOverlay.filename).catch((error) => showToast(error.message || "Download failed."));
