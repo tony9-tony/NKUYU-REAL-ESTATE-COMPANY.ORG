@@ -6105,6 +6105,7 @@ async function loadDiasporaMessages({ quiet = false } = {}) {
     state.dmThreads = await api("/diaspora/messages");
     if (state.dmSelected) state.dmConversation = await api(`/diaspora/messages/${state.dmSelected}`);
   } catch (error) { if (!quiet || !state.dmThreads) state.dmThreads = { rows: [], error: error.message || "Unable to load." }; }
+  renderStaffCallBanner();
   if (state.view === "diaspora-messages") {
     // New messages slot into the open page; the reply box and what is typed in it are never touched.
     if (document.querySelector(".dm")) paintDiasporaMessages(); else render();
@@ -6252,6 +6253,58 @@ function dmDayLabel(iso) {
 function dmInitials(name) { return String(name || "?").trim().split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?"; }
 
 const DM_REACTIONS = ["👍", "❤️", "😂", "😮", "🙏", "✅"];
+
+/* A phone ring: two soft tones every two seconds, only while a call is waiting.
+   Browsers allow sound only after the person has clicked or typed once on the page. */
+let ringCtx = null, ringTimer = null, ringTitle = null;
+function unlockRing() { try { ringCtx = ringCtx || new (window.AudioContext || window.webkitAudioContext)(); ringCtx.resume?.(); } catch { /* no audio */ } }
+["pointerdown", "keydown"].forEach((name) => document.addEventListener(name, unlockRing, { once: true, passive: true }));
+function ringBeep() {
+  if (!ringCtx || ringCtx.state !== "running") return;
+  [0, 0.28].forEach((delay, i) => {
+    const osc = ringCtx.createOscillator(), gain = ringCtx.createGain(), t = ringCtx.currentTime + delay;
+    osc.frequency.value = i ? 523 : 659; osc.type = "sine";
+    gain.gain.setValueAtTime(0.0001, t); gain.gain.exponentialRampToValueAtTime(0.18, t + 0.03); gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.24);
+    osc.connect(gain).connect(ringCtx.destination); osc.start(t); osc.stop(t + 0.26);
+  });
+}
+function startRing(label) {
+  if (ringTitle === null) ringTitle = document.title;
+  document.title = `📞 ${label}`;
+  if (ringTimer) return;
+  ringBeep(); ringTimer = setInterval(ringBeep, 2000);
+}
+function stopRing() {
+  clearInterval(ringTimer); ringTimer = null;
+  if (ringTitle !== null) { document.title = ringTitle; ringTitle = null; }
+}
+
+/** Customers ringing the Diaspora Desk: a banner on whatever page the person is on, with a ring. */
+function renderStaffCallBanner() {
+  const calls = (state.dmThreads?.calls || []).filter((c) => !(state.view === "diaspora-messages" && String(state.dmSelected) === String(c.client_id)));
+  let bar = document.getElementById("staff-call-banner");
+  if (!calls.length) { bar?.remove(); if (!(state.dmConversation?.call?.status === "ringing" && !state.dmConversation.call.mine)) stopRing(); return; }
+  const c = calls[0];
+  startRing(`${c.client_name} is calling`);
+  const key = `${c.id}`;
+  if (bar && bar.dataset.key === key) return;
+  if (!bar) { bar = document.createElement("div"); bar.id = "staff-call-banner"; bar.setAttribute("role", "alert"); document.body.appendChild(bar); }
+  bar.dataset.key = key;
+  bar.innerHTML = `<span>📹 <strong>${escapeHtml(c.client_name)}</strong> is calling the Diaspora Desk</span>
+    <span class="dm-call-actions"><button type="button" class="btn btn-small btn-primary" data-call-join>Join</button><button type="button" class="btn btn-small" data-call-decline>Decline</button><button type="button" class="btn btn-small btn-ghost" data-call-chat>Open chat</button></span>`;
+  bar.onclick = async (event) => {
+    if (event.target.closest("[data-call-join]")) {
+      window.open(c.url, "_blank");
+      try { await api(`/diaspora/calls/${c.id}/answer`, { method: "POST", body: JSON.stringify({}) }); } catch (error) { showToast(error.message || "The call has ended."); }
+    } else if (event.target.closest("[data-call-decline]")) {
+      try { await api(`/diaspora/calls/${c.id}/end`, { method: "POST", body: JSON.stringify({ decline: true }) }); } catch { /* already over */ }
+    } else if (event.target.closest("[data-call-chat]")) {
+      state.dmSelected = Number(c.client_id); state.dmConversation = null; state.view = "diaspora-messages"; updateNavigation(); render(); openDiasporaConversation(state.dmSelected);
+    } else return;
+    bar.remove(); loadDiasporaMessages({ quiet: true });
+  };
+}
+
 /** The call strip above the conversation: ringing, waiting or in progress. */
 function dmCallHtml(call) {
   if (!call) return "";
@@ -6337,6 +6390,8 @@ function paintDiasporaMessages() {
     const html = dmCallHtml(state.dmConversation.call);
     if (callBox.dataset.sig !== html) { callBox.innerHTML = html; callBox.dataset.sig = html; }
     callBox.hidden = !state.dmConversation.call;
+    const cc = state.dmConversation.call;
+    if (cc && cc.status === "ringing" && !cc.mine) startRing(`${state.dmConversation.client.name} is calling`); else if (!document.getElementById("staff-call-banner")) stopRing();
   }
   const statusLine = document.getElementById("dm-status");
   if (statusLine && state.dmConversation) statusLine.textContent = state.dmConversation.typing ? "typing…" : (state.dmConversation.client.country || "");

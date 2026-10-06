@@ -17,7 +17,7 @@ import PDFDocument from "pdfkit";
 import { query, queryOne } from "../db.js";
 import { mailConfigured, sendMail } from "../mail.js";
 import { recordVerificationEvent } from "../notify/diasporaNotices.js";
-import { callView, currentCall, newRoom } from "../calls.js";
+import { callView, currentCall, finishCall, newRoom } from "../calls.js";
 import { broadcastChange } from "../live.js";
 import { clearTyping, DELETE_ALL_WINDOW_MS, EDIT_WINDOW_MS, isTyping, REACTIONS, setTyping } from "../typing.js";
 import { receiptCoverage, writeReceiptPdf } from "../payments/notices.js";
@@ -596,11 +596,10 @@ router.post("/calls/:id/answer", requireCustomer, route(async (req, res) => {
 }));
 router.post("/calls/:id/end", requireCustomer, route(async (req, res) => {
   requireHeader(req);
-  await query("UPDATE video_calls SET status=CASE WHEN status='ringing' AND started_by='staff' AND $3 THEN 'declined' WHEN status='ringing' THEN 'missed' ELSE 'ended' END, ended_at=NOW() WHERE id=$1 AND client_id=$2 AND status IN ('ringing','active')",
-    [idParam(req.params.id), req.customer.client_id, req.body?.decline === true]);
-  broadcastChange("diaspora");
+  await finishCall(idParam(req.params.id), { clientId: req.customer.client_id, decline: req.body?.decline === true });
   res.json({ ok: true });
 }));
+
 
 router.get("/requests", requireCustomer, route(async (req, res) => {
   const rows = (await query(

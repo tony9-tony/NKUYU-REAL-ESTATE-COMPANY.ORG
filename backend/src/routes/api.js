@@ -96,7 +96,7 @@ import { generateFromWordTemplate, templateFileUnknownPlaceholders, templateWord
 import { clearContractSignatureDocument, contractSignature, signContractDocument } from "../contracts/signature.js";
 import { docxToPreview } from "../contracts/docxPreview.js";
 import { announceWrites, broadcastChange, liveStream } from "../live.js";
-import { callView, currentCall, newRoom } from "../calls.js";
+import { callsRingingDesk, callView, currentCall, finishCall, newRoom } from "../calls.js";
 import { customersOf, notifyCustomer, recordVerificationEvent } from "../notify/diasporaNotices.js";
 import { clearTyping, isTyping, REACTIONS, setTyping, DELETE_ALL_WINDOW_MS, EDIT_WINDOW_MS } from "../typing.js";
 import { RENT_STATUSES, SALE_STATUSES, categoryStatusesFrom, overallStatus } from "../models/propertyStatus.js";
@@ -2609,7 +2609,7 @@ router.get("/diaspora/messages", route(async (req, res) => {
        FROM clients c WHERE c.organization_id=$1 AND c.is_diaspora=TRUE AND EXISTS (SELECT 1 FROM customer_messages m WHERE m.client_id=c.id)
       ORDER BY (SELECT MAX(created_at) FROM customer_messages m WHERE m.client_id=c.id) DESC LIMIT 200`, [await organizationId()])).rows;
   await query("UPDATE customer_messages SET delivered_at=NOW() WHERE sender='customer' AND delivered_at IS NULL AND client_id = ANY($1::int[])", [rows.map((r) => r.id)]);
-  res.json({ rows, can_reply: role.desk || role.legal });
+  res.json({ rows, can_reply: role.desk || role.legal, calls: await callsRingingDesk(await organizationId(), req.user.display_name || "Diaspora Desk") });
 }));
 router.get("/diaspora/messages/:id", route(async (req, res) => {
   await verificationRole(req);
@@ -2664,10 +2664,10 @@ router.post("/diaspora/calls/:id/answer", route(async (req, res) => {
 router.post("/diaspora/calls/:id/end", route(async (req, res) => {
   const role = await verificationRole(req);
   if (!role.desk && !role.legal) throw new HttpError(403, "Only the Diaspora Desk or Legal can end calls.");
-  await query("UPDATE video_calls SET status=CASE WHEN status='ringing' AND started_by='customer' AND $2 THEN 'declined' WHEN status='ringing' THEN 'missed' ELSE 'ended' END, ended_at=NOW() WHERE id=$1 AND status IN ('ringing','active')", [parseId(req.params.id), req.body?.decline === true]);
-  broadcastChange("diaspora");
+  await finishCall(parseId(req.params.id), { decline: req.body?.decline === true });
   res.json({ ok: true });
 }));
+
 router.post("/diaspora/messages/:id/typing", route(async (req, res) => {
   const role = await verificationRole(req);
   if (!role.desk && !role.legal) return res.json({ ok: true });

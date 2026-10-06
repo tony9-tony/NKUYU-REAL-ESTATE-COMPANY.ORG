@@ -147,6 +147,8 @@ try {
     const c = (await conv()).payload.call;
     assert.equal((await staff(`/diaspora/calls/${c.id}/answer`, { token: desk, method: "POST", body: {} })).status, 200);
     assert.equal((await staff(`/diaspora/calls/${c.id}/end`, { token: desk, method: "POST", body: {} })).status, 200);
+    const lines = (await customer(`/messages/poll?after=0&peek=1`, { cookie })).payload.messages.map((m) => m.body || m.text || "");
+    assert.ok(lines.some((t) => /Video call · /.test(t)), "call history line in chat: " + JSON.stringify(lines));
     assert.equal((await staff(`/diaspora/calls/${cid}`, { token: sales, method: "POST", body: {} })).status, 403);
   });
 } finally {
