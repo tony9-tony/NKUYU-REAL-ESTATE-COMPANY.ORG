@@ -17,7 +17,7 @@ import PDFDocument from "pdfkit";
 import { query, queryOne } from "../db.js";
 import { mailConfigured, sendMail } from "../mail.js";
 import { broadcastChange } from "../live.js";
-import { clearTyping, isTyping, REACTIONS, setTyping } from "../typing.js";
+import { clearTyping, DELETE_ALL_WINDOW_MS, EDIT_WINDOW_MS, isTyping, REACTIONS, setTyping } from "../typing.js";
 import { receiptCoverage, writeReceiptPdf } from "../payments/notices.js";
 import { documentUploadsDir, progressUploadsDir, resolveStoredFile, safeDisplayFilename } from "../uploads.js";
 import { isHttps, isProduction, readCookie } from "../security.js";
@@ -696,22 +696,24 @@ const fileHeaders = (res, mime, filename, download) => {
 const idParam = (value) => { const n = Number(value); if (!Number.isSafeInteger(n) || n < 1) throw new HttpError(404, "not found"); return n; };
 
 // ---- Messages with the Diaspora Desk --------------------------------------------
-const MESSAGE_SELECT = `SELECT m.*, u.display_name AS staff_name, r.body AS reply_body, r.sender AS reply_sender, ru.display_name AS reply_staff_name
+const MESSAGE_SELECT = `SELECT m.*, u.display_name AS staff_name, r.body AS reply_body, r.sender AS reply_sender, r.deleted_at AS reply_deleted, ru.display_name AS reply_staff_name
     FROM customer_messages m LEFT JOIN users u ON u.id=m.staff_user_id
     LEFT JOIN customer_messages r ON r.id=m.reply_to LEFT JOIN users ru ON ru.id=r.staff_user_id`;
 // Seen from the customer's side: "me" is the customer, "desk" the other party.
 const messageRow = (m) => ({
-  id: m.id, from: m.sender, name: m.sender === "staff" ? (m.staff_name || "Diaspora Desk") : "You", body: m.body, at: m.created_at,
+  id: m.id, from: m.sender, name: m.sender === "staff" ? (m.staff_name || "Diaspora Desk") : "You", body: m.deleted_at ? "" : m.body, at: m.created_at,
+  deleted: Boolean(m.deleted_at), edited: Boolean(m.edited_at) && !m.deleted_at,
   read: Boolean(m.read_at), delivered: Boolean(m.delivered_at || m.read_at),
   reactions: { me: m.reaction_customer || null, desk: m.reaction_staff || null },
-  reply: m.reply_to && m.reply_body ? { id: m.reply_to, from: m.reply_sender, name: m.reply_sender === "staff" ? (m.reply_staff_name || "Diaspora Desk") : "You", body: String(m.reply_body).slice(0, 140) } : null,
+  reply: m.reply_to && m.reply_body ? { id: m.reply_to, from: m.reply_sender, name: m.reply_sender === "staff" ? (m.reply_staff_name || "Diaspora Desk") : "You", body: m.reply_deleted ? "" : String(m.reply_body).slice(0, 140), deleted: Boolean(m.reply_deleted) } : null,
 });
-const messageState = (m) => ({ id: m.id, read: Boolean(m.read_at), delivered: Boolean(m.delivered_at || m.read_at), reactions: { me: m.reaction_customer || null, desk: m.reaction_staff || null } });
+const messageState = (m) => ({ id: m.id, body: m.deleted_at ? "" : m.body, deleted: Boolean(m.deleted_at), edited: Boolean(m.edited_at) && !m.deleted_at, read: Boolean(m.read_at), delivered: Boolean(m.delivered_at || m.read_at), reactions: { me: m.reaction_customer || null, desk: m.reaction_staff || null } });
 
 router.get("/messages", requireCustomer, route(async (req, res) => {
-  const rows = (await query(`${MESSAGE_SELECT} WHERE m.client_id=$1 ORDER BY m.id DESC LIMIT 200`, [req.customer.client_id])).rows.reverse();
+  const rows = (await query(`${MESSAGE_SELECT} WHERE m.client_id=$1 AND NOT m.hidden_customer ORDER BY m.id DESC LIMIT 200`, [req.customer.client_id])).rows.reverse();
   // Opening the conversation marks the desk's replies as delivered and read.
-  await query("UPDATE customer_messages SET read_at=NOW(), delivered_at=COALESCE(delivered_at, NOW()) WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [req.customer.client_id]);
+  const seen = await query("UPDATE customer_messages SET read_at=NOW(), delivered_at=COALESCE(delivered_at, NOW()) WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [req.customer.client_id]);
+  if (seen.rowCount) broadcastChange("diaspora");
   res.json({ messages: rows.map(messageRow), reactions: REACTIONS });
 }));
 
@@ -724,10 +726,12 @@ router.get("/messages/poll", requireCustomer, route(async (req, res) => {
   const after = Math.max(0, Number.parseInt(req.query.after, 10) || 0);
   const peek = req.query.peek === "1";
   // The page has the desk's messages the moment it receives them: delivered.
-  await query("UPDATE customer_messages SET delivered_at=NOW() WHERE client_id=$1 AND sender='staff' AND delivered_at IS NULL", [clientId]);
-  const fresh = (await query(`${MESSAGE_SELECT} WHERE m.client_id=$1 AND m.id > $2 ORDER BY m.id LIMIT 100`, [clientId, after])).rows;
-  const recent = (await query("SELECT id, read_at, delivered_at, reaction_customer, reaction_staff FROM customer_messages WHERE client_id=$1 ORDER BY id DESC LIMIT 100", [clientId])).rows;
-  if (!peek) await query("UPDATE customer_messages SET read_at=NOW() WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [clientId]);
+  const delivered = await query("UPDATE customer_messages SET delivered_at=NOW() WHERE client_id=$1 AND sender='staff' AND delivered_at IS NULL", [clientId]);
+  const fresh = (await query(`${MESSAGE_SELECT} WHERE m.client_id=$1 AND NOT m.hidden_customer AND m.id > $2 ORDER BY m.id LIMIT 100`, [clientId, after])).rows;
+  const recent = (await query("SELECT id, body, edited_at, deleted_at, read_at, delivered_at, reaction_customer, reaction_staff FROM customer_messages WHERE client_id=$1 AND NOT hidden_customer ORDER BY id DESC LIMIT 100", [clientId])).rows;
+  const seen = peek ? null : await query("UPDATE customer_messages SET read_at=NOW() WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [clientId]);
+  // The desk's open page learns at once that its messages were delivered or read.
+  if (delivered.rowCount || seen?.rowCount) broadcastChange("diaspora");
   const unread = peek ? (await queryOne("SELECT COUNT(*)::int AS n FROM customer_messages WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [clientId]))?.n || 0 : 0;
   res.json({ messages: fresh.map(messageRow), state: recent.map(messageState), typing: isTyping(clientId, "staff"), unread });
 }));
@@ -747,6 +751,38 @@ router.post("/messages/react", requireCustomer, route(async (req, res) => {
   const done = await query("UPDATE customer_messages SET reaction_customer=$3 WHERE id=$1 AND client_id=$2 RETURNING id", [id, req.customer.client_id, emoji]);
   if (!done.rows.length) throw new HttpError(404, "Message not found.");
   broadcastChange("diaspora");
+  res.json({ ok: true });
+}));
+
+router.post("/messages/:id/edit", requireCustomer, route(async (req, res) => {
+  if (req.get(CUSTOMER_HEADER) !== "1") throw new HttpError(403, "request refused");
+  const id = idParam(req.params.id);
+  const body = String(req.body?.body || "").replace(/\r\n/g, "\n").trim();
+  if (!body) throw new HttpError(400, "A message cannot be empty. Delete it instead.");
+  if (body.length > 2000) throw new HttpError(400, "Please keep the message under 2000 characters.");
+  const m = await queryOne("SELECT id, created_at, deleted_at FROM customer_messages WHERE id=$1 AND client_id=$2 AND sender='customer'", [id, req.customer.client_id]);
+  if (!m || m.deleted_at) throw new HttpError(404, "Message not found.");
+  if (Date.now() - new Date(m.created_at).getTime() > EDIT_WINDOW_MS) throw new HttpError(409, "A message can be edited for 15 minutes after it is sent.");
+  await query("UPDATE customer_messages SET body=$3, edited_at=NOW() WHERE id=$1 AND client_id=$2", [id, req.customer.client_id, body]);
+  broadcastChange("diaspora");
+  const row = (await query(`${MESSAGE_SELECT} WHERE m.id=$1`, [id])).rows[0];
+  res.json({ message: messageRow(row) });
+}));
+
+router.post("/messages/:id/delete", requireCustomer, route(async (req, res) => {
+  if (req.get(CUSTOMER_HEADER) !== "1") throw new HttpError(403, "request refused");
+  const id = idParam(req.params.id);
+  const scope = req.body?.scope === "all" ? "all" : "me";
+  const m = await queryOne("SELECT id, sender, created_at, deleted_at FROM customer_messages WHERE id=$1 AND client_id=$2", [id, req.customer.client_id]);
+  if (!m) throw new HttpError(404, "Message not found.");
+  if (scope === "all") {
+    if (m.sender !== "customer") throw new HttpError(403, "You can delete for everyone only the messages you sent.");
+    if (Date.now() - new Date(m.created_at).getTime() > DELETE_ALL_WINDOW_MS) throw new HttpError(409, "A message can be deleted for everyone within 48 hours of sending.");
+    await query("UPDATE customer_messages SET deleted_at=COALESCE(deleted_at, NOW()), reaction_customer=NULL, reaction_staff=NULL WHERE id=$1", [id]);
+    broadcastChange("diaspora");
+  } else {
+    await query("UPDATE customer_messages SET hidden_customer=TRUE WHERE id=$1", [id]);
+  }
   res.json({ ok: true });
 }));
 

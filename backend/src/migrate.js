@@ -851,6 +851,13 @@ async function migrateCustomerPortal() {
   await query("ALTER TABLE customer_messages ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ");
   await query("ALTER TABLE customer_messages ADD COLUMN IF NOT EXISTS reaction_customer TEXT");
   await query("ALTER TABLE customer_messages ADD COLUMN IF NOT EXISTS reaction_staff TEXT");
+  await query("ALTER TABLE customer_messages ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ");
+  await query("ALTER TABLE customer_messages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ");
+  await query("ALTER TABLE customer_messages ADD COLUMN IF NOT EXISTS hidden_customer BOOLEAN NOT NULL DEFAULT FALSE");
+  await query(`CREATE TABLE IF NOT EXISTS customer_message_hides (
+    message_id INTEGER NOT NULL REFERENCES customer_messages(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (message_id, user_id))`);
   if (!hadCitizenship) {
     await query("UPDATE clients SET citizenship_confirmed_at=verified_at, citizenship_confirmed_by=verified_by WHERE verification_status='verified' AND citizenship_confirmed_at IS NULL");
   }

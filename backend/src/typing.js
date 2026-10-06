@@ -18,3 +18,7 @@ export function clearTyping(clientId, side) {
 }
 
 export const REACTIONS = ["👍", "❤️", "😂", "😮", "🙏", "✅"];
+
+/** A message can be edited for 15 minutes and withdrawn for everyone for 48 hours after it is sent. */
+export const EDIT_WINDOW_MS = 15 * 60 * 1000;
+export const DELETE_ALL_WINDOW_MS = 48 * 60 * 60 * 1000;

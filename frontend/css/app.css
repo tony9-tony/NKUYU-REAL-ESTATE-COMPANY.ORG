@@ -2406,3 +2406,12 @@ label.btn { cursor: pointer; }
 .dmc-row.is-me .dmc-time { color: rgba(255,255,255,.78); }
 .dmc-row.is-them .dmc-time { color: #8a9097; }
 .dmc-tick.is-seen { color: #5fd0ff; font-weight: 700; }
+
+/* Message menu (edit / delete) */
+.dmc-menu { position: absolute; top: 14px; z-index: 6; display: grid; min-width: 168px; padding: 4px; border-radius: 12px; background: #fff; border: 1px solid var(--border); box-shadow: 0 8px 24px rgba(0,0,0,.2); }
+.dmc-row.is-me .dmc-menu { right: 0; }
+.dmc-row.is-them .dmc-menu { left: 0; }
+.dmc-menu button { border: 0; background: transparent; text-align: left; padding: 8px 12px; border-radius: 8px; font: inherit; font-size: 13.5px; cursor: pointer; color: var(--ink-2, #222); }
+.dmc-menu button:hover { background: var(--surface-sunken, #f1f1f1); }
+.dmc-menu button.is-danger { color: #b3261e; }
+.dmc-deleted { font-style: italic; opacity: .75; font-size: 13.5px; }

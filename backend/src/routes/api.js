@@ -96,7 +96,7 @@ import { generateFromWordTemplate, templateFileUnknownPlaceholders, templateWord
 import { clearContractSignatureDocument, contractSignature, signContractDocument } from "../contracts/signature.js";
 import { docxToPreview } from "../contracts/docxPreview.js";
 import { announceWrites, broadcastChange, liveStream } from "../live.js";
-import { clearTyping, isTyping, REACTIONS, setTyping } from "../typing.js";
+import { clearTyping, isTyping, REACTIONS, setTyping, DELETE_ALL_WINDOW_MS, EDIT_WINDOW_MS } from "../typing.js";
 import { RENT_STATUSES, SALE_STATUSES, categoryStatusesFrom, overallStatus } from "../models/propertyStatus.js";
 
 const router = Router();
@@ -2599,7 +2599,7 @@ router.get("/diaspora/messages", route(async (req, res) => {
   const role = await verificationRole(req);
   const rows = (await query(
     `SELECT c.id, c.name, c.country, c.verification_status,
-            (SELECT body FROM customer_messages m WHERE m.client_id=c.id ORDER BY m.id DESC LIMIT 1) AS last_body,
+            (SELECT CASE WHEN m.deleted_at IS NOT NULL THEN 'This message was deleted' ELSE m.body END FROM customer_messages m WHERE m.client_id=c.id ORDER BY m.id DESC LIMIT 1) AS last_body,
             (SELECT sender FROM customer_messages m WHERE m.client_id=c.id ORDER BY m.id DESC LIMIT 1) AS last_from,
             (SELECT MAX(created_at) FROM customer_messages m WHERE m.client_id=c.id) AS last_at,
             (SELECT COUNT(*)::int FROM customer_messages m WHERE m.client_id=c.id AND m.sender='customer' AND m.read_at IS NULL) AS unread
@@ -2612,18 +2612,20 @@ router.get("/diaspora/messages/:id", route(async (req, res) => {
   await verificationRole(req);
   const clientId = parseId(req.params.id);
   const client = requireRecord(await queryOne("SELECT id, name, country, verification_status FROM clients WHERE id=$1 AND is_diaspora=TRUE AND organization_id=$2", [clientId, await organizationId()]), "Customer");
-  const rows = (await query(`SELECT m.id, m.sender, m.body, m.created_at, m.read_at, m.delivered_at, m.reply_to, m.reaction_customer, m.reaction_staff,
-      u.display_name AS staff_name, r.body AS reply_body, r.sender AS reply_sender, ru.display_name AS reply_staff_name
+  const rows = (await query(`SELECT m.id, m.sender, m.body, m.created_at, m.read_at, m.delivered_at, m.reply_to, m.reaction_customer, m.reaction_staff, m.edited_at, m.deleted_at, m.staff_user_id,
+      u.display_name AS staff_name, r.body AS reply_body, r.sender AS reply_sender, r.deleted_at AS reply_deleted, ru.display_name AS reply_staff_name
     FROM customer_messages m LEFT JOIN users u ON u.id=m.staff_user_id
     LEFT JOIN customer_messages r ON r.id=m.reply_to LEFT JOIN users ru ON ru.id=r.staff_user_id
-    WHERE m.client_id=$1 ORDER BY m.id DESC LIMIT 200`, [clientId])).rows.reverse();
+    WHERE m.client_id=$1 AND NOT EXISTS (SELECT 1 FROM customer_message_hides h WHERE h.message_id=m.id AND h.user_id=$2)
+    ORDER BY m.id DESC LIMIT 200`, [clientId, req.user.id])).rows.reverse();
   await query("UPDATE customer_messages SET read_at=NOW(), delivered_at=COALESCE(delivered_at, NOW()) WHERE client_id=$1 AND sender='customer' AND read_at IS NULL", [clientId]);
   // Seen from the desk: "me" is the desk member, "them" the customer.
   const messages = rows.map((m) => ({
-    id: m.id, sender: m.sender, body: m.body, created_at: m.created_at, staff_name: m.staff_name,
+    id: m.id, sender: m.sender, body: m.deleted_at ? "" : m.body, created_at: m.created_at, staff_name: m.staff_name,
+    deleted: Boolean(m.deleted_at), edited: Boolean(m.edited_at) && !m.deleted_at, own: m.sender === "staff" && m.staff_user_id === req.user.id,
     read: Boolean(m.read_at), delivered: Boolean(m.delivered_at || m.read_at),
     reactions: { me: m.reaction_staff || null, them: m.reaction_customer || null },
-    reply: m.reply_to && m.reply_body ? { id: m.reply_to, from: m.reply_sender, name: m.reply_sender === "staff" ? (m.reply_staff_name || "Diaspora Desk") : client.name, body: String(m.reply_body).slice(0, 140) } : null,
+    reply: m.reply_to && m.reply_body ? { id: m.reply_to, from: m.reply_sender, name: m.reply_sender === "staff" ? (m.reply_staff_name || "Diaspora Desk") : client.name, body: m.reply_deleted ? "" : String(m.reply_body).slice(0, 140), deleted: Boolean(m.reply_deleted) } : null,
   }));
   res.json({ client, messages, typing: isTyping(clientId, "customer"), reactions: REACTIONS });
 }));
@@ -2643,6 +2645,41 @@ router.post("/diaspora/messages/:id/react", route(async (req, res) => {
   if (emoji && !REACTIONS.includes(emoji)) throw new HttpError(400, "That reaction is not available.");
   const done = await query("UPDATE customer_messages SET reaction_staff=$3 WHERE id=$1 AND client_id=$2 RETURNING id", [messageId, clientId, emoji]);
   if (!done.rows.length) throw new HttpError(404, "Message not found.");
+  broadcastChange("diaspora");
+  res.json({ ok: true });
+}));
+router.post("/diaspora/messages/:id/edit", route(async (req, res) => {
+  const role = await verificationRole(req);
+  if (!role.desk && !role.legal) throw new HttpError(403, "Only the Diaspora Desk or Legal can edit messages.");
+  const clientId = parseId(req.params.id);
+  const messageId = Number.parseInt(req.body?.message_id, 10);
+  const body = String(req.body?.body || "").replace(/\r\n/g, "\n").trim();
+  if (!Number.isSafeInteger(messageId)) throw new HttpError(400, "Choose a message.");
+  if (!body) throw new HttpError(400, "A message cannot be empty. Delete it instead.");
+  if (body.length > 2000) throw new HttpError(400, "Please keep the message under 2000 characters.");
+  const m = await queryOne("SELECT id, created_at, deleted_at FROM customer_messages WHERE id=$1 AND client_id=$2 AND sender='staff' AND staff_user_id=$3", [messageId, clientId, req.user.id]);
+  if (!m || m.deleted_at) throw new HttpError(404, "Message not found. You can edit only your own messages.");
+  if (Date.now() - new Date(m.created_at).getTime() > EDIT_WINDOW_MS) throw new HttpError(409, "A message can be edited for 15 minutes after it is sent.");
+  await query("UPDATE customer_messages SET body=$2, edited_at=NOW() WHERE id=$1", [messageId, body]);
+  broadcastChange("diaspora");
+  res.json({ ok: true });
+}));
+router.post("/diaspora/messages/:id/delete", route(async (req, res) => {
+  const role = await verificationRole(req);
+  const clientId = parseId(req.params.id);
+  const messageId = Number.parseInt(req.body?.message_id, 10);
+  const scope = req.body?.scope === "all" ? "all" : "me";
+  if (!Number.isSafeInteger(messageId)) throw new HttpError(400, "Choose a message.");
+  const m = await queryOne("SELECT id, sender, staff_user_id, created_at FROM customer_messages WHERE id=$1 AND client_id=$2", [messageId, clientId]);
+  if (!m) throw new HttpError(404, "Message not found.");
+  if (scope === "all") {
+    if (!role.desk && !role.legal) throw new HttpError(403, "Only the Diaspora Desk or Legal can delete messages for everyone.");
+    if (m.sender !== "staff" || m.staff_user_id !== req.user.id) throw new HttpError(403, "You can delete for everyone only the messages you sent.");
+    if (Date.now() - new Date(m.created_at).getTime() > DELETE_ALL_WINDOW_MS) throw new HttpError(409, "A message can be deleted for everyone within 48 hours of sending.");
+    await query("UPDATE customer_messages SET deleted_at=COALESCE(deleted_at, NOW()), reaction_customer=NULL, reaction_staff=NULL WHERE id=$1", [messageId]);
+  } else {
+    await query("INSERT INTO customer_message_hides (message_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING", [messageId, req.user.id]);
+  }
   broadcastChange("diaspora");
   res.json({ ok: true });
 }));

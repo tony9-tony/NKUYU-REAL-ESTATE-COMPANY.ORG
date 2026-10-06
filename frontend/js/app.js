@@ -5925,6 +5925,7 @@ function watchDiasporaMessages() {
 }
 
 async function openDiasporaConversation(clientId) {
+  state.dmEditing = null; state.dmReplyTo = null;
   state.dmSelected = clientId;
   state.dmConversation = null;
   render();
@@ -5936,13 +5937,16 @@ async function openDiasporaConversation(clientId) {
   document.getElementById("dm-reply")?.focus();
 }
 
-function setDmReply(message) {
-  state.dmReplyTo = message || null;
+function setDmReply(message, { editing = false } = {}) {
+  const wasEditing = Boolean(state.dmEditing);
+  state.dmReplyTo = editing ? null : (message || null);
+  state.dmEditing = editing && message ? message : null;
   const bar = document.getElementById("dm-replying");
   if (!bar) return;
   bar.hidden = !message;
+  if (wasEditing && !state.dmEditing) { const field = document.getElementById("dm-reply"); if (field) { field.value = ""; field.style.height = "auto"; } }
   if (message) {
-    document.getElementById("dm-replying-name").textContent = message.sender === "staff" ? (message.staff_name || "Diaspora Desk") : (state.dmConversation?.client?.name || "Customer");
+    document.getElementById("dm-replying-name").textContent = editing ? "Editing message" : message.sender === "staff" ? (message.staff_name || "Diaspora Desk") : (state.dmConversation?.client?.name || "Customer");
     document.getElementById("dm-replying-text").textContent = String(message.body || "").slice(0, 120);
     document.getElementById("dm-reply")?.focus();
   }
@@ -5951,7 +5955,7 @@ function setDmReply(message) {
 function openDmPicker(button, id) {
   const stack = button.closest(".dmc-stack");
   const had = stack?.querySelector(".dmc-picker");
-  document.querySelectorAll(".dmc-picker").forEach((el) => el.remove());
+  closeDmMenus();
   if (!stack || had) return;
   const message = (state.dmConversation?.messages || []).find((m) => String(m.id) === String(id));
   const picker = document.createElement("div");
@@ -5972,10 +5976,63 @@ async function reactDmMessage(id, emoji) {
   catch (error) { showToast(error.message || "Could not react."); loadDiasporaMessages({ quiet: true }); }
 }
 
+const DM_EDIT_MS = 15 * 60 * 1000, DM_DELETE_ALL_MS = 48 * 60 * 60 * 1000;
+const dmAge = (m) => Date.now() - new Date(m.created_at).getTime();
+
+document.addEventListener("click", (event) => { if (!event.target.closest(".dmc-menu, .dmc-picker, [data-action=\"dm-menu\"], [data-action=\"dm-picker\"]")) closeDmMenus(); });
+function closeDmMenus() { document.querySelectorAll(".dmc-picker, .dmc-menu").forEach((el) => el.remove()); }
+function openDmMenu(button, id) {
+  const stack = button.closest(".dmc-stack");
+  const had = stack?.querySelector(".dmc-menu");
+  closeDmMenus();
+  if (!stack || had) return;
+  const m = (state.dmConversation?.messages || []).find((x) => String(x.id) === String(id));
+  if (!m) return;
+  const canReply = state.dmThreads?.can_reply;
+  const items = [];
+  if (canReply && m.own && !m.deleted && dmAge(m) < DM_EDIT_MS) items.push(["dm-edit", "Edit"]);
+  items.push(["dm-delete-me", "Delete for me"]);
+  if (canReply && m.own && !m.deleted && dmAge(m) < DM_DELETE_ALL_MS) items.push(["dm-delete-all", "Delete for everyone"]);
+  const menu = document.createElement("div");
+  menu.className = "dmc-menu";
+  menu.setAttribute("role", "menu");
+  menu.innerHTML = items.map(([act, label]) => `<button type="button" role="menuitem" data-action="${act}" data-id="${id}"${act === "dm-delete-all" || act === "dm-delete-me" ? ' class="is-danger"' : ""}>${label}</button>`).join("");
+  stack.appendChild(menu);
+}
+function startDmEdit(id) {
+  closeDmMenus();
+  const m = (state.dmConversation?.messages || []).find((x) => String(x.id) === String(id));
+  if (!m) return;
+  setDmReply(m, { editing: true });
+  const field = document.getElementById("dm-reply");
+  if (field) { field.value = m.body; field.style.height = "auto"; field.style.height = `${Math.min(field.scrollHeight, 140)}px`; field.focus(); }
+}
+async function deleteDmMessage(id, scope) {
+  closeDmMenus();
+  if (scope === "all" && !(await confirmDialog({ title: "Delete for everyone", message: "The message disappears for you and for the customer. They will see “This message was deleted”.", confirmLabel: "Delete for everyone" }))) return;
+  try {
+    await api(`/diaspora/messages/${state.dmSelected}/delete`, { method: "POST", body: JSON.stringify({ message_id: Number(id), scope }) });
+    if (state.dmEditing && String(state.dmEditing.id) === String(id)) setDmReply(null);
+    state.dmConversation = await api(`/diaspora/messages/${state.dmSelected}`);
+    await loadDiasporaMessages({ quiet: true });
+  } catch (error) { showToast(error.message || "Could not delete the message."); }
+}
+
 async function sendDiasporaMessage() {
   const field = document.getElementById("dm-reply");
   const text = field?.value.trim();
   if (!text || !state.dmSelected) return;
+  if (state.dmEditing) {
+    const target = state.dmEditing;
+    try {
+      await api(`/diaspora/messages/${state.dmSelected}/edit`, { method: "POST", body: JSON.stringify({ message_id: target.id, body: text }) });
+      setDmReply(null);
+      state.dmConversation = await api(`/diaspora/messages/${state.dmSelected}`);
+      await loadDiasporaMessages({ quiet: true });
+    } catch (error) { showToast(error.message || "Could not edit the message."); }
+    field.focus();
+    return;
+  }
   field.value = ""; field.style.height = "auto";
   try {
     await api(`/diaspora/messages/${state.dmSelected}`, { method: "POST", body: JSON.stringify({ body: text, reply_to: state.dmReplyTo?.id || undefined }) });
@@ -6014,13 +6071,16 @@ function dmThreadHtml(conv) {
     const gPrev = prev && prev.sender === m.sender && dmSameDay(prev.created_at, m.created_at) && new Date(m.created_at) - new Date(prev.created_at) < 5 * 60000;
     const gNext = next && next.sender === m.sender && dmSameDay(next.created_at, m.created_at) && new Date(next.created_at) - new Date(m.created_at) < 5 * 60000;
     const who = mine ? (m.staff_name || "Diaspora Desk") : conv.client.name;
-    const reacts = [m.reactions?.me, m.reactions?.them].filter(Boolean);
-    const quote = m.reply ? `<button type="button" class="dmc-quote" data-action="dm-quote" data-id="${m.reply.id}"><strong>${escapeHtml(m.reply.from === "staff" ? m.reply.name : conv.client.name)}</strong><span>${escapeHtml(m.reply.body)}</span></button>` : "";
+    const reacts = m.deleted ? [] : [m.reactions?.me, m.reactions?.them].filter(Boolean);
+    const quote = m.reply ? `<button type="button" class="dmc-quote" data-action="dm-quote" data-id="${m.reply.id}"><strong>${escapeHtml(m.reply.from === "staff" ? m.reply.name : conv.client.name)}</strong><span>${m.reply.deleted ? "This message was deleted" : escapeHtml(m.reply.body)}</span></button>` : "";
+    const text = m.deleted ? `<span class="dmc-text dmc-deleted">🚫 This message was deleted</span>` : `<span class="dmc-text">${escapeHtml(m.body).replace(/\n/g, "<br>")}</span>`;
+    const tools = m.deleted ? `<div class="dmc-tools" role="group" aria-label="Message actions"><button type="button" data-action="dm-menu" data-id="${m.id}" aria-label="More" title="More">⋯</button></div>`
+      : `<div class="dmc-tools" role="group" aria-label="Message actions"><button type="button" data-action="dm-reply-to" data-id="${m.id}" aria-label="Reply" title="Reply">↩</button><button type="button" data-action="dm-picker" data-id="${m.id}" aria-label="React" title="React">☺</button><button type="button" data-action="dm-menu" data-id="${m.id}" aria-label="More" title="More">⋯</button></div>`;
     html += `<div class="dmc-row ${mine ? "is-me" : "is-them"}${gPrev ? " is-grouped" : ""}" data-mid="${m.id}">
       ${!mine ? `<span class="dmc-avatar${gNext ? " is-hidden" : ""}" aria-hidden="true">${escapeHtml(dmInitials(who))}</span>` : ""}
-      <div class="dmc-stack"><div class="dmc-bubble">${!gPrev ? `<span class="dmc-who">${escapeHtml(who)}</span>` : ""}${quote}<span class="dmc-text">${escapeHtml(m.body).replace(/\n/g, "<br>")}</span>
-        <span class="dmc-time">${escapeHtml(dmClock(m.created_at))}${mine ? dmTick(m) : ""}</span></div>
-        <div class="dmc-tools" role="group" aria-label="Message actions"><button type="button" data-action="dm-reply-to" data-id="${m.id}" aria-label="Reply" title="Reply">↩</button><button type="button" data-action="dm-picker" data-id="${m.id}" aria-label="React" title="React">☺</button></div>
+      <div class="dmc-stack"><div class="dmc-bubble">${!gPrev ? `<span class="dmc-who">${escapeHtml(who)}</span>` : ""}${quote}${text}
+        <span class="dmc-time">${m.edited ? "edited · " : ""}${escapeHtml(dmClock(m.created_at))}${mine ? dmTick(m) : ""}</span></div>
+        ${tools}
         ${reacts.length ? `<div class="dmc-reacts">${reacts.map((r) => `<span>${escapeHtml(r)}</span>`).join("")}</div>` : ""}</div></div>`;
   });
   if (conv?.typing) html += `<div class="dmc-row is-them dmc-typing"><span class="dmc-avatar" aria-hidden="true">${escapeHtml(dmInitials(conv.client.name))}</span><div class="dmc-stack"><div class="dmc-bubble"><span class="dmc-dots" aria-label="${escapeHtml(conv.client.name)} is typing"><i></i><i></i><i></i></span></div></div></div>`;
@@ -6047,7 +6107,7 @@ function paintDiasporaMessages() {
     const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 90;
     const html = dmThreadHtml(state.dmConversation);
     // An open reaction picker is not wiped by a refresh.
-    if (box.dataset.sig !== html && !document.querySelector(".dmc-picker")) {
+    if (box.dataset.sig !== html && !document.querySelector(".dmc-picker, .dmc-menu")) {
       box.innerHTML = html;
       box.dataset.sig = html;
       if (stick) box.scrollTop = box.scrollHeight;
@@ -7445,7 +7505,11 @@ document.addEventListener("click", async (event) => {
   if (action === "dm-quote") { const el = document.querySelector(`.dmc-row[data-mid="${id}"] .dmc-bubble`); el?.scrollIntoView({ block: "center", behavior: "smooth" }); el?.classList.add("is-flash"); setTimeout(() => el?.classList.remove("is-flash"), 1200); }
   if (action === "dm-picker") openDmPicker(target, id);
   if (action === "dm-react") reactDmMessage(id, target.dataset.emoji);
-  if (action === "dm-back") { state.dmSelected = null; state.dmConversation = null; render(); }
+  if (action === "dm-menu") openDmMenu(target, id);
+  if (action === "dm-edit") startDmEdit(id);
+  if (action === "dm-delete-me") deleteDmMessage(id, "me");
+  if (action === "dm-delete-all") deleteDmMessage(id, "all");
+  if (action === "dm-back") { state.dmEditing = null; state.dmReplyTo = null; state.dmSelected = null; state.dmConversation = null; render(); }
   if (action === "kyc") kycAction(id, target.dataset.kyc);
   if (action === "kyc-doc") openKycDocument(id, target.dataset.doc || null);
   if (action === "kyc-zoom-in" || action === "kyc-zoom-out") { state.kycZoom = Math.min(300, Math.max(50, (state.kycZoom || 100) + (action === "kyc-zoom-in" ? 25 : -25))); drawKycPage(); }
