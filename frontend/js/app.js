@@ -5757,13 +5757,14 @@ function renderVerification() {
   const docLabel = { passport: "Passport / NIDA", residence: "Residence abroad", other: "Other" };
   const list = rows.map((row) => {
     const missing = ["passport", "residence"].filter((kind) => !(row.documents || []).some((d) => d.kind === kind));
-    const docs = ((row.documents || []).map((d) => `<button type="button" class="btn btn-ghost btn-small" data-action="kyc-doc" data-id="${row.id}" data-doc="${d.id}">${icon("file")}${escapeHtml(docLabel[d.kind] || d.kind)}</button>`).join(" ") || `<span class="muted">None yet</span>`)
+    const docs = ((row.documents || []).map((d) => `<button type="button" class="btn btn-ghost btn-small" data-action="kyc-doc" data-id="${row.id}" data-doc="${d.id}">${icon("file")}${escapeHtml(docLabel[d.kind] || d.kind)}${kycExpiry(d)}</button>`).join(" ") || `<span class="muted">None yet</span>`)
       + (row.verification_status !== "verified" && missing.length && (row.documents || []).length ? `<span class="cell-sub" style="color:var(--danger)">Missing: ${escapeHtml(missing.map((k) => docLabel[k]).join(", "))}</span>` : "");
     const check = row.residence_check === "check" ? `<span class="cell-sub" style="color:var(--danger)">Phone is ${escapeHtml(row.phone_country || "unknown")}, lives in ${escapeHtml(row.country || "?")}: ask the customer</span>` : `<span class="cell-sub">Phone matches ${escapeHtml(row.country || "")}</span>`;
     const actions = [
       (row.documents || []).length ? `<button class="btn btn-small" data-action="kyc-doc" data-id="${row.id}">Review documents</button>` : "",
       (role.desk || role.legal) && docsIn(row) ? `<button class="btn btn-small btn-primary" data-action="kyc" data-kyc="verify" data-id="${row.id}">${icon("check")} Verify customer</button>` : "",
       role.legal && nationalityDue(row) ? `<button class="btn btn-small btn-primary" data-action="kyc" data-kyc="confirm_citizenship" data-id="${row.id}">Confirm nationality</button>` : "",
+      (role.desk || role.legal) && row.verification_status === "verified" ? `<button class="btn btn-small btn-danger-ghost" data-action="kyc" data-kyc="revoke" data-id="${row.id}">Remove verification</button>` : "",
       ((role.desk || role.legal) && ["submitted", "desk_checked", "unverified"].includes(row.verification_status)) || (role.legal && nationalityDue(row))
         ? `<button class="btn btn-small btn-danger-ghost" data-action="kyc" data-kyc="reject" data-id="${row.id}">Send back</button>` : "",
     ].join("");
@@ -5806,6 +5807,7 @@ async function openKycDocument(clientId, docId = null) {
   const actions = [
     (role.desk || role.legal) && docsIn ? `<button type="button" class="btn btn-primary" data-action="kyc" data-kyc="verify" data-id="${row.id}" ${missing.length ? "disabled title=\"A document is missing\"" : ""}>${icon("check")}Verify customer</button>` : "",
     role.legal && nationalityDue ? `<button type="button" class="btn btn-primary" data-action="kyc" data-kyc="confirm_citizenship" data-id="${row.id}">Confirm nationality</button>` : "",
+    (role.desk || role.legal) && row.verification_status === "verified" ? `<button type="button" class="btn btn-danger-ghost" data-action="kyc" data-kyc="revoke" data-id="${row.id}">Remove verification</button>` : "",
     ((role.desk || role.legal) && ["submitted", "desk_checked", "unverified"].includes(row.verification_status)) || (role.legal && nationalityDue) ? `<button type="button" class="btn btn-danger-ghost" data-action="kyc" data-kyc="reject" data-id="${row.id}">Send back</button>` : "",
   ].join("");
   modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(row.name)}</h2>
@@ -5815,7 +5817,7 @@ async function openKycDocument(clientId, docId = null) {
       ${missing.length && row.verification_status !== "verified" ? `<span class="kyc-missing">${icon("alert")}Missing: ${escapeHtml(missing.map((k) => KYC_DOC_LABELS[k]).join(", "))}</span>` : ""}</div>
     <div class="kyc-viewer" id="kyc-viewer"><div class="loading" role="status"><div class="spinner" aria-hidden="true"></div><span>Opening ${escapeHtml(doc.name || "document")}…</span></div></div>
     <div class="row-actions docx-actions">
-      <span class="muted kyc-file">${escapeHtml(doc.name || "")}${doc.uploaded_at ? ` · uploaded ${escapeHtml(formatDateTime(doc.uploaded_at, true))}` : ""}</span>
+      <span class="muted kyc-file">${escapeHtml(doc.name || "")}${doc.uploaded_at ? ` · uploaded ${escapeHtml(formatDateTime(doc.uploaded_at, true))}` : ""}${kycExpiry(doc, true)}</span>
       <button type="button" class="btn btn-ghost" data-action="kyc-doc-download" data-id="${row.id}" data-doc="${doc.id}" data-filename="${escapeHtml(doc.name || "document")}">Download</button>
       ${actions}
     </div>`;
@@ -5840,6 +5842,17 @@ async function openKycDocument(clientId, docId = null) {
   }
 }
 
+/** "expires 12 Mar 2027" - in red when it is over or ends within six months. */
+function kycExpiry(doc, plain = false) {
+  if (!doc?.expires_on) return "";
+  const end = new Date(`${doc.expires_on}T00:00:00`);
+  const days = Math.round((end - new Date()) / 86400000);
+  const text = days < 0 ? `expired ${formatDate(doc.expires_on)}` : `expires ${formatDate(doc.expires_on)}`;
+  const warn = days < 183;
+  if (plain) return ` · <span${warn ? ' style="color:var(--danger)"' : ""}>${escapeHtml(text)}${days >= 0 && warn ? " (soon)" : ""}</span>`;
+  return `<span class="cell-sub"${warn ? ' style="color:var(--danger)"' : ""}>${escapeHtml(text)}</span>`;
+}
+
 const KYC_REASONS = [
   "The passport photo page is blurry. Please upload a clear, full photo of the page with your picture.",
   "Your passport is expired or about to expire. Please upload a valid one.",
@@ -5853,19 +5866,20 @@ async function kycAction(clientId, kind) {
     verify: ["Verify customer", "The documents match what the customer declared. The customer gets the Verified badge in their portal and can request properties straight away. Legal confirms nationality before any agreement is signed.", "Verify", "primary", "Note (optional)"],
     confirm_citizenship: ["Confirm nationality", "You have checked the customer's nationality. They can sign their agreement once it is ready.", "Confirm", "primary", "Note (optional)"],
     reject: ["Send back to the customer", "The customer sees your note and uploads the documents again. Until then they cannot request properties.", "Send back", "danger", "What must the customer correct? (they will read this)"],
+    revoke: ["Remove verification", "The customer loses the Verified badge and cannot send new requests until they upload their documents again. They read your reason.", "Remove verification", "danger", "Why is the verification removed? (the customer will read this)"],
     desk_ok: ["Documents OK", "The documents match what the customer declared.", "Save", "primary", "Note (optional)"],
   }[kind];
   if (!texts) return;
   // Opened from the document viewer: the question takes the dialog's normal size.
   modal.classList.remove("modal-wide", "modal-document");
-  const presets = kind === "reject" ? KYC_REASONS : null;
+  const presets = kind === "reject" || kind === "revoke" ? KYC_REASONS : null;
   const ok = await confirmDialog({ title: texts[0], message: texts[1], confirmLabel: texts[2], tone: texts[3], noteLabel: texts[4], presets });
   const note = String(state.transitionNotes || "").trim();
   state.transitionNotes = "";
   if (!ok) return;
   try {
     await api(`/diaspora/verifications/${clientId}`, { method: "POST", body: JSON.stringify({ action: kind, note }) });
-    showToast(kind === "verify" ? "Customer verified." : kind === "confirm_citizenship" ? "Nationality confirmed." : kind === "desk_ok" ? "Saved." : "Sent back to the customer.");
+    showToast(kind === "verify" ? "Customer verified." : kind === "confirm_citizenship" ? "Nationality confirmed." : kind === "desk_ok" ? "Saved." : kind === "revoke" ? "Verification removed." : "Sent back to the customer.");
     await loadVerification();
   } catch (error) { showToast(error.message || "Could not save."); }
 }

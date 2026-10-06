@@ -836,6 +836,7 @@ async function migrateCustomerPortal() {
   const hadCitizenship = await queryOne("SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='clients' AND column_name='citizenship_confirmed_at'");
   await query("ALTER TABLE clients ADD COLUMN IF NOT EXISTS citizenship_confirmed_by INTEGER REFERENCES users(id) ON DELETE SET NULL");
   await query("ALTER TABLE clients ADD COLUMN IF NOT EXISTS citizenship_confirmed_at TIMESTAMPTZ");
+  await query("ALTER TABLE documents ADD COLUMN IF NOT EXISTS expires_on DATE");
   if (!hadCitizenship) {
     await query("UPDATE clients SET citizenship_confirmed_at=verified_at, citizenship_confirmed_by=verified_by WHERE verification_status='verified' AND citizenship_confirmed_at IS NULL");
   }

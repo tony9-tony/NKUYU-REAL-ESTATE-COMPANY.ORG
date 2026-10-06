@@ -632,9 +632,9 @@ router.post("/contracts/:id/sign", requireCustomer, route(async (req, res) => {
 const DOC_KINDS = { passport: "Passport (photo page) or NIDA", residence: "Proof of residence abroad (visa, residence card or permit)", other: "Other supporting document" };
 
 router.get("/verification", requireCustomer, route(async (req, res) => {
-  const docs = (await query(`SELECT id, category, original_filename, uploaded_at FROM documents WHERE client_id=$1 AND category LIKE 'kyc_%' AND status <> 'superseded' ORDER BY id DESC`, [req.customer.client_id])).rows;
+  const docs = (await query(`SELECT id, category, original_filename, uploaded_at, to_char(expires_on,'YYYY-MM-DD') AS expires_on FROM documents WHERE client_id=$1 AND category LIKE 'kyc_%' AND status <> 'superseded' ORDER BY id DESC`, [req.customer.client_id])).rows;
   res.json({ ...verificationState(req.customer), kinds: DOC_KINDS,
-    documents: docs.map((d) => ({ kind: d.category.slice(4), name: d.original_filename, date: fmtDate(d.uploaded_at) })) });
+    documents: docs.map((d) => ({ kind: d.category.slice(4), name: d.original_filename, date: fmtDate(d.uploaded_at), expires_on: d.expires_on })) });
 }));
 
 router.post("/verification/documents", requireCustomer, (req, res, next) => {
@@ -647,15 +647,24 @@ router.post("/verification/documents", requireCustomer, (req, res, next) => {
     if (!DOC_KINDS[kind]) throw new HttpError(400, "Choose which document this is.");
     if (["verified"].includes(req.customer.verification_status || "verified")) throw new HttpError(409, "You are already verified.");
     if (tooMany(`docs:${req.customer.client_id}`, 20, 60 * 60 * 1000)) throw new HttpError(429, "Too many uploads. Please wait a little.");
+    // Passports must say when they expire; a document that has already expired is refused.
+    const expiresRaw = String(req.body?.expires_on || "").trim();
+    let expiresOn = null;
+    if (expiresRaw) {
+      const parsed = /^\d{4}-\d{2}-\d{2}$/.test(expiresRaw) ? new Date(`${expiresRaw}T00:00:00Z`) : null;
+      if (!parsed || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== expiresRaw) throw new HttpError(400, "Enter the expiry date as shown on the document.");
+      if (parsed.getTime() < Date.now() - 24 * 60 * 60 * 1000) throw new HttpError(400, "This document has already expired. Please upload one that is still valid.");
+      expiresOn = expiresRaw;
+    } else if (kind === "passport") throw new HttpError(400, "Enter the passport's expiry date.");
     const info = validateUploadedFile(req.file, documentExtensions);
     const client = await queryOne("SELECT organization_id, department_id FROM clients WHERE id=$1", [req.customer.client_id]);
     // One current document per kind: a new upload replaces the old one, which
     // stays on file (marked superseded) but leaves the Desk's list.
     await query("UPDATE documents SET status='superseded' WHERE client_id=$1 AND category=$2 AND status <> 'superseded'", [req.customer.client_id, `kyc_${kind}`]);
     await query(
-      `INSERT INTO documents (organization_id, client_id, title, category, status, original_filename, stored_name, file_size, mime_type, uploaded_at, department_id, visibility)
-       VALUES ($1,$2,$3,$4,'pending',$5,$6,$7,$8,NOW(),$9,'department')`,
-      [client.organization_id, req.customer.client_id, `${DOC_KINDS[kind]} · ${req.customer.name}`, `kyc_${kind}`, info.displayName, info.storedName, info.size, info.mimeType, client.department_id]);
+      `INSERT INTO documents (organization_id, client_id, title, category, status, original_filename, stored_name, file_size, mime_type, uploaded_at, department_id, visibility, expires_on)
+       VALUES ($1,$2,$3,$4,'pending',$5,$6,$7,$8,NOW(),$9,'department',$10)`,
+      [client.organization_id, req.customer.client_id, `${DOC_KINDS[kind]} · ${req.customer.name}`, `kyc_${kind}`, info.displayName, info.storedName, info.size, info.mimeType, client.department_id, expiresOn]);
     // The first document puts the customer in the Diaspora Desk's queue at
     // once; the desk sees which document is still missing and verifies when
     // both are in (or sends back asking for the other one).

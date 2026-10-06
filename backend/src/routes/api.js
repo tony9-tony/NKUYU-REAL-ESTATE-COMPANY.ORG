@@ -2575,7 +2575,7 @@ router.get("/diaspora/verifications", route(async (req, res) => {
             c.verification_status, c.verification_note, c.created_at, c.desk_checked_at, c.verified_at, c.citizenship_confirmed_at,
             o.display_name AS officer_name, dc.display_name AS desk_checked_by_name, vb.display_name AS verified_by_name,
             cb.display_name AS citizenship_confirmed_by_name,
-            COALESCE((SELECT json_agg(json_build_object('id', d.id, 'kind', substr(d.category, 5), 'name', d.original_filename, 'uploaded_at', d.uploaded_at) ORDER BY d.id)
+            COALESCE((SELECT json_agg(json_build_object('id', d.id, 'kind', substr(d.category, 5), 'name', d.original_filename, 'uploaded_at', d.uploaded_at, 'expires_on', to_char(d.expires_on,'YYYY-MM-DD')) ORDER BY d.id)
                         FROM documents d WHERE d.client_id=c.id AND d.category LIKE 'kyc_%' AND d.status <> 'superseded'), '[]') AS documents
        FROM clients c LEFT JOIN users o ON o.id=c.diaspora_officer_id LEFT JOIN users dc ON dc.id=c.desk_checked_by LEFT JOIN users vb ON vb.id=c.verified_by
             LEFT JOIN users cb ON cb.id=c.citizenship_confirmed_by
@@ -2628,16 +2628,25 @@ router.post("/diaspora/verifications/:id", route(async (req, res) => {
     const legalReview = role.legal && client.verification_status === "verified" && !client.citizenship_confirmed_at;
     if (!["submitted", "desk_checked", "unverified"].includes(client.verification_status) && !legalReview) throw new HttpError(409, "Nothing to send back.");
     update = ["UPDATE clients SET verification_status='rejected', verification_note=$2, verified_by=NULL, verified_at=NULL WHERE id=$1", [clientId, note]];
+  } else if (action === "revoke") {
+    // A verification given in error, or a document later found wrong, is taken back.
+    // The customer returns to "sent back": they see the reason and upload again.
+    if (!role.desk && !role.legal) throw new HttpError(403, "Only the Diaspora Desk or Legal can remove a verification.");
+    if (client.verification_status !== "verified") throw new HttpError(409, "This customer is not verified.");
+    if (!note) throw new HttpError(400, "Write why the verification is removed; the customer will read it.");
+    update = ["UPDATE clients SET verification_status='rejected', verification_note=$2, verified_by=NULL, verified_at=NULL, citizenship_confirmed_by=NULL, citizenship_confirmed_at=NULL WHERE id=$1", [clientId, note]];
   } else throw new HttpError(400, "Unknown action.");
   await query(update[0], update[1]);
   await audit(req, `kyc_${action}`, "client", clientId, { note });
-  if (mailConfigured() && client.email && ["verify", "reject", "confirm_citizenship"].includes(action)) {
+  if (mailConfigured() && client.email && ["verify", "reject", "revoke", "confirm_citizenship"].includes(action)) {
     const site = String(process.env.PUBLIC_SITE_URL || "").trim().replace(/\/+$/, "");
     sendMail({ to: client.email, subject: action === "verify" ? "MKUYU: you are verified" : action === "confirm_citizenship" ? "MKUYU: your nationality is confirmed" : "MKUYU: please check your documents",
       text: action === "confirm_citizenship"
         ? `Dear ${client.name},\n\nMKUYU's Legal team has confirmed your nationality. When your agreement is ready, you can read and sign it in your portal.\n\n${site ? `${site}/login.html` : "Website → Diaspora login"}\n\nMKUYU Africa`
         : action === "verify"
         ? `Dear ${client.name},\n\nMKUYU has verified your identity. Your portal now shows the Verified badge, and you can request any property from it.\n\n${site ? `${site}/login.html` : "Website → Diaspora login"}\n\nMKUYU Africa`
+        : action === "revoke"
+        ? `Dear ${client.name},\n\nYour MKUYU verification has been removed:\n\n${note}\n\nPlease sign in and upload your documents again. Until then you cannot send new property requests.\n\nMKUYU Africa`
         : `Dear ${client.name},\n\nWe could not verify your documents yet:\n\n${note}\n\nPlease sign in and upload them again.\n\nMKUYU Africa`,
       kind: "kyc" }).catch(() => {});
   }
