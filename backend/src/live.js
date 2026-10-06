@@ -66,8 +66,41 @@ export function liveStream(req, res) {
   req.on("close", close);
 }
 
+// ---- Customers' portal screens -------------------------------------------------
+// A signed-in customer keeps one stream too. It carries NO data and no area:
+// only "something changed", after which the portal re-reads its own, permission
+// checked data and redraws what is different. So a customer sees a document
+// verified, a request picked up, a payment recorded or a message arrive without
+// refreshing the page.
+const customerClients = new Set();
+const MAX_CUSTOMER_STREAMS = 4;
+export function customerLiveStream(req, res, tokenHash) {
+  const accountId = req.customer?.id;
+  if ([...customerClients].filter((c) => c.accountId === accountId).length >= MAX_CUSTOMER_STREAMS) return res.status(429).json({ error: "too many live connections" });
+  res.set({ "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" });
+  res.flushHeaders?.();
+  res.write("retry: 3000\n\n: connected\n\n");
+  const client = { res, accountId };
+  customerClients.add(client);
+  const close = () => { clearInterval(beat); customerClients.delete(client); };
+  const beat = setInterval(async () => {
+    try {
+      const alive = await queryOne("SELECT 1 AS ok FROM customer_sessions WHERE token_hash=$1 AND expires_at > NOW()", [tokenHash]);
+      if (!alive) { close(); res.end(); return; }
+      res.write(": ping\n\n");
+    } catch { /* the next beat tries again */ }
+  }, HEARTBEAT_MS);
+  beat.unref?.();
+  req.on("close", close);
+}
+
 export function broadcastChange(area) {
-  if (!area || !clients.size) return;
+  if (!area) return;
+  if (customerClients.size && area !== "typing") {
+    const note = `event: change\ndata: ${JSON.stringify({ at: Date.now() })}\n\n`;
+    for (const client of customerClients) { try { client.res.write(note); } catch { customerClients.delete(client); } }
+  }
+  if (!clients.size) return;
   const payload = `event: change\ndata: ${JSON.stringify({ area, at: Date.now() })}\n\n`;
   for (const client of clients) {
     if (!mayHear(client.access, area)) continue;

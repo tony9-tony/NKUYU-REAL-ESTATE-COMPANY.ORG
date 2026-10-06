@@ -18,7 +18,7 @@ import { query, queryOne } from "../db.js";
 import { mailConfigured, sendMail } from "../mail.js";
 import { recordVerificationEvent } from "../notify/diasporaNotices.js";
 import { callView, currentCall, finishCall, newRoom } from "../calls.js";
-import { broadcastChange } from "../live.js";
+import { broadcastChange, customerLiveStream } from "../live.js";
 import { clearTyping, DELETE_ALL_WINDOW_MS, EDIT_WINDOW_MS, isTyping, REACTIONS, setTyping } from "../typing.js";
 import { receiptCoverage, writeReceiptPdf } from "../payments/notices.js";
 import { documentUploadsDir, progressUploadsDir, resolveStoredFile, safeDisplayFilename } from "../uploads.js";
@@ -160,6 +160,8 @@ router.post("/auth/logout", route(async (req, res) => {
   clearCookie(req, res);
   res.json({ ok: true });
 }));
+
+router.get("/live", requireCustomer, (req, res) => customerLiveStream(req, res, hash(readCookie(req, CUSTOMER_COOKIE))));
 
 router.get("/me", requireCustomer, route(async (req, res) => {
   res.json({ name: req.customer.name, email: req.customer.email, country: req.customer.country || null, photo_url: photoUrl(req.customer), verification: verificationState(req.customer) });
