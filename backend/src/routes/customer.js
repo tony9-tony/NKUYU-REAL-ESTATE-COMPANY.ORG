@@ -632,7 +632,7 @@ router.post("/contracts/:id/sign", requireCustomer, route(async (req, res) => {
 const DOC_KINDS = { passport: "Passport (photo page) or NIDA", residence: "Proof of residence abroad (visa, residence card or permit)", other: "Other supporting document" };
 
 router.get("/verification", requireCustomer, route(async (req, res) => {
-  const docs = (await query(`SELECT id, category, original_filename, uploaded_at FROM documents WHERE client_id=$1 AND category LIKE 'kyc_%' ORDER BY id DESC`, [req.customer.client_id])).rows;
+  const docs = (await query(`SELECT id, category, original_filename, uploaded_at FROM documents WHERE client_id=$1 AND category LIKE 'kyc_%' AND status <> 'superseded' ORDER BY id DESC`, [req.customer.client_id])).rows;
   res.json({ ...verificationState(req.customer), kinds: DOC_KINDS,
     documents: docs.map((d) => ({ kind: d.category.slice(4), name: d.original_filename, date: fmtDate(d.uploaded_at) })) });
 }));
@@ -649,6 +649,9 @@ router.post("/verification/documents", requireCustomer, (req, res, next) => {
     if (tooMany(`docs:${req.customer.client_id}`, 20, 60 * 60 * 1000)) throw new HttpError(429, "Too many uploads. Please wait a little.");
     const info = validateUploadedFile(req.file, documentExtensions);
     const client = await queryOne("SELECT organization_id, department_id FROM clients WHERE id=$1", [req.customer.client_id]);
+    // One current document per kind: a new upload replaces the old one, which
+    // stays on file (marked superseded) but leaves the Desk's list.
+    await query("UPDATE documents SET status='superseded' WHERE client_id=$1 AND category=$2 AND status <> 'superseded'", [req.customer.client_id, `kyc_${kind}`]);
     await query(
       `INSERT INTO documents (organization_id, client_id, title, category, status, original_filename, stored_name, file_size, mime_type, uploaded_at, department_id, visibility)
        VALUES ($1,$2,$3,$4,'pending',$5,$6,$7,$8,NOW(),$9,'department')`,
@@ -656,7 +659,15 @@ router.post("/verification/documents", requireCustomer, (req, res, next) => {
     // The first document puts the customer in the Diaspora Desk's queue at
     // once; the desk sees which document is still missing and verifies when
     // both are in (or sends back asking for the other one).
-    await query("UPDATE clients SET verification_status='submitted', verification_note=NULL WHERE id=$1 AND verification_status IN ('unverified','rejected')", [req.customer.client_id]);
+    const moved = await query("UPDATE clients SET verification_status='submitted', verification_note=NULL WHERE id=$1 AND verification_status IN ('unverified','rejected') RETURNING id", [req.customer.client_id]);
+    // Tell the Diaspora Desk by e-mail once, when the customer first enters the queue.
+    if (moved.rows.length && mailConfigured()) {
+      query(`SELECT DISTINCT u.email FROM users u JOIN user_departments ud ON ud.user_id=u.id JOIN departments d ON d.id=ud.department_id
+              WHERE d.name='DIASPORA DESK' AND d.active=TRUE AND u.email IS NOT NULL AND u.email <> ''`)
+        .then(({ rows }) => Promise.all(rows.map((r) => sendMail({ to: r.email, subject: "MKUYU: a diaspora customer sent documents",
+          text: `${req.customer.name} has uploaded identity documents and is waiting to be verified.\n\nOpen the system → Diaspora verification.\n\nMKUYU Africa`, kind: "kyc" }).catch(() => {}))))
+        .catch(() => {});
+    }
     // Open Diaspora Desk screens refresh by themselves.
     broadcastChange("diaspora");
     const now = await queryOne("SELECT verification_status, verification_note FROM clients WHERE id=$1", [req.customer.client_id]);

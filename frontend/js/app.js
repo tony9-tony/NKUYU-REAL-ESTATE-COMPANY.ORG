@@ -5243,14 +5243,14 @@ function closeModal() {
  * styled and is blocked outright in some embedded browsers).
  * Resolves true when the primary action is taken, false when dismissed.
  */
-function confirmDialog({ title, message, confirmLabel = "Confirm", tone = "danger", noteLabel = null }) {
+function confirmDialog({ title, message, confirmLabel = "Confirm", tone = "danger", noteLabel = null, presets = null }) {
   return new Promise((resolve) => {
     modal.dataset.type = "confirm";
     const head = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(title)}</h2><p class="modal-sub">${escapeHtml(message)}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>`;
     // Optional note field: the confirm dialog doubles as the reason prompt for
     // workflow steps that must explain themselves.
     const noteField = noteLabel
-      ? `<div class="field full"><label for="confirm-note">${escapeHtml(noteLabel)}</label><textarea id="confirm-note" rows="3" maxlength="2000" placeholder="Recorded in the contract history"></textarea></div>`
+      ? `<div class="field full"><label for="confirm-note">${escapeHtml(noteLabel)}</label><textarea id="confirm-note" rows="3" maxlength="2000" placeholder="${presets ? "Pick a reason below or write your own" : "Recorded in the contract history"}"></textarea>${presets ? `<div class="preset-row">${presets.map((text, i) => `<button type="button" class="btn btn-small btn-soft" data-preset="${i}">${escapeHtml(text.length > 48 ? `${text.slice(0, 46)}…` : text)}</button>`).join("")}</div>` : ""}</div>`
       : "";
     const actions = `<div class="form-actions">
       <button type="button" class="btn" data-action="close-modal">Cancel</button>
@@ -5260,6 +5260,13 @@ function confirmDialog({ title, message, confirmLabel = "Confirm", tone = "dange
     modalBackdrop.hidden = false;
     state.confirmResolve = resolve;
     state.confirmNoteField = Boolean(noteField);
+    // Ready-made reasons add their sentence to the note; the officer can still edit it.
+    if (presets) modal.querySelectorAll("[data-preset]").forEach((button) => button.addEventListener("click", () => {
+      const field = document.getElementById("confirm-note");
+      const text = presets[Number(button.dataset.preset)];
+      if (field && text && !field.value.includes(text)) field.value = field.value.trim() ? `${field.value.trim()} ${text}` : text;
+      field?.focus();
+    }));
     setTimeout(() => (noteField ? document.getElementById("confirm-note") : modal.querySelector('[data-action="confirm-dialog-accept"]'))?.focus(), 0);
   });
 }
@@ -5833,6 +5840,14 @@ async function openKycDocument(clientId, docId = null) {
   }
 }
 
+const KYC_REASONS = [
+  "The passport photo page is blurry. Please upload a clear, full photo of the page with your picture.",
+  "Your passport is expired or about to expire. Please upload a valid one.",
+  "The proof of residence is missing. Please upload your visa, residence card or permit.",
+  "The name on the document does not match the name on your account. Please upload a document with the same name.",
+  "The document is cut off or has a corner missing. Please upload the whole page.",
+];
+
 async function kycAction(clientId, kind) {
   const texts = {
     verify: ["Verify customer", "The documents match what the customer declared. The customer gets the Verified badge in their portal and can request properties straight away. Legal confirms nationality before any agreement is signed.", "Verify", "primary", "Note (optional)"],
@@ -5843,7 +5858,8 @@ async function kycAction(clientId, kind) {
   if (!texts) return;
   // Opened from the document viewer: the question takes the dialog's normal size.
   modal.classList.remove("modal-wide", "modal-document");
-  const ok = await confirmDialog({ title: texts[0], message: texts[1], confirmLabel: texts[2], tone: texts[3], noteLabel: texts[4] });
+  const presets = kind === "reject" ? KYC_REASONS : null;
+  const ok = await confirmDialog({ title: texts[0], message: texts[1], confirmLabel: texts[2], tone: texts[3], noteLabel: texts[4], presets });
   const note = String(state.transitionNotes || "").trim();
   state.transitionNotes = "";
   if (!ok) return;

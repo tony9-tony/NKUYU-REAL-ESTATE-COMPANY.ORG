@@ -2508,7 +2508,7 @@ router.get("/clients/:id/profile", route(async (req, res) => {
        FROM leads l LEFT JOIN properties p ON p.id=l.property_id
       WHERE l.organization_id=$2 AND l.client_id=$1 ORDER BY l.created_at DESC LIMIT 20`, [client.id, req.access.organizationId])).rows
     .map((r) => ({ ...r, photo_url: r.photo_id ? `/api/v1/properties/${r.property_id}/images/${r.photo_id}/file` : null }));
-  const documents = (await queryOne("SELECT COUNT(*)::int AS n FROM documents WHERE client_id=$1 AND category LIKE 'kyc\\_%'", [client.id]))?.n ?? 0;
+  const documents = (await queryOne("SELECT COUNT(*)::int AS n FROM documents WHERE client_id=$1 AND category LIKE 'kyc\\_%' AND status <> 'superseded'", [client.id]))?.n ?? 0;
   res.json({ client: { ...client, ...extra }, account, contracts, requests, kyc_documents: documents });
 }));
 router.get("/clients/:id/portal", route(async (req, res) => {
@@ -2576,7 +2576,7 @@ router.get("/diaspora/verifications", route(async (req, res) => {
             o.display_name AS officer_name, dc.display_name AS desk_checked_by_name, vb.display_name AS verified_by_name,
             cb.display_name AS citizenship_confirmed_by_name,
             COALESCE((SELECT json_agg(json_build_object('id', d.id, 'kind', substr(d.category, 5), 'name', d.original_filename, 'uploaded_at', d.uploaded_at) ORDER BY d.id)
-                        FROM documents d WHERE d.client_id=c.id AND d.category LIKE 'kyc_%'), '[]') AS documents
+                        FROM documents d WHERE d.client_id=c.id AND d.category LIKE 'kyc_%' AND d.status <> 'superseded'), '[]') AS documents
        FROM clients c LEFT JOIN users o ON o.id=c.diaspora_officer_id LEFT JOIN users dc ON dc.id=c.desk_checked_by LEFT JOIN users vb ON vb.id=c.verified_by
             LEFT JOIN users cb ON cb.id=c.citizenship_confirmed_by
       WHERE c.organization_id=$1 AND c.is_diaspora=TRUE AND c.verification_status IS NOT NULL
@@ -2606,7 +2606,7 @@ router.post("/diaspora/verifications/:id", route(async (req, res) => {
     // does, nationality is confirmed in the same step.
     if (!role.desk && !role.legal) throw new HttpError(403, "Customers are verified by the Diaspora Desk.");
     if (!documentsIn) throw new HttpError(409, client.verification_status === "verified" ? "This customer is already verified." : "The customer must upload their documents first.");
-    const have = await queryOne("SELECT COUNT(*) FILTER (WHERE category='kyc_passport')::int AS p, COUNT(*) FILTER (WHERE category='kyc_residence')::int AS r FROM documents WHERE client_id=$1", [clientId]);
+    const have = await queryOne("SELECT COUNT(*) FILTER (WHERE category='kyc_passport')::int AS p, COUNT(*) FILTER (WHERE category='kyc_residence')::int AS r FROM documents WHERE client_id=$1 AND status <> 'superseded'", [clientId]);
     if (!have.p || !have.r) throw new HttpError(409, `The ${!have.p ? "passport" : "proof of residence"} is still missing. Press "Send back" and ask the customer to upload it.`);
     update = role.legal && !role.desk
       ? ["UPDATE clients SET verification_status='verified', verified_by=$2, verified_at=NOW(), verification_note=$3, citizenship_confirmed_by=$2, citizenship_confirmed_at=NOW() WHERE id=$1", [clientId, req.user.id, note]]
