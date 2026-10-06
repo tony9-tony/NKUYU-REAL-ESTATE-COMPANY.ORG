@@ -724,7 +724,12 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: non
 /* Segmented control (e.g. Assignments sections). */
 .segmented {
   display: inline-flex;
-  flex-wrap: wrap;
+  /* One line on every screen: when the tabs do not fit, the bar scrolls sideways instead of breaking onto a second row. */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
   max-width: 100%;
   gap: 2px;
   padding: 3px;
@@ -732,7 +737,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: non
   border-radius: var(--radius);
   background: var(--surface-sunken);
 }
+.segmented::-webkit-scrollbar { display: none; }
 .seg-btn {
+  flex: 0 0 auto;
   height: 30px;
   padding: 0 12px;
   border: 0;

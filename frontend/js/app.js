@@ -4500,6 +4500,11 @@ function render() {
   hydrateImages(content);
   applySearch();
   updateNotificationDot();
+  // Tab bars stay on one line; on a narrow screen the chosen tab is scrolled into view inside its bar.
+  content.querySelectorAll(".segmented").forEach((bar) => {
+    const on = bar.querySelector(".seg-btn.active");
+    if (on && bar.scrollWidth > bar.clientWidth) bar.scrollLeft = Math.max(0, on.offsetLeft - (bar.clientWidth - on.offsetWidth) / 2);
+  });
 }
 
 /* --------------------------------------------------------------------------
