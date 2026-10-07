@@ -2869,7 +2869,7 @@ router.get("/diaspora/report", route(async (req, res) => {
   const handoff = await one(
     `SELECT COUNT(*) FILTER (WHERE l.status='handed_off' AND l.outcome IS NULL)::int AS awaiting,
             COUNT(*) FILTER (WHERE l.status='handed_off' AND l.outcome IS NULL AND l.handed_off_at <= NOW() - ($2 || ' hours')::interval)::int AS overdue,
-            ROUND(AVG(EXTRACT(EPOCH FROM (l.handed_off_at - l.created_at)) / 60) FILTER (WHERE l.handed_off_at IS NOT NULL AND l.created_at >= NOW() - ($1 || ' days')::interval))::int AS to_handoff_minutes,
+            ROUND(AVG(EXTRACT(EPOCH FROM (l.handed_off_at - l.created_at)) / 60) FILTER (WHERE l.handed_off_at IS NOT NULL AND l.handed_off_at >= l.created_at AND l.created_at >= NOW() - ($1 || ' days')::interval))::int AS to_handoff_minutes,
             ROUND(AVG(EXTRACT(EPOCH FROM (l.outcome_at - l.handed_off_at)) / 60) FILTER (WHERE l.outcome_at IS NOT NULL AND l.handed_off_at IS NOT NULL AND l.outcome_at >= l.handed_off_at AND l.outcome_at >= NOW() - ($1 || ' days')::interval))::int AS to_report_minutes
        FROM leads l JOIN clients c ON c.id=l.client_id AND c.is_diaspora=TRUE
       WHERE l.source='diaspora-portal' AND l.organization_id=$3`, [days, lateAfter, org]);
