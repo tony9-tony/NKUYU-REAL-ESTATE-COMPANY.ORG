@@ -2864,6 +2864,15 @@ router.get("/diaspora/report", route(async (req, res) => {
             COUNT(*) FILTER (WHERE status='declined')::int AS declined,
             COALESCE(ROUND(AVG(EXTRACT(EPOCH FROM (ended_at - answered_at)) / 60) FILTER (WHERE answered_at IS NOT NULL AND ended_at IS NOT NULL))::int, 0) AS avg_minutes
        FROM video_calls WHERE created_at >= NOW() - ($1 || ' days')::interval`, [days]);
+  // How fast requests move: waiting for Customer Care, how many are late, time to hand over and to report back.
+  const lateAfter = Math.max(1, Number(process.env.HANDOFF_OVERDUE_HOURS) || 24);
+  const handoff = await one(
+    `SELECT COUNT(*) FILTER (WHERE l.status='handed_off' AND l.outcome IS NULL)::int AS awaiting,
+            COUNT(*) FILTER (WHERE l.status='handed_off' AND l.outcome IS NULL AND l.handed_off_at <= NOW() - ($2 || ' hours')::interval)::int AS overdue,
+            ROUND(AVG(EXTRACT(EPOCH FROM (l.handed_off_at - l.created_at)) / 60) FILTER (WHERE l.handed_off_at IS NOT NULL AND l.created_at >= NOW() - ($1 || ' days')::interval))::int AS to_handoff_minutes,
+            ROUND(AVG(EXTRACT(EPOCH FROM (l.outcome_at - l.handed_off_at)) / 60) FILTER (WHERE l.outcome_at IS NOT NULL AND l.handed_off_at IS NOT NULL AND l.outcome_at >= l.handed_off_at AND l.outcome_at >= NOW() - ($1 || ' days')::interval))::int AS to_report_minutes
+       FROM leads l JOIN clients c ON c.id=l.client_id AND c.is_diaspora=TRUE
+      WHERE l.source='diaspora-portal' AND l.organization_id=$3`, [days, lateAfter, org]);
   const expiring = await one(
     `SELECT COUNT(*)::int AS n FROM documents d JOIN clients c ON c.id=d.client_id AND c.is_diaspora=TRUE
       WHERE d.category LIKE 'kyc\\_%' AND d.status <> 'superseded' AND d.expires_on IS NOT NULL AND d.expires_on <= CURRENT_DATE + 30`);
@@ -2874,6 +2883,7 @@ router.get("/diaspora/report", route(async (req, res) => {
     days, customers, joined: joined.n || 0, requests, waiting: waiting.n || 0,
     response: { answered: response.answered || 0, avg_minutes: response.avg_minutes ?? null, median_minutes: response.median_minutes ?? null },
     calls: { total: calls.total || 0, answered: calls.answered || 0, missed: calls.missed || 0, declined: calls.declined || 0, avg_minutes: calls.avg_minutes || 0 },
+    handoff: { awaiting: handoff.awaiting || 0, overdue: handoff.overdue || 0, late_after_hours: lateAfter, to_handoff_minutes: handoff.to_handoff_minutes ?? null, to_report_minutes: handoff.to_report_minutes ?? null },
     expiring: expiring.n || 0, transfers,
   });
 }));

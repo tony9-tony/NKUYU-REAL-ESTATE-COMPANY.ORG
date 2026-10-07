@@ -6078,6 +6078,8 @@ function renderDiasporaReport() {
       ${tile("Requests", reqTotal, "inbox", "blue", `In the last ${days} days`)}
       ${tile("Chats waiting for a reply", r.waiting, "mail", r.waiting ? "amber" : "", "Customer wrote last")}
       ${tile("Typical reply time", escapeHtml(mins(r.response.median_minutes)), "clock", "blue", r.response.answered ? `Average ${mins(r.response.avg_minutes)} · ${r.response.answered} answered` : "")}
+      ${tile("Waiting for Customer Care", r.handoff?.awaiting ?? 0, "phone", r.handoff?.overdue ? "amber" : "", r.handoff?.overdue ? `${r.handoff.overdue} late (over ${r.handoff.late_after_hours} h) · reminders are sent` : "Handed over, no report yet")}
+      ${tile("Request handling time", escapeHtml(mins(r.handoff?.to_report_minutes)), "clock", "blue", `To hand over: ${mins(r.handoff?.to_handoff_minutes)} · hand-over to report: ${mins(r.handoff?.to_report_minutes)}`)}
       ${tile("Video calls", r.calls.total, "phone", "blue", `${r.calls.answered} answered · ${r.calls.missed} missed · ${r.calls.declined} declined${r.calls.avg_minutes ? ` · avg ${r.calls.avg_minutes} min` : ""}`)}
       ${tile("Documents expiring soon", r.expiring, "folder", r.expiring ? "amber" : "", "Within 30 days or already expired")}
     </div>

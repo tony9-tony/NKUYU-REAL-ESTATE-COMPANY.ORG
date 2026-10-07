@@ -166,6 +166,17 @@ try {
     assert.equal(again.status, 200, JSON.stringify(again.payload));
     assert.equal(await level(), 0, "a new hand-off resets the count");
   });
+
+  await test("the Diaspora report counts requests waiting for Customer Care and the late ones", async () => {
+    const before = (await staff("/diaspora/report", { token: desk })).payload;
+    assert.ok(before.handoff, "report has a handoff block");
+    assert.ok(before.handoff.awaiting >= 1, JSON.stringify(before.handoff));
+    await query("UPDATE leads SET handed_off_at=NOW() - INTERVAL '30 hours' WHERE id=$1", [leadId]);
+    const after = (await staff("/diaspora/report", { token: desk })).payload.handoff;
+    assert.ok(after.overdue >= 1, JSON.stringify(after));
+    assert.equal(after.late_after_hours, 24);
+    assert.ok(after.overdue <= after.awaiting);
+  });
 } finally {
   await server.stop();
   await closeDatabase();
