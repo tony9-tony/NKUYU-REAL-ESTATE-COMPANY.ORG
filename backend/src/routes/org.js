@@ -17,9 +17,11 @@ import { Report } from "../models/report.js";
 import { Appointment, Client, Document, Property } from "../models/catalog.js";
 import { REPORT_TYPES, PAYMENT_METHODS, reportTypeIsFinancial } from "../models/reportTypes.js";
 import { CONTRACT_ACTIONS, CONTRACT_POSITIONS, WORKFLOW_STAGES, WORKFLOW_EXCEPTIONS, availableActions, canTransition, contractPosition, transitionBlockedReason, workflowGraph, workflowStagePermissions } from "../contracts/workflow.js";
-import { ROLE_DUTIES, CONTRACT_OWNERSHIP, ROLE_HOME_DEPARTMENT, DEPARTMENT_DEFAULT_ROLE, DEFAULT_STAFF_ROLE, TASK_HANDOFF, SYSTEM_PERMISSIONS, departmentDutyTree, checkRoleDuties, checkContractOwnership, checkNoSystemAdminLeak, checkDeadPermissions } from "../org/duties.js";
+import { ROLE_DUTIES, CONTRACT_OWNERSHIP, ROLE_HOME_DEPARTMENT, DEPARTMENT_DEFAULT_ROLE, DEFAULT_STAFF_ROLE, STAFF_LOCKED_DEPARTMENTS, TASK_HANDOFF, SYSTEM_PERMISSIONS, departmentDutyTree, checkRoleDuties, checkContractOwnership, checkNoSystemAdminLeak, checkDeadPermissions } from "../org/duties.js";
 import taskRoutes from "./tasks.js";
 import { EXISTING_CLIENT_SQL, findExistingClient } from "../org/clientMatch.js";
+import ownerListingRoutes from "./ownerListings.js";
+import { openListingForSellLead } from "../sales/ownerListingStore.js";
 import { APPOINTMENT_TYPES, arrangeRequestAppointment } from "../org/requestAppointment.js";
 import { cleanupUploadedFile, documentUploadsDir, profileImageExtensions, profileUploadsDir, removeStoredFile, resolveStoredFile, storedFileExists, uploadProfileImageFile, validateUploadedFile } from "../uploads.js";
 
@@ -30,6 +32,8 @@ const router = Router();
 // authorizes itself per request and never reuses or weakens the contract
 // workflow.
 router.use("/tasks", taskRoutes);
+// Owner selling (valuation, mandate, offers, weekly owner updates). Authorizes itself per request.
+router.use("/owner-listings", ownerListingRoutes);
 // Same int4 ceiling as parseId() in ./api.js: these keys are all
 // `INTEGER GENERATED ... AS IDENTITY`, so a larger number can never exist and
 // would otherwise reach PostgreSQL and come back as a 500.
@@ -55,7 +59,7 @@ const rows = async (sql, values = []) => (await query(sql, values)).rows;
 // ---------------------------------------------------------------------------
 const USER_ROLES_JSON = "COALESCE((SELECT json_agg(json_build_object('id',r.id,'name',r.name,'rank',r.rank) ORDER BY r.rank DESC) FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=u.id),'[]'::json)";
 const USER_DEPARTMENTS_JSON = "COALESCE((SELECT json_agg(json_build_object('id',d.id,'name',d.name)) FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=u.id),'[]'::json)";
-const RESERVED_ROLE_PERMISSIONS = new Set([...SYSTEM_PERMISSIONS, "view_audit", "approve_management", "approve_legal", "validate_finance"]);
+const RESERVED_ROLE_PERMISSIONS = new Set([...SYSTEM_PERMISSIONS, "view_audit", "approve_management", "approve_legal", "validate_finance", "check_owner_documents", "sign_sell_mandate", "confirm_customer_payments"]);
 const isAdminAccount = (req) => req.user?.role === "admin";
 const callerRank = (req) => Number(req.access?.rank ?? 0);
 const refuse = (message, status = 403) => { const e = new Error(message); e.status = status; throw e; };
@@ -729,8 +733,8 @@ const DEPARTMENT_SELECT = `SELECT d.*,
   (SELECT COUNT(*) FROM user_departments ud WHERE ud.department_id=d.id)::int AS all_members,
   (SELECT COUNT(*) FROM clients c WHERE c.department_id=d.id)::int AS client_count
   FROM departments d`;
-const defaultRoleFor = (name) => (Object.hasOwn(DEPARTMENT_DEFAULT_ROLE, name) ? DEPARTMENT_DEFAULT_ROLE[name] : DEFAULT_STAFF_ROLE);
-const withCore = (row) => row && ({ ...row, core: CORE_DEPARTMENTS.has(row.name), default_role: defaultRoleFor(row.name) });
+const defaultRoleFor = (name) => (STAFF_LOCKED_DEPARTMENTS.has(name) ? null : Object.hasOwn(DEPARTMENT_DEFAULT_ROLE, name) ? DEPARTMENT_DEFAULT_ROLE[name] : DEFAULT_STAFF_ROLE);
+const withCore = (row) => row && ({ ...row, core: CORE_DEPARTMENTS.has(row.name), default_role: defaultRoleFor(row.name), staff_locked: STAFF_LOCKED_DEPARTMENTS.has(row.name) });
 
 router.get("/departments", requireAnyPermission("manage_users", "manage_roles"), async (req,res,next)=>{try{res.json((await rows(`${DEPARTMENT_SELECT} WHERE d.organization_id=$1 ORDER BY d.name`,[await organizationId()])).map(withCore));}catch(e){next(e);}});
 router.post("/departments", requirePermission("manage_roles"), async (req,res,next)=>{try{
@@ -933,6 +937,8 @@ router.post("/departments/:id/staff", requirePermission("manage_users"), async (
   const dept=await queryOne("SELECT id,name,active FROM departments WHERE id=$1 AND organization_id=$2",[deptId,org]);
   if(!dept)return res.status(404).json({error:"department not found"});
   if(!dept.active)return res.status(400).json({error:"this department is inactive; activate it first"});
+  // MANAGEMENT (the MD) and ICT & ADMINISTRATION (Admin) are locked here.
+  if(STAFF_LOCKED_DEPARTMENTS.has(dept.name))return res.status(400).json({error:"staff cannot be added to "+dept.name+" from the Departments page"});
   const roleName=defaultRoleFor(dept.name);
   if(!roleName)return res.status(400).json({error:`${dept.name} has no default role; add this person on the Staff page and choose their role`});
   const role=await queryOne("SELECT id FROM roles WHERE organization_id=$1 AND name=$2 AND active",[org,roleName]);
@@ -1099,6 +1105,9 @@ router.get("/requests", requireModuleAccess("leads"), async(req,res,next)=>{try{
 // has reported back (or moves it). It goes straight into Appointments.
 /** Whether a user works in Sales (who own website requests end to end) or in the Diaspora Desk, which
  * runs the same flow for diaspora requests (the record scope keeps the desk to diaspora work only). */
+// Accepting a Sell request opens the owner's listing at "Received" for the Property Officer.
+// A failure here is logged and never undoes the conversion.
+async function openSellerListing(req,lead,clientId){try{const listing=await openListingForSellLead(lead,clientId,req.user.id);if(listing)await audit(req,"owner_listing_created","owner_listing",listing.id,{lead_id:lead.id,client_id:clientId,stage:"received"});}catch(e){console.error("owner listing:",e.message);}}
 async function inSalesDepartment(userId){
   return Boolean(await queryOne("SELECT 1 FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=$1 AND d.active=TRUE AND d.name IN ('SALES, MARKETING & OPERATIONS','DIASPORA DESK')",[userId]));
 }
@@ -1173,8 +1182,8 @@ router.post("/leads/:id/convert", requireModuleAccess("leads"), async(req,res,ne
     const mode=req.body?.mode==="new"?"new":req.body?.mode==="existing"?"existing":"auto";
     const match=mode==="new"?null:await findExistingClient(values[1],{email:lead.email,phone:lead.phone});const existing=match?await Client.get(match.id):null;
     if(mode==="existing"&&!existing)return res.status(409).json({error:"no existing client matches this customer; choose 'new client'"});
-    if(existing){await query("UPDATE leads SET client_id=$1,status='converted',converted_at=NOW(),converted_by=$3 WHERE id=$2",[existing.id,lead.id,req.user.id]);await audit(req,"converted","lead",lead.id,{client_id:existing.id,existing:true});return res.json(existing);}
-    const clientType=lead.service==="sell"?"seller":lead.service==="rent"?"tenant":"buyer";const client=await queryOne("INSERT INTO clients(organization_id,name,email,phone,client_type,status,notes,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,$10,'lead',$5,$6,$7,$8,$9) RETURNING *",[values[1],lead.name,lead.email,lead.phone,lead.notes,lead.owner_id,lead.created_by,lead.department_id,lead.visibility,clientType]);await query("UPDATE leads SET client_id=$1,status='converted',converted_at=NOW(),converted_by=$3 WHERE id=$2",[client.id,lead.id,req.user.id]);await audit(req,"converted","lead",lead.id,{client_id:client.id});res.status(201).json(client);}catch(e){next(e);}});
+    if(existing){await query("UPDATE leads SET client_id=$1,status='converted',converted_at=NOW(),converted_by=$3 WHERE id=$2",[existing.id,lead.id,req.user.id]);await audit(req,"converted","lead",lead.id,{client_id:existing.id,existing:true});await openSellerListing(req,lead,existing.id);return res.json(existing);}
+    const clientType=lead.service==="sell"?"seller":lead.service==="rent"?"tenant":"buyer";const client=await queryOne("INSERT INTO clients(organization_id,name,email,phone,client_type,status,notes,owner_id,created_by,department_id,visibility) VALUES($1,$2,$3,$4,$10,'lead',$5,$6,$7,$8,$9) RETURNING *",[values[1],lead.name,lead.email,lead.phone,lead.notes,lead.owner_id,lead.created_by,lead.department_id,lead.visibility,clientType]);await query("UPDATE leads SET client_id=$1,status='converted',converted_at=NOW(),converted_by=$3 WHERE id=$2",[client.id,lead.id,req.user.id]);await audit(req,"converted","lead",lead.id,{client_id:client.id});await openSellerListing(req,lead,client.id);res.status(201).json(client);}catch(e){next(e);}});
 // Follow-ups. Opt-in pagination; the default response is the bare array the
 // workspace aggregate and the existing tests depend on.
 router.get("/follow-ups", requireModuleAccess("follow_ups"), async(req,res,next)=>{try{

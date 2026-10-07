@@ -66,6 +66,8 @@ import {
   storedFileExists,
 } from "../uploads.js";
 import orgRoutes from "./org.js";
+import customerPaymentRoutes from "./customerPayments.js";
+import { ACCEPTED_REQUEST_SQL, contractBlockedMessage, invoiceBlockingContract } from "../payments/invoices.js";
 import publicRoutes from "./public.js";
 import { audit } from "../org/audit.js";
 import { requirePermissionForMethod, provisionSystemAdministrator, organizationId, requireAdmin, can as canPermission } from "../org/rbac.js";
@@ -1160,6 +1162,8 @@ router.use((req, res, next) => {
   };
   next();
 });
+// Customer invoices (Finance Manager, MD). The customer side is in customer.js.
+router.use("/org/customer-payments", customerPaymentRoutes);
 router.use("/org", orgRoutes);
 
 router.get("/projects", route(async (req, res) => {
@@ -1241,6 +1245,11 @@ router.post("/contracts/:id/transition", route(async (req, res) => {
   // Legal -> Finance -> MD: the business preconditions the status cannot express.
   const blocked = transitionBlockedReason(contract, name);
   if (blocked) throw new HttpError(409, blocked);
+  // No contract goes forward while its request has an unpaid invoice.
+  if (name === "submit") {
+    const unpaid = await invoiceBlockingContract(contract.client_id, contract.property_id);
+    if (unpaid) throw new HttpError(409, contractBlockedMessage(unpaid));
+  }
   // Legal must sign off before the customer is ever asked to.
   if (name === "send_to_customer" && contract.requires_management_approval && contract.status !== "approved") {
     throw new HttpError(409, "this contract needs management approval before it goes to the customer");
@@ -1891,6 +1900,7 @@ router.post("/contracts/:id/schedule", route(async (req, res) => {
   }
   if (existing > 0) await query("DELETE FROM debts WHERE contract_id=$1 AND organization_id=$2", [id, orgId]);
   const createdIds = await insertSchedule(contract, { deposit, installments, firstDueDate, frequency });
+  await allocateEarlierPayments(id);
   // The plan Finance settled on is the contract's plan from now on.
   await query("UPDATE contracts SET deposit_amount=$1, installment_count=$2, first_due_date=$3, payment_frequency=$4 WHERE id=$5", [deposit, installments, firstDueDate, frequency, id]);
   res.status(201).json({ created: createdIds.length, debts: await Promise.all(createdIds.map((debtId) => Debt.get(debtId))) });
@@ -1933,7 +1943,18 @@ async function createScheduleFromTerms(contractId) {
   const deposit = Number(contract.deposit_amount || 0);
   if (deposit >= Number(contract.value)) return 0;
   const ids = await insertSchedule(contract, { deposit, installments, firstDueDate: String(contract.first_due_date).slice(0, 10), frequency: contract.payment_frequency || "monthly" });
+  await allocateEarlierPayments(contractId);
   return ids.length;
+}
+
+// Money approved before the plan existed (a deposit paid on a customer invoice
+// is carried onto the contract when it is created) is spread over the new
+// installments, oldest payment first, so the deposit shows as paid.
+async function allocateEarlierPayments(contractId) {
+  const payments = (await query("SELECT id FROM payments WHERE contract_id=$1 AND status='approved' ORDER BY paid_at, id", [contractId])).rows;
+  const touched = [];
+  for (const payment of payments) touched.push(...await Payment.allocate(payment.id));
+  await resyncInstallmentState(touched);
 }
 
 router.get("/debts/overdue", route(async (req, res) => res.json(await Debt.overdue())));
@@ -2521,7 +2542,10 @@ router.get("/clients/:id/portal", route(async (req, res) => {
 }));
 router.post("/clients/:id/portal-invite", route(async (req, res) => {
   const client = requireRecord(await Client.get(parseId(req.params.id)), "Client");
-  if (!client.is_diaspora) throw new HttpError(400, "Only a diaspora client can be invited to the customer portal. Tick 'Diaspora client' first.");
+  // Diaspora clients, and Tanzanian clients with an accepted buy/rent request
+  // (they see their invoices, contracts and receipts; nothing diaspora-only).
+  const accepted = client.is_diaspora ? null : await queryOne(`SELECT 1 FROM leads l WHERE l.client_id=$1 AND ${ACCEPTED_REQUEST_SQL} LIMIT 1`, [client.id]);
+  if (!client.is_diaspora && !accepted) throw new HttpError(400, "Only a diaspora client, or a Tanzanian client whose buy or rent request MKUYU has accepted, can be invited to the portal.");
   const email = String(client.email || "").trim().toLowerCase();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, "Add the client's e-mail address first: they sign in with a code sent there.");
   const taken = await queryOne("SELECT client_id FROM customer_accounts WHERE lower(email)=$1 AND status<>'disabled' AND client_id<>$2", [email, client.id]);
@@ -2535,8 +2559,10 @@ router.post("/clients/:id/portal-invite", route(async (req, res) => {
   const site = String(process.env.DIASPORA_SITE_URL || process.env.PUBLIC_SITE_URL || "").trim().replace(/\/+$/, "");
   const link = site ? `${site}/login.html` : "the MKUYU website (Diaspora login)";
   const mail = mailConfigured()
-    ? await sendMail({ to: email, subject: "Your MKUYU diaspora portal",
-        text: `Dear ${client.name},\n\nYou can now follow your MKUYU property from wherever you are: your contract, every payment and receipt, the balance and next installment, and photos of the construction progress.\n\nOpen ${link}, choose 'Forgot password or first time here?', enter this e-mail address (${email}) and set your password with the code we send you. After that you sign in with your e-mail and password.\n\nMKUYU Africa` ,
+    ? await sendMail({ to: email, subject: client.is_diaspora ? "Your MKUYU diaspora portal" : "Your MKUYU customer portal",
+        text: `Dear ${client.name},\n\n${client.is_diaspora
+          ? "You can now follow your MKUYU property from wherever you are: your contract, every payment and receipt, the balance and next installment, and photos of the construction progress."
+          : "You can now see your MKUYU invoices in the customer portal, pay them (press Pay now for MKUYU's payment details), upload your receipt, and follow your contract and every receipt."}\n\nOpen ${link}, choose 'Forgot password or first time here?', enter this e-mail address (${email}) and set your password with the code we send you. After that you sign in with your e-mail and password.\n\nMKUYU Africa` ,
         kind: "portal_invite" })
     : { sent: false, error: "e-mail is not set up" };
   await audit(req, "portal_invited", "client", client.id, { email, contracts: contracts.n, emailed: mail.sent });

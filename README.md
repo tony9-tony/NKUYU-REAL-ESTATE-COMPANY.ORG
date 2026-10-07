@@ -164,7 +164,42 @@ Without a reset from the administrator, saving the form only says "Contact your 
 
 ## Your work today
 
-Finance, Sales and the Managing Director open on a simple home: a short numbered list of the jobs waiting for them, one sentence each and one button that opens the job already filtered (for example *Payments waiting for your approval*). A strip under it shows how their work moves, and their main pages carry a one-line tip saying what their step is. The menus, permissions and screens are unchanged.
+Finance, Sales, the Property Officer and the Managing Director open on a simple home: a short numbered list of the jobs waiting for them, one sentence each and one button that opens the job already filtered (for example *Payments waiting for your approval*). A strip under it shows how their work moves, and their main pages carry a one-line tip saying what their step is. The menus, permissions and screens are unchanged.
+
+## Owner listings
+
+When an owner wants MKUYU to sell their property, the **Property Officer** runs it on **Owner listings** (menu: Business). Each seller property has one listing that moves through fixed stages, none of which can be skipped:
+
+**Received → Visit booked → Valued → Documents checked → Mandate signed → Listed → Under offer → Sold** (or **Withdrawn** at any point, with a reason).
+
+1. **Received**: opens by itself when Sales accepts a website Sell request (the seller becomes a client), or the Property Officer adds an owner who walked in.
+2. **Visit booked / Valued**: the Property Officer visits, then records the date, a suggested price range (low and high) and a written note.
+3. **Documents checked**: the **Legal Officer** only. They record the title deed number and confirm the owner's identity and authority to sell. The Property Officer, the Sales manager and the MD cannot mark this step.
+4. **Sell mandate**: the Property Officer agrees the listing price, commission and end date with the owner. The **Managing Director signs every mandate**; it does not count until then. A commission below the standard rate is marked as a discount. Nobody signs a mandate they agreed themselves. The MD can send it back with a reason.
+5. **Offers**: every offer is recorded, presented to the owner **in writing** (letter, email, WhatsApp or SMS), and the owner's decision is recorded with its date (accepted, rejected or countered with a price). **Under offer** follows an accepted offer; if that buyer falls away, *Back on the market* returns it to Listed. **Sold** needs an accepted offer.
+6. **Weekly update**: the Property Officer logs every update to the owner (date, channel, note). An active listing with no update for **7 days** is **overdue**: it shows on the Property Officer's *Your work today*, in a count for the MD, and becomes an urgent task on their Assignments (the same reminder pattern as Customer Service hand-offs). Logging the update closes that task.
+
+The **standard commission rate** is a setting (default 3%); the MD changes it from the Owner listings page. The Sales Department Manager and the MD may also act on the owner side and give a listing to a Property Officer. Every step is checked again by the server and written to the audit log (`owner_listing_*`). Permissions: `run_owner_listings` (Property Officer, Department Manager, MD), `check_owner_documents` (Legal Officer), `sign_sell_mandate` (MD). Code: `backend/src/sales/ownerListing.js` (the stages and rules), `backend/src/routes/ownerListings.js` (`/org/owner-listings`). Test: `npm run test:owner-listings`.
+
+## Customer invoices (payment before the contract)
+
+A temporary way to take payments, with no link to a bank yet. Customer Service has no step in it.
+
+1. A buy or rent request (Tanzanian or diaspora) is **accepted** first (Sales approves the customer as a client, or books the appointment). Appointments and the rest follow as before.
+2. **Payment settings** (Finance Manager): MKUYU's bank accounts (bank, account name and number, branch, SWIFT). Customers pay by bank only; these are what they see on Pay now.
+3. When payment is due, **before the contract**, the Finance Manager opens **Customer invoices → New invoice** on that accepted request: what it is for (e.g. Deposit), the amount, and the due date. Each invoice gets a unique reference (`INV-2026-XXXXXX`).
+4. The invoice appears under **Invoices** in the customer portal with a **Pay now** button. Pay now shows the payment details, with copy buttons, and the reference to quote.
+5. The customer pays outside the system, then comes back and uploads the receipt (photo, screenshot or PDF) and/or pastes the payment message, with the transaction ID, the amount and the date.
+6. The Finance Manager checks MKUYU's statement and **accepts** it (final: "this customer paid this", entering the amount actually received; the MKUYU receipt is issued and the customer can open it in the portal) or **rejects** it with a reason the customer reads.
+7. The contract for that request cannot be prepared or submitted to Legal while its invoice is not Paid (checked by the server). When the contract is created, the money accepted on the invoice is added to the contract's payments with the same receipt numbers, so the balance counts it. A request with no invoice is not held.
+
+**Statuses**: Not paid, Proof uploaded, Partly paid (balance shown; the customer can send more), Paid, Overdue (past the due date and not paid), Rejected (reason shown). The Finance Manager and the MD see who has paid and who has not on Customer invoices.
+
+**Duplicate checks**, all on the server: a transaction ID is used once in the whole system (spaces and case ignored, including references already in the payment ledger); the same file or the same pasted message cannot back two payments; the same customer, amount, date and method within 24 hours is accepted but flagged for Finance; only one proof waits for Finance per invoice. A rejected proof frees its transaction ID and file.
+
+**Tanzanian customers in the portal**: any client with an accepted request can be invited (Clients → Invite to the portal). They see their invoices, contracts and receipts. Verification, Diaspora Desk messages and calls, and portal requests stay diaspora-only (refused by the server).
+
+Permissions: `set_payment_requests` (raise invoices; Finance Manager, easy to move to the Sales Manager later), `edit_payment_accounts` (payment settings), `confirm_customer_payments` (accept or reject), `view_customer_payments` (MD). Every step is written to the audit log (`invoice_*`, `payment_details_*`). Code: `backend/src/payments/customerPayments.js` (rules), `backend/src/payments/invoices.js`, `backend/src/routes/customerPayments.js` (`/org/customer-payments`), customer side in `backend/src/routes/customer.js` (`/customer/invoices`). The portal screens are in the `mkuyu_diaspora` project (`assets/js/pages/portal.js`). Test: `npm run test:customer-payments`.
 
 ## Backups
 
@@ -284,6 +319,8 @@ Tests never touch the live database: `test_support/guard.mjs` derives a separate
 ```powershell
 npm run test          # unit, access matrix, frontend smoke, end-to-end
 npm run test:final    # payments, refunds, property/contract rules
+npm run test:owner-listings  # owner selling: stages, Legal check, MD signature, 7-day updates
+npm run test:customer-payments  # invoices before the contract: duplicates, statuses, portal, contract hold
 ```
 
 On Windows, double-click `run-tests.bat`; the results are written to `test-results.txt`.

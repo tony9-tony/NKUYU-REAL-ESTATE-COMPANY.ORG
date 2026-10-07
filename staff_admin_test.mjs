@@ -192,6 +192,12 @@ check((await call(`/org/departments/${sales.id}/staff`, adminToken, "POST", { em
 const quickId = (await call("/org/users", adminToken)).body.find((u) => u.email === quickEmail)?.id;
 check((await call(`/org/users/${quickId}`, adminToken, "PUT", { password: `MkuDemo#quick${tag}2026` })).status === 400, "Reset password refuses the MkuDemo# scheme too");
 check((await call(`/org/departments/${deptByName("MANAGEMENT").id}/staff`, adminToken, "POST", { email: `mgmt.${tag}@test.mkuyu.local`, password: "TempPass#2026" })).status === 400, "nobody is added to Management by default (no Managing Director by accident)");
+// MANAGEMENT (MD) and ICT & ADMINISTRATION (Admin) are locked on the Departments page.
+const ict = deptByName("ICT & ADMINISTRATION");
+check(ict?.staff_locked === true && ict?.default_role === null && deptByName("MANAGEMENT")?.staff_locked === true && sales?.staff_locked === false, "MANAGEMENT and ICT & ADMINISTRATION are marked locked, Sales is not");
+const ictAdd = await call(`/org/departments/${ict.id}/staff`, adminToken, "POST", { email: `ict.${tag}@test.mkuyu.local`, password: "TempPass#2026" });
+check(ictAdd.status === 400, `nobody is added to ICT & ADMINISTRATION from the Departments page (${ictAdd.status} ${ictAdd.body.error || ""})`);
+check(!(await call("/org/users", adminToken)).body.some((u) => u.email === `ict.${tag}@test.mkuyu.local` || u.email === `mgmt.${tag}@test.mkuyu.local`), "no account was created by the refused requests");
 check((await call(`/org/departments/${sales.id}/staff`, quickLogin.body.token, "POST", { email: `self.${tag}@test.mkuyu.local`, password: "TempPass#2026" })).status === 403, "a sales officer cannot add staff");
 const extraDept = await call("/org/departments", adminToken, "POST", { name: `Field Team ${tag}` });
 const extraStaff = await call(`/org/departments/${extraDept.body.id}/staff`, adminToken, "POST", { display_name: "Field Hand", email: `field.${tag}@test.mkuyu.local`, password: "TempPass#2026" });
