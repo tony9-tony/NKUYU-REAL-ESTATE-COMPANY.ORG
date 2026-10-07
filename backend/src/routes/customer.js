@@ -88,7 +88,7 @@ async function requireCustomer(req, res, next) {
     const token = readCookie(req, CUSTOMER_COOKIE);
     if (!token || token.length > 200) return res.status(401).json({ error: "please sign in" });
     const row = await queryOne(
-      `SELECT s.id AS session_id, ca.id, ca.client_id, ca.email, ca.photo_stored_name, ca.photo_mime, cl.name, cl.country, cl.verification_status, cl.verification_note, cl.citizenship_confirmed_at, cl.notify_email
+      `SELECT s.id AS session_id, ca.id, ca.client_id, ca.email, ca.photo_stored_name, ca.photo_mime, ca.two_factor, cl.name, cl.country, cl.verification_status, cl.verification_note, cl.citizenship_confirmed_at, cl.notify_email
          FROM customer_sessions s JOIN customer_accounts ca ON ca.id=s.account_id JOIN clients cl ON cl.id=ca.client_id
         WHERE s.token_hash=$1 AND s.expires_at > NOW() AND ca.status='active' AND cl.is_diaspora = TRUE`, [hash(token)]);
     if (!row) { clearCookie(req, res); return res.status(401).json({ error: "please sign in" }); }
@@ -128,7 +128,7 @@ router.post("/auth/request-code", route(async (req, res) => {
     return res.json({ ok: true, message: GENERIC });
   }
   const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
-  await query("UPDATE customer_login_codes SET used_at=NOW() WHERE account_id=$1 AND used_at IS NULL", [account.id]);
+  await query("UPDATE customer_login_codes SET used_at=NOW() WHERE account_id=$1 AND purpose='reset' AND used_at IS NULL", [account.id]);
   await query("INSERT INTO customer_login_codes (account_id, code_hash, expires_at) VALUES ($1,$2,NOW() + ($3 || ' minutes')::interval)",
     [account.id, codeHash(account.id, code), String(CODE_MINUTES)]);
   if (testMode()) testCodes.set(email, code);
@@ -226,11 +226,11 @@ async function startSession(req, res, accountId) {
 }
 
 /** Checks a login code for an account; burns it after 5 wrong tries. */
-async function checkLoginCode(accountId, code) {
+async function checkLoginCode(accountId, code, purpose = "reset") {
   const pending = await queryOne(
     `UPDATE customer_login_codes SET attempts = attempts + 1
-      WHERE id = (SELECT id FROM customer_login_codes WHERE account_id=$1 AND used_at IS NULL AND expires_at > NOW() ORDER BY id DESC LIMIT 1)
-      RETURNING id, code_hash, attempts`, [accountId]);
+      WHERE id = (SELECT id FROM customer_login_codes WHERE account_id=$1 AND purpose=$2 AND used_at IS NULL AND expires_at > NOW() ORDER BY id DESC LIMIT 1)
+      RETURNING id, code_hash, attempts`, [accountId, purpose]);
   if (!pending || pending.attempts > MAX_ATTEMPTS) return false;
   const expected = Buffer.from(pending.code_hash, "hex");
   const given = Buffer.from(codeHash(accountId, code), "hex");
@@ -382,11 +382,44 @@ router.post("/auth/login", route(async (req, res) => {
   if (!email || !password) throw new HttpError(400, "Enter your username or e-mail, and your password.");
   if (tooMany(`login-ip:${clientIp(req)}`, 30, 15 * 60 * 1000) || tooMany(`login:${email}`, 8, 15 * 60 * 1000)) throw new HttpError(429, "Too many attempts. Please wait 15 minutes or use 'Forgot password'.");
   const account = await queryOne(
-    `SELECT ca.id, ca.password_hash, ca.email, cl.name FROM customer_accounts ca JOIN clients cl ON cl.id=ca.client_id
+    `SELECT ca.id, ca.password_hash, ca.email, ca.two_factor, cl.name FROM customer_accounts ca JOIN clients cl ON cl.id=ca.client_id
       WHERE (lower(ca.email)=$1 OR lower(ca.username)=$1) AND ca.status IN ('invited','active') AND cl.is_diaspora=TRUE`, [email]);
   // The same work and answer whether the e-mail is unknown or the password wrong.
   const ok = verifyPassword(password, account?.password_hash || "scrypt$00$00");
   if (!account || !account.password_hash || !ok) throw new HttpError(401, "Username / e-mail or password is not correct.");
+  // Second step, only for customers who switched it on and only while e-mail works
+  // (otherwise nobody could ever sign in). The session starts at /auth/login-verify.
+  if (account.two_factor && (mailConfigured() || testMode())) {
+    const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+    await query("UPDATE customer_login_codes SET used_at=NOW() WHERE account_id=$1 AND purpose='login' AND used_at IS NULL", [account.id]);
+    await query("INSERT INTO customer_login_codes (account_id, code_hash, expires_at, purpose) VALUES ($1,$2,NOW() + ($3 || ' minutes')::interval,'login')",
+      [account.id, codeHash(account.id, code), String(CODE_MINUTES)]);
+    if (testMode()) testCodes.set(`login:${account.email}`, code);
+    else {
+      sendMail({
+        to: account.email,
+        subject: `MKUYU sign-in code: ${code}`,
+        text: `Dear ${account.name},\n\nYour MKUYU sign-in code is ${code}\n\nIt is valid for ${CODE_MINUTES} minutes. If this was not you, do not share the code: someone knows your password, so please reset it.\n\nMKUYU Africa`,
+        kind: "customer_login_code",
+      }).catch(() => {});
+    }
+    return res.json({ needs_code: true, message: "We sent a 6-digit code to the e-mail of your account. Enter it to finish signing in." });
+  }
+  await startSession(req, res, account.id);
+  res.json({ customer: { name: account.name, email: account.email } });
+}));
+
+// Step two of sign-in for customers who use a code after their password.
+router.post("/auth/login-verify", route(async (req, res) => {
+  requireHeader(req);
+  const email = String(req.body?.identifier ?? "").trim().toLowerCase().slice(0, 200);
+  const code = String(req.body?.code || "").replace(/\D/g, "");
+  if (!email || code.length !== 6) throw new HttpError(400, "Enter your username or e-mail and the 6-digit code.");
+  if (tooMany(`login-verify-ip:${clientIp(req)}`, 30, 15 * 60 * 1000) || tooMany(`login-verify:${email}`, 8, 15 * 60 * 1000)) throw new HttpError(429, "Too many attempts. Please wait 15 minutes.");
+  const account = await queryOne(
+    `SELECT ca.id, ca.email, cl.name FROM customer_accounts ca JOIN clients cl ON cl.id=ca.client_id
+      WHERE (lower(ca.email)=$1 OR lower(ca.username)=$1) AND ca.status IN ('invited','active') AND cl.is_diaspora=TRUE AND ca.two_factor=TRUE`, [email]);
+  if (!account || !await checkLoginCode(account.id, code, "login")) throw new HttpError(401, "That code is not correct or has expired. Sign in again to get a new one.");
   await startSession(req, res, account.id);
   res.json({ customer: { name: account.name, email: account.email } });
 }));
@@ -587,7 +620,7 @@ router.get("/portal", requireCustomer, route(async (req, res) => {
   res.json({ customer: { name: req.customer.name, email: req.customer.email, country: req.customer.country || null, photo_url: photoUrl(req.customer) }, contact, services, verification,
     diaspora: true, desk: { name: desk?.name || null }, requests_open: requests?.n || 0, messages_unread: unread?.n || 0,
     journey: journeyFor({ verified: verification.verified, requests: requests?.n || 0, contracts }),
-    prefs: { notify_email: req.customer.notify_email !== false } });
+    prefs: { notify_email: req.customer.notify_email !== false, two_factor: Boolean(req.customer.two_factor), two_factor_available: mailConfigured() } });
 }));
 
 // ---- Requests from inside the portal ------------------------------------------
@@ -601,9 +634,18 @@ const REQUEST_TEXT = { new: "Pending · MKUYU has your request and will contact 
 
 router.post("/preferences", requireCustomer, route(async (req, res) => {
   requireHeader(req);
-  const on = req.body?.notify_email !== false;
-  await query("UPDATE clients SET notify_email=$2 WHERE id=$1", [req.customer.client_id, on]);
-  res.json({ ok: true, notify_email: on });
+  const out = { ok: true };
+  if (typeof req.body?.two_factor === "boolean") {
+    if (req.body.two_factor && !mailConfigured()) throw new HttpError(400, "E-mail is not set up on this server yet, so a sign-in code cannot be sent. Ask MKUYU to switch it on later.");
+    await query("UPDATE customer_accounts SET two_factor=$2 WHERE id=$1", [req.customer.id, req.body.two_factor]);
+    out.two_factor = req.body.two_factor;
+  }
+  if (req.body?.notify_email !== undefined || typeof req.body?.two_factor !== "boolean") {
+    const on = req.body?.notify_email !== false;
+    await query("UPDATE clients SET notify_email=$2 WHERE id=$1", [req.customer.client_id, on]);
+    out.notify_email = on;
+  }
+  res.json(out);
 }));
 
 
