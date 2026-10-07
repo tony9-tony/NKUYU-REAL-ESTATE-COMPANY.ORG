@@ -125,6 +125,7 @@ try {
     for (const kind of ["passport", "residence"]) {
       const form = new FormData();
       form.append("kind", kind);
+      form.append("expires_on", new Date(Date.now() + 400 * 86400000).toISOString().slice(0, 10)); // both documents now need an expiry date
       form.append("file", new Blob([pdf], { type: "application/pdf" }), `${kind}.pdf`);
       const r = await customer("/verification/documents", { method: "POST", cookie: asha.cookie, form });
       assert.equal(r.status, 201, JSON.stringify(r.payload));
