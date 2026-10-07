@@ -47,6 +47,16 @@ export const OWNER_LISTING_OWNERSHIP = {
   sign_sell_mandate: ["MANAGEMENT"],
 };
 
+/**
+ * Customer invoices (see payments/customerPayments.js). Finance accepts the
+ * money; raising invoices may move to Sales later.
+ */
+export const CUSTOMER_PAYMENT_OWNERSHIP = {
+  set_payment_requests: ["FINANCE & ACCOUNTS", "SALES, MARKETING & OPERATIONS"],
+  edit_payment_accounts: ["FINANCE & ACCOUNTS"],
+  confirm_customer_payments: ["FINANCE & ACCOUNTS"],
+};
+
 /** The only department permitted to hold system-administration permissions. */
 export const SYSTEM_ADMIN_DEPARTMENT = "ICT & ADMINISTRATION";
 
@@ -134,7 +144,7 @@ export const ROLE_DUTIES = {
     { key: "business_direction", label: "Set business direction", description: "Owns strategy across every business module.", permissions: ["access_projects", "access_properties", "access_clients", "access_leads", "access_contracts", "access_documents", "access_appointments", "access_follow_ups", "view", "create", "edit", "delete", "approve", "view_reports", "export"] },
     { key: "management_approval", label: "Approve contracts on behalf of management", description: "The MD decision point. Does not review or rewrite legal terms.", permissions: ["approve_management", "request_changes", "access_reports"] },
     { key: "work_assignment", label: "Assign organization work", description: "Directs work to any department and gives the final decision on work routed up to management.", permissions: ["assign_tasks", "review_tasks"] },
-    { key: "financial_oversight", label: "Oversee financial performance", description: "Sees income, outstanding balances and financial reporting.", permissions: ["access_debts", "access_payments", "access_reminders", "view_financial", "view_reports", "export"] },
+    { key: "financial_oversight", label: "Oversee financial performance", description: "Sees income, outstanding balances and financial reporting, and which customers have paid their invoices.", permissions: ["access_debts", "access_payments", "access_reminders", "view_financial", "view_reports", "export", "view_customer_payments"] },
     { key: "management_reporting", label: "Receive management reporting", description: "Reviews organization-wide performance across departments.", permissions: ["view_reports", "export"] },
     { key: "contract_templates", label: "Maintain contract templates", description: "Uploads the Word templates contracts are generated on and chooses the default.", permissions: ["upload_contract_templates"] },
     { key: "sell_mandate_signature", label: "Sign every sell mandate", description: "A sell mandate (listing price, commission, end date) counts only once the MD signs it, and never one the MD agreed personally. May also act on owner listings and sets the standard commission rate.", permissions: ["sign_sell_mandate", "run_owner_listings"] },
@@ -174,7 +184,7 @@ export const ROLE_DUTIES = {
   "Finance Manager": [
     { key: "financial_operations", label: "Run day-to-day finance", description: "Owns payments, installments, receipts and the collection register.", permissions: ["access_debts", "access_payments", "access_reminders", "view", "create", "edit", "delete", "view_financial"] },
     { key: "financial_term_validation", label: "Validate contract financial terms", description: "Confirms price, deposit, payment plan, installments and due dates.", permissions: ["validate_finance", "request_changes", "access_contracts", "access_clients"] },
-    { key: "collections_management", label: "Manage collections", description: "Chases arrears, raises overdue balances and records payments.", permissions: ["access_debts", "access_payments", "access_follow_ups", "access_reminders", "view", "create", "edit", "view_financial"] },
+    { key: "collections_management", label: "Manage collections", description: "Chases arrears, raises overdue balances and records payments. Keeps MKUYU's payment details that customers see, raises an invoice on an accepted request before the contract, and checks each customer's proof against MKUYU's statement: accepts it with the amount received (final, the receipt is issued) or rejects it with a reason.", permissions: ["access_debts", "access_payments", "access_follow_ups", "access_reminders", "view", "create", "edit", "view_financial", "set_payment_requests", "edit_payment_accounts", "confirm_customer_payments"] },
     { key: "finance_reporting", label: "Produce finance reporting", description: "Publishes income, debt and collection reporting for management.", permissions: ["access_reports", "view_reports", "export", "view_financial"] },
     { key: "finance_team_leadership", label: "Supervise the finance desk", description: "Reviews and approves finance work within the department.", permissions: ["approve", "view", "edit", "access_reports"] },
     { key: "deal_context", label: "See the deal behind the money", description: "Looks up the project and property a contract or payment belongs to. Read only: never creates, edits or deletes them, and never generates contracts.", permissions: ["view_projects", "view_properties", "view"] },
@@ -196,8 +206,7 @@ export const ROLE_DUTIES = {
     { key: "department_reporting", label: "Report on department performance", description: "Turns departmental activity into management reporting.", permissions: ["access_reports", "view_reports", "export"] },
     { key: "deal_initiation_supervision", label: "Supervise deal initiation", description: "Ensures deals are raised correctly and submitted to Legal. Does not approve them.", permissions: ["submit_contract", "request_changes", "access_contracts"] },
     { key: "work_assignment", label: "Assign work within the department", description: "Hands work to department staff and reviews what they submit. Cannot assign outside the department.", permissions: ["assign_tasks", "review_tasks"] },
-    { key: "owner_selling_supervision", label: "Supervise owner selling", description: "May act on any owner listing and give it to a Property Officer. Cannot check the title (Legal) or sign the mandate (MD).", permissions: ["run_owner_listings"] },
-  ],
+    { key: "owner_selling_supervision", label: "Supervise owner selling", description: "May act on any owner listing and give it to a Property Officer. Cannot check the title (Legal) or sign the mandate (MD).", permissions: ["run_owner_listings"] },  ],
   "Sales, Marketing & Operations Officer": [
     { key: "deal_initiation", label: "Initiate the deal", description: "Creates the customer, property and project detail a contract needs.", permissions: ["access_clients", "access_properties", "access_projects", "view", "create", "edit"] },
     { key: "contract_submission", label: "Submit the deal to Legal", description: "Starts the contract lifecycle. Does not approve it.", permissions: ["submit_contract", "access_contracts", "request_changes"] },
@@ -386,7 +395,7 @@ export function checkRoleDuties(roleName, rolePermissions, duties) {
  * belonging to the department responsible for it. This is what stops the MD,
  * ICT or a line manager from acquiring legal or financial authority.
  */
-export function checkContractOwnership(rolesByName, ownership = { ...CONTRACT_OWNERSHIP, ...OWNER_LISTING_OWNERSHIP }) {
+export function checkContractOwnership(rolesByName, ownership = { ...CONTRACT_OWNERSHIP, ...OWNER_LISTING_OWNERSHIP, ...CUSTOMER_PAYMENT_OWNERSHIP }) {
   const violations = [];
   for (const [permission, owners] of Object.entries(ownership)) {
     for (const role of Object.values(rolesByName)) {

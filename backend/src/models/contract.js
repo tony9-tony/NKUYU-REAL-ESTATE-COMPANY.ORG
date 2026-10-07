@@ -2,6 +2,7 @@ import { query, queryOne } from "../db.js";
 import { UNPAGED_LIMIT } from "../pagination.js";
 import { organizationId } from "../org/rbac.js";
 import { clearRecordShares, currentAccess, OWNERSHIP_COLUMNS, ownershipValues, scopeCondition } from "../org/access.js";
+import { carryPaidInvoices, contractBlockedMessage, invoiceBlockingContract } from "../payments/invoices.js";
 
 const ENTITY = "contract";
 // `final_price` is exposed as an alias of the authoritative `value` column rather
@@ -73,6 +74,10 @@ export const Contract = {
   },
   async create(data) {
     const access = await currentAccess();
+    // The contract for a request waits until that request's invoice is Paid
+    // (customer invoices, payments/invoices.js). A request with no invoice is not held.
+    const unpaid = await invoiceBlockingContract(data.client_id || null, data.property_id || null);
+    if (unpaid) { const error = new Error(contractBlockedMessage(unpaid)); error.status = 409; throw error; }
     // `pricing` carries the server-calculated original price, discount and final
     // price. Its `final_price` is what lands in `value`, so the payment plan reads
     // the discounted amount without a second calculation.
@@ -107,6 +112,8 @@ export const Contract = {
       values,
     );
     await Contract.recordRevision(row.id, { status: data.status || "draft", action: "created", actorId: access?.userId });
+    // Money the customer paid on the request's invoice counts on the new contract.
+    await carryPaidInvoices({ id: row.id, client_id: data.client_id || null, property_id: data.property_id || null });
     return row;
   },
 

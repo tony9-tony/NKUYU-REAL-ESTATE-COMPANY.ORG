@@ -181,6 +181,26 @@ When an owner wants MKUYU to sell their property, the **Property Officer** runs 
 
 The **standard commission rate** is a setting (default 3%); the MD changes it from the Owner listings page. The Sales Department Manager and the MD may also act on the owner side and give a listing to a Property Officer. Every step is checked again by the server and written to the audit log (`owner_listing_*`). Permissions: `run_owner_listings` (Property Officer, Department Manager, MD), `check_owner_documents` (Legal Officer), `sign_sell_mandate` (MD). Code: `backend/src/sales/ownerListing.js` (the stages and rules), `backend/src/routes/ownerListings.js` (`/org/owner-listings`). Test: `npm run test:owner-listings`.
 
+## Customer invoices (payment before the contract)
+
+A temporary way to take payments, with no link to a bank yet. Customer Service has no step in it.
+
+1. A buy or rent request (Tanzanian or diaspora) is **accepted** first (Sales approves the customer as a client, or books the appointment). Appointments and the rest follow as before.
+2. **Payment settings** (Finance Manager): MKUYU's bank accounts (bank, account name and number, branch, SWIFT). Customers pay by bank only; these are what they see on Pay now.
+3. When payment is due, **before the contract**, the Finance Manager opens **Customer invoices → New invoice** on that accepted request: what it is for (e.g. Deposit), the amount, and the due date. Each invoice gets a unique reference (`INV-2026-XXXXXX`).
+4. The invoice appears under **Invoices** in the customer portal with a **Pay now** button. Pay now shows the payment details, with copy buttons, and the reference to quote.
+5. The customer pays outside the system, then comes back and uploads the receipt (photo, screenshot or PDF) and/or pastes the payment message, with the transaction ID, the amount and the date.
+6. The Finance Manager checks MKUYU's statement and **accepts** it (final: "this customer paid this", entering the amount actually received; the MKUYU receipt is issued and the customer can open it in the portal) or **rejects** it with a reason the customer reads.
+7. The contract for that request cannot be prepared or submitted to Legal while its invoice is not Paid (checked by the server). When the contract is created, the money accepted on the invoice is added to the contract's payments with the same receipt numbers, so the balance counts it. A request with no invoice is not held.
+
+**Statuses**: Not paid, Proof uploaded, Partly paid (balance shown; the customer can send more), Paid, Overdue (past the due date and not paid), Rejected (reason shown). The Finance Manager and the MD see who has paid and who has not on Customer invoices.
+
+**Duplicate checks**, all on the server: a transaction ID is used once in the whole system (spaces and case ignored, including references already in the payment ledger); the same file or the same pasted message cannot back two payments; the same customer, amount, date and method within 24 hours is accepted but flagged for Finance; only one proof waits for Finance per invoice. A rejected proof frees its transaction ID and file.
+
+**Tanzanian customers in the portal**: any client with an accepted request can be invited (Clients → Invite to the portal). They see their invoices, contracts and receipts. Verification, Diaspora Desk messages and calls, and portal requests stay diaspora-only (refused by the server).
+
+Permissions: `set_payment_requests` (raise invoices; Finance Manager, easy to move to the Sales Manager later), `edit_payment_accounts` (payment settings), `confirm_customer_payments` (accept or reject), `view_customer_payments` (MD). Every step is written to the audit log (`invoice_*`, `payment_details_*`). Code: `backend/src/payments/customerPayments.js` (rules), `backend/src/payments/invoices.js`, `backend/src/routes/customerPayments.js` (`/org/customer-payments`), customer side in `backend/src/routes/customer.js` (`/customer/invoices`). The portal screens are in the `mkuyu_diaspora` project (`assets/js/pages/portal.js`). Test: `npm run test:customer-payments`.
+
 ## Backups
 
 The server makes **one automatic database backup a day** (a PostgreSQL dump, or a JSON snapshot of every table when `pg_dump` is not installed) in `data/backups`, named `system-auto-…`. The newest 14 automatic backups are kept; backups made by hand from **System & backups** are never removed automatically. Settings in `.env`:
@@ -300,6 +320,7 @@ Tests never touch the live database: `test_support/guard.mjs` derives a separate
 npm run test          # unit, access matrix, frontend smoke, end-to-end
 npm run test:final    # payments, refunds, property/contract rules
 npm run test:owner-listings  # owner selling: stages, Legal check, MD signature, 7-day updates
+npm run test:customer-payments  # invoices before the contract: duplicates, statuses, portal, contract hold
 ```
 
 On Windows, double-click `run-tests.bat`; the results are written to `test-results.txt`.

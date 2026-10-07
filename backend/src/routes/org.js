@@ -59,7 +59,7 @@ const rows = async (sql, values = []) => (await query(sql, values)).rows;
 // ---------------------------------------------------------------------------
 const USER_ROLES_JSON = "COALESCE((SELECT json_agg(json_build_object('id',r.id,'name',r.name,'rank',r.rank) ORDER BY r.rank DESC) FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=u.id),'[]'::json)";
 const USER_DEPARTMENTS_JSON = "COALESCE((SELECT json_agg(json_build_object('id',d.id,'name',d.name)) FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=u.id),'[]'::json)";
-const RESERVED_ROLE_PERMISSIONS = new Set([...SYSTEM_PERMISSIONS, "view_audit", "approve_management", "approve_legal", "validate_finance", "check_owner_documents", "sign_sell_mandate"]);
+const RESERVED_ROLE_PERMISSIONS = new Set([...SYSTEM_PERMISSIONS, "view_audit", "approve_management", "approve_legal", "validate_finance", "check_owner_documents", "sign_sell_mandate", "confirm_customer_payments"]);
 const isAdminAccount = (req) => req.user?.role === "admin";
 const callerRank = (req) => Number(req.access?.rank ?? 0);
 const refuse = (message, status = 403) => { const e = new Error(message); e.status = status; throw e; };

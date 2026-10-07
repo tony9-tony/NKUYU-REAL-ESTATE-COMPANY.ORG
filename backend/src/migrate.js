@@ -177,6 +177,12 @@ const permissions = [
   ["run_owner_listings", "Run owner listings: visit, valuation, mandate terms, offers, weekly updates"],
   ["check_owner_documents", "Check an owner's title and documents (Legal)"],
   ["sign_sell_mandate", "Sign a sell mandate (Managing Director)"],
+  // Customer invoices (see payments/customerPayments.js). One key per step so
+  // a step can move to another role (e.g. invoices to the Sales Manager).
+  ["set_payment_requests", "Raise an invoice on an accepted request: amount, purpose, due date"],
+  ["edit_payment_accounts", "Keep MKUYU's payment details (bank, mobile money) that customers see"],
+  ["confirm_customer_payments", "Accept or reject a customer's payment proof (Finance; acceptance is final)"],
+  ["view_customer_payments", "See which customers have paid their invoices"],
   ...MODULES.map((module) => [`access_${module}`, `Access ${MODULE_LABELS[module] || module}`]),
 ];
 const businessAccess = MODULES.map((module) => `access_${module}`);
@@ -209,7 +215,7 @@ export const defaultRoles = [
 
   // MANAGEMENT. Approves where the business rules require it. Deliberately has
   // no system administration and no authority to review or rewrite legal terms.
-  ["Managing Director", "Organization-wide business authority and management approval. No system administration.", 80, "organization", ["access_projects", "access_properties", "access_clients", "access_leads", "access_contracts", "access_documents", "access_appointments", "access_follow_ups", "access_debts", "access_payments", "access_reminders", "access_reports", "view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "approve_management", "request_changes", ...taskWorkflow, "upload_contract_templates", "sign_sell_mandate", "run_owner_listings"]],
+  ["Managing Director", "Organization-wide business authority and management approval. No system administration.", 80, "organization", ["access_projects", "access_properties", "access_clients", "access_leads", "access_contracts", "access_documents", "access_appointments", "access_follow_ups", "access_debts", "access_payments", "access_reminders", "access_reports", "view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "approve_management", "request_changes", ...taskWorkflow, "upload_contract_templates", "sign_sell_mandate", "run_owner_listings", "view_customer_payments"]],
 
   // LEGAL. Owns the contract lifecycle and the final contract record.
   ["Legal Manager", "Owns the contract record and supervises the legal desk", 45, "department", ["access_contracts", "access_documents", "access_clients", "view_projects", "view_properties", "view_appointments", "access_reports", "view", "create", "edit", "delete", "approve", "export", "view_reports", "review_legal", "request_changes", "approve_legal", "upload_contract_templates", ...taskWorkflow]],
@@ -220,7 +226,7 @@ export const defaultRoles = [
   ["Administration & IT Support Officer", "Staff support, staff records and technical support. No business authority.", 20, "department", ["manage_users", "view", "view_reports", "export"]],
 
   // FINANCE & ACCOUNTS. Owns money and validates the financial terms.
-  ["Finance Manager", "Runs finance operations and validates contract financial terms", 30, "department", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "access_follow_ups", "view_projects", "view_properties", "view_appointments", "view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "validate_finance", "request_changes", ...taskWorkflow]],
+  ["Finance Manager", "Runs finance operations and validates contract financial terms", 30, "department", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "access_follow_ups", "view_projects", "view_properties", "view_appointments", "view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "validate_finance", "request_changes", ...taskWorkflow, "set_payment_requests", "edit_payment_accounts", "confirm_customer_payments"]],
   ["Finance Officer", "Payments, installments, receipts and financial term validation", 15, "own", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "view_projects", "view_properties", "view_appointments", "view", "create", "edit", "view_financial", "view_reports", "validate_finance", "request_changes"]],
 
   // SALES, MARKETING & OPERATIONS. Initiates deals, never approves them.
@@ -369,6 +375,65 @@ async function migrateOwnerListings() {
   );
 }
 
+// Customer invoices (temporary payment method, no bank link): MKUYU's payment
+// details, invoices on accepted requests, and the proof customers upload.
+// The duplicate rules are enforced by these unique indexes as well as the code.
+async function migrateCustomerPayments() {
+  await query(`CREATE TABLE IF NOT EXISTS payment_details (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('bank','mobile')),
+    bank_name TEXT, branch TEXT, swift_code TEXT, network TEXT,
+    account_name TEXT NOT NULL, account_number TEXT NOT NULL,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    edited_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await query(`CREATE TABLE IF NOT EXISTS invoices (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    reference TEXT NOT NULL UNIQUE,
+    lead_id INTEGER REFERENCES leads(id) ON DELETE SET NULL,
+    client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    client_name TEXT NOT NULL,
+    property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL,
+    service TEXT,
+    purpose TEXT NOT NULL,
+    amount_required NUMERIC(14,2) NOT NULL CHECK (amount_required > 0),
+    due_date DATE NOT NULL,
+    note TEXT,
+    contract_id INTEGER REFERENCES contracts(id) ON DELETE SET NULL,
+    cancelled_at TIMESTAMPTZ, cancelled_by INTEGER REFERENCES users(id) ON DELETE SET NULL, cancel_reason TEXT,
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await query("CREATE INDEX IF NOT EXISTS idx_invoices_client ON invoices (client_id)");
+  await query("CREATE INDEX IF NOT EXISTS idx_invoices_lead ON invoices (lead_id)");
+  await query(`CREATE TABLE IF NOT EXISTS invoice_proofs (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+    method TEXT NOT NULL CHECK (method IN ('bank','mobile')),
+    detail_id INTEGER REFERENCES payment_details(id) ON DELETE SET NULL,
+    transaction_id TEXT NOT NULL, transaction_norm TEXT NOT NULL,
+    amount_claimed NUMERIC(14,2) NOT NULL CHECK (amount_claimed > 0),
+    paid_on DATE NOT NULL,
+    sms_text TEXT,
+    original_filename TEXT, stored_name TEXT, mime_type TEXT, file_size INTEGER,
+    evidence_hash TEXT, sms_hash TEXT,
+    duplicate_flag BOOLEAN NOT NULL DEFAULT FALSE, duplicate_note TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','rejected')),
+    amount_received NUMERIC(14,2), accept_note TEXT, receipt_number TEXT,
+    accepted_by INTEGER REFERENCES users(id) ON DELETE SET NULL, accepted_at TIMESTAMPTZ,
+    rejected_by INTEGER REFERENCES users(id) ON DELETE SET NULL, rejected_at TIMESTAMPTZ, reject_reason TEXT,
+    payment_id INTEGER REFERENCES payments(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  // 1. a transaction ID backs one payment in the whole system (a rejected proof frees it)
+  await query("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_proofs_txn ON invoice_proofs (transaction_norm) WHERE status <> 'rejected'");
+  // 2. the same file, or the same pasted message, backs one payment
+  await query("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_proofs_evidence ON invoice_proofs (evidence_hash) WHERE status <> 'rejected' AND evidence_hash IS NOT NULL");
+  await query("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_proofs_sms ON invoice_proofs (sms_hash) WHERE status <> 'rejected' AND sms_hash IS NOT NULL");
+  // 4. one proof waiting for Finance per invoice
+  await query("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_proofs_pending ON invoice_proofs (invoice_id) WHERE status = 'pending'");
+  await query("CREATE INDEX IF NOT EXISTS idx_invoice_proofs_invoice ON invoice_proofs (invoice_id, created_at)");
+}
 async function migratePaymentApproval() {
   const had = await queryOne("SELECT 1 AS ok FROM information_schema.columns WHERE table_name='payments' AND column_name='status'");
   await query("ALTER TABLE payments ADD COLUMN IF NOT EXISTS status TEXT");
@@ -690,6 +755,7 @@ export async function runMigrations({ seedDemo = process.env.NODE_ENV !== "produ
   await query("CREATE TABLE IF NOT EXISTS appointment_reminder_days (user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, shown_on DATE NOT NULL, shown_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (user_id, shown_on))");
   await migrateSellLeads();
   await migrateOwnerListings();
+  await migrateCustomerPayments();
   for (const table of scopedTables) {
     await query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL`);
     await query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id) ON DELETE SET NULL`);

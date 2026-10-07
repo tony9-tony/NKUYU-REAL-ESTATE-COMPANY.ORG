@@ -279,6 +279,8 @@ const viewMeta = {
   appointments: ["Appointments", "Viewings, calls, meetings and inspections"],
   requests: ["Requests & leads", "Buy, Rent and Sell requests and Contact-page messages from the website, from arrival to answer"],
   leads: ["Requests & leads", "Enquiries recorded by the team (calls, walk-ins, referrals), before they become clients"],
+  "customer-payments": ["Customer invoices", "What customers must pay before the contract, the proof they send, and who has paid"],
+  "payment-settings": ["Payment settings", "MKUYU's bank accounts that customers see when they press Pay now"],
   "owner-listings": ["Owner listings", "Owners selling through MKUYU: visit and valuation, title check, sell mandate, offers and a weekly update"],
   documents: ["Documents", "Agreements, titles, receipts, reports and permits"],
   templates: ["Contract templates", "The Word files every new contract is produced on"],
@@ -932,6 +934,8 @@ async function refresh() {
   if (canModule("leads") && can("view")) reloadRequests().then(() => { updateNavigation(); if (state.view === "requests") render(); });
   // Owner listings: counts for "Your work today" and the menu badge.
   if (canOwnerListings()) loadOwnerListingWork().then(() => { updateNavigation(); if (state.view === "dashboard" && modalBackdrop.hidden) render(); });
+  // Customer invoices: proof waiting for Finance, and who has not paid.
+  if (canCustomerPayments()) loadCustomerPaymentWork().then(() => { updateNavigation(); if (state.view === "dashboard" && modalBackdrop.hidden) render(); });
 }
 
 function applyWorkspace(payload) {
@@ -1007,6 +1011,7 @@ const BUSINESS_PERMISSIONS = new Set([
   "submit_contract", "review_legal", "request_changes", "approve_legal", "validate_finance", "approve_management",
   "view_financial", "approve", "view_projects", "view_properties", "view_appointments",
   "run_owner_listings", "check_owner_documents", "sign_sell_mandate",
+  "set_payment_requests", "edit_payment_accounts", "confirm_customer_payments", "view_customer_payments",
 ]);
 
 function can(permission) {
@@ -1100,6 +1105,10 @@ const NAV_ITEMS = [
   { view: "debts", label: "Payments & debts", icon: "wallet", module: "debts", permission: "view_financial", group: "Finance" },
   // Installments falling due: Finance is reminded before the due date.
   { view: "reminders", label: "Reminders", icon: "bell", module: "reminders", permission: "view_financial", group: "Finance" },
+  // Customer invoices before the contract (Finance Manager; the MD sees who has paid).
+  { view: "customer-payments", label: "Customer invoices", icon: "receipt", group: "Finance", customerPayments: true },
+  // Settings: MKUYU's payment details that customers see on "Pay now".
+  { view: "payment-settings", label: "Payment settings", icon: "settings", permission: "edit_payment_accounts", group: "Finance" },
   // Reference view, not a module: every signed-in member may read the duty
   // catalogue and the approval path. It exposes no record and no way to act.
   { view: "duties", label: "Duties & approvals", icon: "scale", group: "Organization" },
@@ -1122,6 +1131,7 @@ function canSeeNavItem(item) {
   if (item.adminOnly) return isAdmin();
   if (item.diasporaVerification) return inDiasporaDesk() || can("approve_legal") || can("approve_management");
   if (item.ownerListings) return canOwnerListings();
+  if (item.customerPayments) return canCustomerPayments();
   if (item.anyOf) return item.anyOf.some((permission) => can(permission));
   if (!item.module) return item.permission ? can(item.permission) : true;
   return canModule(item.module) && can(item.permission);
@@ -1203,6 +1213,8 @@ function navSources() {
     "diaspora-messages": (state.dmThreads?.rows || []).reduce((sum, row) => sum + Number(row.unread || 0), 0),
     // The server's count of owner listings waiting on this person.
     "owner-listings": ownerListingsNeedingMe(),
+    // Customer payment proof waiting for the Finance Manager.
+    "customer-payments": customerPaymentsNeedingMe(),
   };
 }
 
@@ -1240,7 +1252,7 @@ function updateNavigation() {
     // waiting on this person, which already falls as they act, so it stays
     // until the work is done rather than clearing on sight.
     const sources = navSources();
-    const live = new Set(["assignments", "verification", "diaspora-messages", "owner-listings"]);
+    const live = new Set(["assignments", "verification", "diaspora-messages", "owner-listings", "customer-payments"]);
     if (sources[activeView] !== undefined && !live.has(activeView)) markSeen(`nav:${activeView}`, sources[activeView]);
     let lastGroup = null;
     nav.innerHTML = allowed.map((item) => {
@@ -2424,7 +2436,7 @@ function renderOrganization(section = "staff") {
   const myRank = Number(org.me?.rank || 0);
   const assignable = (role) => role.active !== false && role.name !== "System Administrator" && (isAdmin() || Number(role.rank || 0) <= myRank);
   const editableRole = (role) => isAdmin() || (!role.system_role && Number(role.rank || 0) <= myRank);
-  const RESERVED_KEYS = new Set(["manage_users", "manage_roles", "manage_permissions", "manage_settings", "view_audit", "approve_management", "approve_legal", "validate_finance", "check_owner_documents", "sign_sell_mandate"]);
+  const RESERVED_KEYS = new Set(["manage_users", "manage_roles", "manage_permissions", "manage_settings", "view_audit", "approve_management", "approve_legal", "validate_finance", "check_owner_documents", "sign_sell_mandate", "confirm_customer_payments"]);
   const roleOptions = org.roles.filter(editableRole).map((role) => `<option value="${role.id}" data-rank="${Number(role.rank || 0)}" data-permissions="${escapeHtml(JSON.stringify(role.permissions || []))}">${escapeHtml(role.name)} · rank ${Number(role.rank || 0)} · ${role.permission_count || 0} privileges</option>`).join("");
   const staffRoleOptions = org.roles.filter(assignable).map((role) => `<option value="${role.id}">${escapeHtml(role.name)} · rank ${Number(role.rank || 0)}</option>`).join("");
   const departmentOptions = org.departments.filter((department) => department.active !== false).map((department) => `<option value="${department.id}">${escapeHtml(titleCase(department.name))}</option>`).join("");
@@ -3139,6 +3151,11 @@ function workTodayPanel(role) {
   // job: count (null = always available), title, what to do, button, where it goes.
   const job = (count, title, help, label, go, tone = "") => jobs.push({ count, title, help, label, go, tone });
   const toView = (view, filters = {}, scroll = "") => ({ view, filters, scroll });
+  const cpWork = state.customerPaymentWork || {};
+  if (role === "finance" && can("confirm_customer_payments")) {
+    job(n(cpWork.proofs_to_check), "Customer payments to check", "A customer uploaded proof for an invoice. Check MKUYU's statement, then accept (enter the amount received) or reject with a reason.", "Check payments", toView("customer-payments", { cpStatus: "proof_uploaded" }), "gold");
+    if (can("set_payment_requests")) job(null, "Payment due before a contract?", "Raise an invoice on the accepted request. The customer sees it in their portal with Pay now.", "New invoice", { action: "cp-new-invoice" });
+  }
   if (role === "finance") {
     job(n(state.organization.me?.sole_finance_approver ? summary.payments_pending?.count : summary.payments_to_approve), "Payments waiting for your approval", "Check the reference and the proof, then approve. Only approved money counts.", "Approve payments", toView("debts", { paymentStatus: "pending" }, "#payments-section"), "gold");
     job(n(work.contracts_finance_review), "Contracts to check", "Marked Under Finance review. Check the price and payment plan, then press “Validate financial terms”.", "Check contracts", toView("contracts", { status: "legal_approved" }));
@@ -3173,6 +3190,7 @@ function workTodayPanel(role) {
     job(null, "Owner walked in to sell?", "Open their listing so the visit, valuation and weekly updates are tracked.", "New owner listing", { action: "owner-listing-new" });
   }
   if (role === "md") {
+    if (can("view_customer_payments")) job(n(cpWork.overdue_total), "Customer invoices overdue", "Customers who have not paid by the due date. Finance follows them up.", "See who has not paid", toView("customer-payments", { cpStatus: "overdue" }), "red");
     if (canOwnerListings()) {
       job(n(ownerWork.awaiting_md), "Sell mandates waiting for your signature", "No mandate counts until you sign it. Check the price and the commission.", "Sign mandates", toView("owner-listings", { ownerStage: "documents_checked" }), "gold");
       job(n(ownerWork.overdue), "Owners with no update for 7 days", "The Property Officer must update every owner weekly.", "See owners", toView("owner-listings", { ownerStage: "overdue" }), "red");
@@ -4565,6 +4583,10 @@ function render() {
     addRequestTabs();
     addPageTip();
     if (!state.requests && !state.requestsRequested) loadRequests().then(() => { updateNavigation(); if (state.view === "requests") render(); });
+  }
+  if (state.view === "customer-payments" || state.view === "payment-settings") {
+    if (state.view === "customer-payments") renderCustomerPayments(); else renderPaymentSettings();
+    if (!state.customerPaymentsRequested) loadCustomerPayments();
   }
   if (state.view === "owner-listings") {
     renderOwnerListings();
@@ -6492,6 +6514,214 @@ document.addEventListener("submit", async (event) => {
 });
 
 /* --------------------------------------------------------------------------
+   Customer invoices (temporary payment method, no bank link). Finance raises
+   an invoice on an accepted request before the contract; the customer pays
+   outside the system and uploads proof in the portal; the Finance Manager
+   accepts (final, receipt issued) or rejects with a reason. The MD sees who
+   has paid. Payment settings: MKUYU's details that customers see.
+   -------------------------------------------------------------------------- */
+const CP_PERMISSIONS = ["set_payment_requests", "edit_payment_accounts", "confirm_customer_payments", "view_customer_payments"];
+const CP_STATUS_LABELS = { not_paid: "Not paid", proof_uploaded: "Proof uploaded", partly_paid: "Partly paid", paid: "Paid", overdue: "Overdue", rejected: "Rejected", cancelled: "Cancelled" };
+const CP_STATUS_TONES = { not_paid: "pending", proof_uploaded: "scheduled", partly_paid: "featured", paid: "verified", overdue: "overdue", rejected: "inactive", cancelled: "neutral" };
+const CP_PROOF_LABELS = { pending: "Waiting for Finance", accepted: "Accepted", rejected: "Rejected" };
+
+function canCustomerPayments() {
+  return CP_PERMISSIONS.some((permission) => can(permission));
+}
+
+async function loadCustomerPaymentWork() {
+  try { state.customerPaymentWork = await api("/org/customer-payments/summary"); } catch { state.customerPaymentWork = null; }
+}
+
+async function loadCustomerPayments() {
+  state.customerPaymentsRequested = true;
+  try {
+    const [invoices, details] = await Promise.all([api("/org/customer-payments/invoices"), api("/org/customer-payments/details")]);
+    state.customerPayments = { invoices: Array.isArray(invoices) ? invoices : [], details: Array.isArray(details) ? details : [] };
+  } catch (error) { state.customerPayments = { error: error.message || "Unable to load customer invoices." }; }
+  await loadCustomerPaymentWork();
+  updateNavigation();
+  if (["customer-payments", "payment-settings"].includes(state.view) && modalBackdrop.hidden) render();
+}
+
+/** The server's count of proof waiting for this person (menu badge). */
+function customerPaymentsNeedingMe() {
+  const work = state.customerPaymentWork;
+  return work && can("confirm_customer_payments") ? Number(work.proofs_to_check || 0) : 0;
+}
+
+function cpStatusBadge(row) {
+  return `${badgeVariant(CP_STATUS_LABELS[row.status] || row.status, CP_STATUS_TONES[row.status] || "neutral")}${row.overdue && row.status !== "overdue" ? badgeVariant("Overdue", "overdue") : ""}`;
+}
+
+function cpDetailLine(d) {
+  return d.kind === "bank"
+    ? [d.bank_name, d.branch, d.swift_code ? `SWIFT ${d.swift_code}` : "", d.account_name, d.account_number].filter(Boolean).join(" · ")
+    : [d.network, d.account_name, d.account_number].filter(Boolean).join(" · ");
+}
+
+function renderPaymentSettings() {
+  const data = state.customerPayments;
+  if (!data) { content.innerHTML = `<div class="panel">${emptyState("Loading", "", { iconName: "wallet", compact: true })}</div>`; return; }
+  if (data.error) { content.innerHTML = `<div class="panel">${escapeHtml(data.error)}</div>`; return; }
+  const edit = can("edit_payment_accounts");
+  const rows = data.details.filter((d) => d.active).map((d) => `<tr><td><span class="cell-main">${escapeHtml(d.bank_name || "Bank")}</span><span class="cell-sub">${escapeHtml(cpDetailLine(d))}</span></td>
+    <td><span class="cell-sub">${escapeHtml(d.edited_by_name || "")}</span></td>
+    <td class="align-right"><div class="row-actions">${edit ? `<button class="btn btn-small btn-soft" data-action="cp-detail-edit" data-id="${d.id}">Edit</button><button class="btn btn-small btn-danger-ghost" data-action="cp-detail-remove" data-id="${d.id}">Remove</button>` : ""}</div></td></tr>`).join("");
+  content.innerHTML = `<div class="toolbar"><div class="toolbar-filters"></div><div class="toolbar-end">${edit ? `<button class="btn btn-primary" data-action="cp-detail-new">${icon("plus")}Add bank account</button>` : ""}</div></div>
+    <div class="section-head section-head-tight"><div><h2 class="section-title">MKUYU bank accounts</h2><div class="section-note">Customers pay by bank only. They see these accounts when they press Pay now on an invoice.</div></div></div>
+    ${rows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Where customers pay</th><th>Last changed by</th><th class="align-right">Action</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<div class="panel">${emptyState("No bank account yet", "Add MKUYU's bank account. Invoices can be raised once it exists.", { iconName: "wallet", compact: true })}</div>`}`;
+}
+
+function renderCustomerPayments() {
+  const data = state.customerPayments;
+  if (!data) { content.innerHTML = `<div class="panel">${emptyState("Loading", "", { iconName: "wallet", compact: true })}</div>`; return; }
+  if (data.error) { content.innerHTML = `<div class="panel">${escapeHtml(data.error)}</div>`; return; }
+  const filter = state.filters?.cpStatus || "all";
+  const matches = (row, key) => key === "all" || (key === "unpaid" ? !["paid", "cancelled"].includes(row.status) : key === "overdue" ? (row.status === "overdue" || row.overdue) : row.status === key);
+  const filters = [["all", "All"], ["unpaid", "Not paid yet"], ["proof_uploaded", "Proof uploaded"], ["partly_paid", "Partly paid"], ["overdue", "Overdue"], ["rejected", "Rejected"], ["paid", "Paid"]]
+    .map(([key, label]) => `<button class="seg-btn${filter === key ? " active" : ""}" data-action="cp-filter" data-filter-key="${key}">${escapeHtml(label)} (${data.invoices.filter((row) => matches(row, key)).length})</button>`).join("");
+  const rows = data.invoices.filter((row) => matches(row, filter)).map((row) => `<tr>
+      <td><span class="cell-main">${escapeHtml(row.client_name)}</span><span class="cell-sub">${escapeHtml([row.reference, row.purpose, row.property_name].filter(Boolean).join(" · "))}</span></td>
+      <td><span class="cell-main">${escapeHtml(money(row.amount_required))}</span><span class="cell-sub">Received ${escapeHtml(money(row.amount_received))} · balance ${escapeHtml(money(row.balance))}</span></td>
+      <td>${escapeHtml(formatDate(row.due_date))}</td>
+      <td>${cpStatusBadge(row)}${row.duplicate_flags ? `<span class="cell-sub">Possible duplicate: check</span>` : ""}</td>
+      <td class="align-right"><div class="row-actions"><button class="btn btn-small${row.proofs_waiting ? " btn-primary" : ""}" data-action="cp-open" data-id="${row.id}">Open</button></div></td></tr>`).join("");
+  content.innerHTML = `<div class="toolbar"><div class="toolbar-filters"><div class="segmented" role="group" aria-label="Invoice status">${filters}</div></div><div class="toolbar-end">${can("set_payment_requests") ? `<button class="btn btn-primary" data-action="cp-new-invoice">${icon("plus")}New invoice</button>` : ""}</div></div>
+    <div class="section-head section-head-tight"><div><h2 class="section-title">Customer invoices</h2><div class="section-note">Who has paid and who has not. The contract for a request waits until its invoice is Paid.</div></div></div>
+    ${rows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Customer</th><th>Amount</th><th>Due</th><th>Status</th><th class="align-right">Action</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<div class="panel">${emptyState("Nothing here", "Invoices appear here when Finance raises one on an accepted request.", { iconName: "wallet", compact: true })}</div>`}`;
+}
+
+async function openCustomerPayment(invoiceId) {
+  let invoice;
+  try { invoice = await api(`/org/customer-payments/invoices/${invoiceId}`); } catch (error) { showToast(error.message || "Unable to open."); return; }
+  state.cpDetail = invoice;
+  const proofs = (invoice.proofs || []).map((p) => {
+    const buttons = (p.available_actions || []).map((action) => `<button type="button" class="btn btn-small ${action === "reject" ? "btn-danger-ghost" : "btn-primary"}" data-action="cp-proof-${action}" data-id="${p.id}">${escapeHtml(action === "accept" ? "Accept payment" : "Reject")}</button>`).join("");
+    return `<tr><td><span class="cell-main">${escapeHtml(money(p.amount_claimed))}</span><span class="cell-sub">${escapeHtml(p.transaction_id)} · ${escapeHtml(formatDate(p.paid_on))} · ${escapeHtml(p.method === "bank" ? "Bank" : "Mobile money")}</span>${p.duplicate_flag ? `<span class="cell-sub">${escapeHtml(p.duplicate_note || "Possible duplicate")}</span>` : ""}</td>
+      <td>${p.has_file ? `<button type="button" class="btn btn-small btn-soft" data-action="cp-proof-file" data-id="${p.id}">Open receipt</button>` : ""}${p.sms_text ? `<span class="cell-sub">${escapeHtml(p.sms_text)}</span>` : ""}</td>
+      <td>${escapeHtml(CP_PROOF_LABELS[p.status] || p.status)}${p.amount_received ? `<span class="cell-sub">Received ${escapeHtml(money(p.amount_received))}${p.accepted_by_name ? ` · ${escapeHtml(p.accepted_by_name)}` : ""}</span>` : ""}${p.receipt_number ? `<button type="button" class="btn btn-small btn-ghost" data-action="cp-proof-receipt" data-id="${p.id}">Receipt ${escapeHtml(p.receipt_number)}</button>` : ""}${p.reject_reason ? `<span class="cell-sub">${escapeHtml(p.reject_reason)}</span>` : ""}</td>
+      <td class="align-right"><div class="row-actions">${buttons}</div></td></tr>`;
+  }).join("");
+  const history = (invoice.history || []).map((h) => `<li><strong>${escapeHtml(humanize(String(h.action).replace(/^invoice_/, "")))}</strong><span class="muted"> · ${escapeHtml(h.user_name || "Customer")} · ${escapeHtml(formatDateTime(h.created_at, true))}</span></li>`).join("");
+  modal.dataset.type = "customer-payment";
+  modal.classList.add("modal-wide");
+  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(invoice.client_name)}</h2><p class="modal-sub">${escapeHtml(invoice.reference)} · ${escapeHtml(invoice.purpose)}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
+    <table class="data-table"><tbody>
+      <tr><th>Status</th><td>${cpStatusBadge(invoice)}${invoice.reject_reason ? `<span class="cell-sub">${escapeHtml(invoice.reject_reason)}</span>` : ""}</td></tr>
+      <tr><th>Must pay</th><td>${escapeHtml(money(invoice.amount_required))} · due ${escapeHtml(formatDate(invoice.due_date))}${invoice.property_name ? `<span class="cell-sub">${escapeHtml(invoice.property_name)}</span>` : ""}</td></tr>
+      <tr><th>Received</th><td>${escapeHtml(money(invoice.amount_received))} · balance ${escapeHtml(money(invoice.balance))}</td></tr>
+    </tbody></table>
+    ${invoice.can_cancel ? `<div class="row-actions"><button type="button" class="btn btn-small btn-danger-ghost" data-action="cp-cancel" data-id="${invoice.id}">Cancel invoice</button></div>` : ""}
+    <h3 class="section-title">Payment proof from the customer</h3>
+    ${proofs ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Payment</th><th>Proof</th><th>Status</th><th class="align-right"></th></tr></thead><tbody>${proofs}</tbody></table></div>` : `<p class="field-help">No proof yet. The customer sends it from the portal after paying.</p>`}
+    <h3 class="section-title">History</h3>
+    ${history ? `<ol class="history-list">${history}</ol>` : `<p class="field-help">No history yet.</p>`}
+    <div class="form-actions"><button type="button" class="btn" data-action="close-modal">Close</button></div>`;
+  modalBackdrop.hidden = false;
+}
+
+/** One small form per step; the submit handler below sends it. */
+async function openCustomerPaymentForm(kind, recordId = null) {
+  const field = (name, label, input, help = "", full = false) => `<div class="field${full ? " full" : ""}"><label for="cp-${name}">${escapeHtml(label)}</label>${input}${help ? `<span class="field-help">${escapeHtml(help)}</span>` : ""}</div>`;
+  const input = (name, type = "text", value = "", extra = "") => `<input id="cp-${name}" name="${name}" type="${type}" value="${escapeHtml(String(value ?? ""))}" ${extra}>`;
+  const amountInput = (name, value = "") => input(name, "number", value, 'min="1" step="any" required');
+  let title = "";
+  let sub = "";
+  let fields = "";
+  let submit = "Save";
+  if (kind === "invoice") {
+    let requests = [];
+    try { requests = await api("/org/customer-payments/accepted-requests"); } catch { requests = []; }
+    title = "New invoice";
+    sub = "What the customer must pay before the contract. They see it under Invoices in their portal";
+    fields = field("lead_id", "Accepted request", `<select id="cp-lead_id" name="lead_id" required><option value="">Choose…</option>${(Array.isArray(requests) ? requests : []).map((r) => `<option value="${r.id}">${escapeHtml(`${r.client_name} · ${r.service === "rent" ? "Rent" : "Buy"}${r.property_name ? ` · ${r.property_name}` : ""}${r.is_diaspora ? " · Diaspora" : ""}${r.invoices ? ` · ${r.invoices} invoice(s)` : ""}`)}</option>`).join("")}</select>`, "Only requests MKUYU has accepted.", true)
+      + field("purpose", "What it is for", input("purpose", "text", "Deposit", 'required maxlength="120"'), "For example: Deposit, Booking fee, First rent")
+      + field("amount_required", "Amount (TZS)", amountInput("amount_required"))
+      + field("due_date", "Due date", input("due_date", "date", "", `required min="${today()}"`))
+      + field("note", "Note for the customer (optional)", `<textarea id="cp-note" name="note" rows="2" maxlength="2000"></textarea>`, "", true);
+    submit = "Create invoice";
+  } else if (kind === "detail") {
+    const d = (state.customerPayments?.details || []).find((row) => String(row.id) === String(recordId)) || {};
+    title = recordId ? "Edit bank account" : "Add bank account";
+    sub = "Customers see these when they press Pay now";
+    fields = `<input type="hidden" name="kind" value="bank">`
+      + field("bank_name", "Bank name", input("bank_name", "text", d.bank_name || "", 'required maxlength="120"'))
+      + field("branch", "Branch (optional)", input("branch", "text", d.branch || "", 'maxlength="120"'))
+      + field("swift_code", "SWIFT code (optional)", input("swift_code", "text", d.swift_code || "", 'maxlength="20"'), "For customers paying from abroad")
+      + field("account_name", "Account name", input("account_name", "text", d.account_name || "", 'required maxlength="160"'))
+      + field("account_number", "Account number", input("account_number", "text", d.account_number || "", 'required maxlength="60"'));
+  } else if (kind === "accept") {
+    const p = (state.cpDetail?.proofs || []).find((row) => String(row.id) === String(recordId)) || {};
+    title = "Accept payment";
+    sub = `${p.transaction_id || ""} · the customer says ${money(p.amount_claimed)}`;
+    fields = field("amount_received", "Amount on MKUYU's statement (TZS)", amountInput("amount_received", Number(p.amount_claimed) || ""), "Check the bank or mobile-money statement first. This is final: the receipt is issued to the customer.", true)
+      + field("note", "Note (optional)", `<textarea id="cp-note" name="note" rows="2" maxlength="2000"></textarea>`, "", true);
+    submit = "Accept: this customer paid this";
+  } else if (kind === "reject" || kind === "cancel") {
+    title = kind === "reject" ? "Reject proof" : "Cancel invoice";
+    sub = kind === "reject" ? "The customer reads this reason" : "";
+    fields = field("reason", "Reason", `<textarea id="cp-reason" name="reason" rows="3" maxlength="500" required></textarea>`, "", true);
+    submit = kind === "reject" ? "Reject" : "Cancel invoice";
+  }
+  modal.dataset.type = "cp-form";
+  modal.classList.remove("modal-wide");
+  const back = state.cpDetail && ["accept", "reject", "cancel"].includes(kind)
+    ? `<button type="button" class="btn" data-action="cp-open" data-id="${state.cpDetail.id}">Back</button>` : `<button type="button" class="btn" data-action="close-modal">Cancel</button>`;
+  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(title)}</h2><p class="modal-sub">${escapeHtml(sub)}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
+    <form id="cp-form" class="form-grid" data-kind="${kind}" data-id="${recordId || ""}" data-invoice="${state.cpDetail?.id || ""}">${fields}
+      <div class="form-actions full">${back}<button class="btn btn-primary" type="submit">${escapeHtml(submit)}</button></div>
+    </form>`;
+  modalBackdrop.hidden = false;
+}
+
+document.addEventListener("submit", async (event) => {
+  const form = event.target;
+  if (form.id !== "cp-form") return;
+  event.preventDefault();
+  const kind = form.dataset.kind;
+  const recordId = form.dataset.id;
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  try {
+    const data = Object.fromEntries(new FormData(form));
+    const paths = {
+      invoice: ["/org/customer-payments/invoices", "POST"],
+      detail: [recordId ? `/org/customer-payments/details/${recordId}` : "/org/customer-payments/details", recordId ? "PUT" : "POST"],
+      accept: [`/org/customer-payments/proofs/${recordId}/accept`, "POST"],
+      reject: [`/org/customer-payments/proofs/${recordId}/reject`, "POST"],
+      cancel: [`/org/customer-payments/invoices/${recordId}/cancel`, "POST"],
+    };
+    const [path, method] = paths[kind];
+    const result = await api(path, { method, body: JSON.stringify(data) });
+    showToast("Saved.");
+    await loadCustomerPayments();
+    if (["customer-payments", "payment-settings"].includes(state.view)) render();
+    if (kind === "detail") { closeModal(); return; }
+    await openCustomerPayment(result.id || form.dataset.invoice);
+  } catch (error) { showToast(error.message || "Could not save."); button.disabled = false; }
+});
+
+async function cpQuickAction(path, method) {
+  try {
+    await api(path, { method });
+    showToast("Saved.");
+    await loadCustomerPayments();
+    if (["customer-payments", "payment-settings"].includes(state.view)) render();
+  } catch (error) { showToast(error.message || "Could not save."); }
+}
+
+async function openCustomerPaymentFile(path) {
+  try {
+    const response = await fetch(`${API_ROOT}${path}`, { headers: { ...CSRF_HEADERS }, credentials: "same-origin" });
+    if (!response.ok) throw new Error("The file could not be opened.");
+    window.open(URL.createObjectURL(await response.blob()), "_blank", "noopener");
+  } catch (error) { showToast(error.message); }
+}
+
+/* --------------------------------------------------------------------------
    Project stages: the building steps and overall progress diaspora buyers follow.
    -------------------------------------------------------------------------- */
 const STANDARD_STAGES = ["Land clearing and survey", "Foundation", "Structure and walls", "Roofing", "Finishing", "Handover"];
@@ -6911,8 +7141,10 @@ async function kycAction(clientId, kind) {
 const PORTAL_STATUS_TEXT = { invited: "Invited · has not signed in yet", active: "Active · has signed in", disabled: "Disabled" };
 
 function clientPortalControls(record) {
-  if (!record.is_diaspora) return `<div class="field full"><div class="field-help">Tick "Diaspora client" and save to be able to invite them to the online portal.</div></div>`;
   const status = record.portal_status;
+  // A Tanzanian client may be invited once their buy or rent request is accepted
+  // (the server checks): they see their invoices, contract and receipts.
+  if (!record.is_diaspora && !status) return `<div class="field full"><div class="field-help">Invite a Tanzanian client once their buy or rent request is accepted: they see their invoices and pay them in the portal.</div><div class="row-actions"><button type="button" class="btn btn-soft btn-small" data-action="portal-invite" data-id="${record.id}">Invite to the portal</button></div></div>`;
   const invite = `<button type="button" class="btn btn-soft btn-small" data-action="portal-invite" data-id="${record.id}">${status && status !== "disabled" ? "Send the invitation again" : "Invite to the portal"}</button>`;
   const disable = status && status !== "disabled" ? `<button type="button" class="btn btn-danger-ghost btn-small" data-action="portal-disable" data-id="${record.id}">Disable portal</button>` : "";
   return `<div class="field full"><div class="page-tip">${icon(status === "active" ? "check" : "info")}<span>Portal: <strong>${escapeHtml(PORTAL_STATUS_TEXT[status] || "Not invited")}</strong>. They sign in on the website with a code sent to their e-mail (${escapeHtml(record.email || "add an e-mail first")}).</span></div><div class="row-actions">${invite}${disable}</div></div>`;
@@ -8127,6 +8359,18 @@ document.addEventListener("click", async (event) => {
     try { await api("/org/me/signature-title", { method: "PUT", body: JSON.stringify({ signature_title: document.getElementById("signature-title")?.value || "" }) }); showToast("Signature title saved."); await reloadProfile(); }
     catch (error) { showToast(error.message || "Unable to save."); }
   }
+  // Customer invoices and payment settings (see renderCustomerPayments).
+  if (action === "cp-filter") { state.filters = { ...state.filters, cpStatus: target.dataset.filterKey }; render(); }
+  if (action === "cp-open") await openCustomerPayment(id);
+  if (action === "cp-new-invoice") { state.cpDetail = null; await openCustomerPaymentForm("invoice"); }
+  if (action === "cp-detail-new") { state.cpDetail = null; await openCustomerPaymentForm("detail"); }
+  if (action === "cp-detail-edit") { state.cpDetail = null; await openCustomerPaymentForm("detail", id); }
+  if (action === "cp-detail-remove" && await confirmDialog({ title: "Remove payment details", message: "Customers will no longer see these details on Pay now.", confirmLabel: "Remove", tone: "danger" })) await cpQuickAction(`/org/customer-payments/details/${id}/remove`, "POST");
+  if (action === "cp-proof-accept") await openCustomerPaymentForm("accept", id);
+  if (action === "cp-proof-reject") await openCustomerPaymentForm("reject", id);
+  if (action === "cp-cancel") await openCustomerPaymentForm("cancel", id);
+  if (action === "cp-proof-file") await openCustomerPaymentFile(`/org/customer-payments/proofs/${id}/file`);
+  if (action === "cp-proof-receipt") await openCustomerPaymentFile(`/org/customer-payments/proofs/${id}/receipt`);
   // Owner listings (see renderOwnerListings).
   if (action === "owner-filter") { state.filters = { ...state.filters, ownerStage: target.dataset.filterKey }; render(); }
   if (action === "owner-listing-open") await openOwnerListing(id);

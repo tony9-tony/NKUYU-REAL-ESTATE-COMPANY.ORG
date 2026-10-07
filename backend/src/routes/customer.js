@@ -21,6 +21,8 @@ import { callView, currentCall, finishCall, newRoom } from "../calls.js";
 import { broadcastChange, customerLiveStream } from "../live.js";
 import { clearTyping, DELETE_ALL_WINDOW_MS, EDIT_WINDOW_MS, isTyping, REACTIONS, setTyping } from "../typing.js";
 import { receiptCoverage, writeReceiptPdf } from "../payments/notices.js";
+import { invoiceReceiptPdf, invoicesWithStatus, paymentDetails, submitProof } from "../payments/invoices.js";
+import { proofRefusal } from "../payments/customerPayments.js";
 import { documentUploadsDir, progressUploadsDir, resolveStoredFile, safeDisplayFilename } from "../uploads.js";
 import { isHttps, isProduction, readCookie } from "../security.js";
 import { hashPassword, verifyPassword } from "../auth.js";
@@ -75,11 +77,18 @@ function clearCookie(req, res) {
   res.append("Set-Cookie", parts.join("; "));
 }
 
-/** The account a sign-in may use: invited or active, client still diaspora. */
+/**
+ * Who may have a portal account: a diaspora client, or any client MKUYU
+ * invited from the staff system (a Tanzanian customer with an accepted
+ * request, to see their invoices). Diaspora-only parts check is_diaspora.
+ */
+const PORTAL_CLIENT = "(cl.is_diaspora = TRUE OR ca.invited_by IS NOT NULL)";
+
+/** The account a sign-in may use: invited or active, and still allowed a portal. */
 async function signInAccount(email) {
   return queryOne(
     `SELECT ca.id, ca.client_id, ca.email, ca.status, cl.name FROM customer_accounts ca JOIN clients cl ON cl.id=ca.client_id
-      WHERE lower(ca.email)=$1 AND ca.status IN ('invited','active') AND cl.is_diaspora = TRUE`, [email]);
+      WHERE lower(ca.email)=$1 AND ca.status IN ('invited','active') AND ${PORTAL_CLIENT}`, [email]);
 }
 
 /** Resolves the signed-in customer from the cookie, or answers 401. */
@@ -88,15 +97,21 @@ async function requireCustomer(req, res, next) {
     const token = readCookie(req, CUSTOMER_COOKIE);
     if (!token || token.length > 200) return res.status(401).json({ error: "please sign in" });
     const row = await queryOne(
-      `SELECT s.id AS session_id, ca.id, ca.client_id, ca.email, ca.photo_stored_name, ca.photo_mime, ca.two_factor, cl.name, cl.country, cl.verification_status, cl.verification_note, cl.citizenship_confirmed_at, cl.notify_email
+      `SELECT s.id AS session_id, ca.id, ca.client_id, ca.email, ca.photo_stored_name, ca.photo_mime, ca.two_factor, cl.name, cl.country, cl.verification_status, cl.verification_note, cl.citizenship_confirmed_at, cl.notify_email, cl.is_diaspora
          FROM customer_sessions s JOIN customer_accounts ca ON ca.id=s.account_id JOIN clients cl ON cl.id=ca.client_id
-        WHERE s.token_hash=$1 AND s.expires_at > NOW() AND ca.status='active' AND cl.is_diaspora = TRUE`, [hash(token)]);
+        WHERE s.token_hash=$1 AND s.expires_at > NOW() AND ca.status='active' AND ${PORTAL_CLIENT}`, [hash(token)]);
     if (!row) { clearCookie(req, res); return res.status(401).json({ error: "please sign in" }); }
     req.customer = row;
     query("UPDATE customer_sessions SET last_seen_at=NOW() WHERE id=$1", [row.session_id]).catch(() => {});
     res.setHeader("Cache-Control", "no-store");
     next();
   } catch (error) { next(error); }
+}
+
+/** Verification, the Diaspora Desk chat and calls, and portal requests are for diaspora customers only. */
+function requireDiaspora(req, res, next) {
+  if (!req.customer?.is_diaspora) return res.status(403).json({ error: "This part of the portal is for MKUYU diaspora customers." });
+  next();
 }
 
 // ---- Sign in ----------------------------------------------------------------
@@ -383,7 +398,7 @@ router.post("/auth/login", route(async (req, res) => {
   if (tooMany(`login-ip:${clientIp(req)}`, 30, 15 * 60 * 1000) || tooMany(`login:${email}`, 8, 15 * 60 * 1000)) throw new HttpError(429, "Too many attempts. Please wait 15 minutes or use 'Forgot password'.");
   const account = await queryOne(
     `SELECT ca.id, ca.password_hash, ca.email, ca.two_factor, cl.name FROM customer_accounts ca JOIN clients cl ON cl.id=ca.client_id
-      WHERE (lower(ca.email)=$1 OR lower(ca.username)=$1) AND ca.status IN ('invited','active') AND cl.is_diaspora=TRUE`, [email]);
+      WHERE (lower(ca.email)=$1 OR lower(ca.username)=$1) AND ca.status IN ('invited','active') AND ${PORTAL_CLIENT}`, [email]);
   // The same work and answer whether the e-mail is unknown or the password wrong.
   const ok = verifyPassword(password, account?.password_hash || "scrypt$00$00");
   if (!account || !account.password_hash || !ok) throw new HttpError(401, "Username / e-mail or password is not correct.");
@@ -418,7 +433,7 @@ router.post("/auth/login-verify", route(async (req, res) => {
   if (tooMany(`login-verify-ip:${clientIp(req)}`, 30, 15 * 60 * 1000) || tooMany(`login-verify:${email}`, 8, 15 * 60 * 1000)) throw new HttpError(429, "Too many attempts. Please wait 15 minutes.");
   const account = await queryOne(
     `SELECT ca.id, ca.email, cl.name FROM customer_accounts ca JOIN clients cl ON cl.id=ca.client_id
-      WHERE (lower(ca.email)=$1 OR lower(ca.username)=$1) AND ca.status IN ('invited','active') AND cl.is_diaspora=TRUE AND ca.two_factor=TRUE`, [email]);
+      WHERE (lower(ca.email)=$1 OR lower(ca.username)=$1) AND ca.status IN ('invited','active') AND ${PORTAL_CLIENT} AND ca.two_factor=TRUE`, [email]);
   if (!account || !await checkLoginCode(account.id, code, "login")) throw new HttpError(401, "That code is not correct or has expired. Sign in again to get a new one.");
   await startSession(req, res, account.id);
   res.json({ customer: { name: account.name, email: account.email } });
@@ -617,10 +632,53 @@ router.get("/portal", requireCustomer, route(async (req, res) => {
   const desk = await queryOne(`SELECT u.display_name AS name FROM clients c LEFT JOIN users u ON u.id=c.diaspora_officer_id WHERE c.id=$1`, [req.customer.client_id]);
   const unread = await queryOne("SELECT COUNT(*)::int AS n FROM customer_messages WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [req.customer.client_id]);
   const requests = await queryOne(`SELECT COUNT(*)::int AS n FROM leads WHERE client_id=$1 AND source='diaspora-portal' AND status NOT IN ('lost','closed')`, [req.customer.client_id]);
+  const diaspora = Boolean(req.customer.is_diaspora);
+  // Invoices waiting for payment (the Invoices tab badge), for every portal customer.
+  const invoicesOpen = (await invoicesWithStatus("i.client_id=$1 AND i.cancelled_at IS NULL", [req.customer.client_id])).filter((row) => !["paid", "proof_uploaded"].includes(row.status)).length;
   res.json({ customer: { name: req.customer.name, email: req.customer.email, country: req.customer.country || null, photo_url: photoUrl(req.customer) }, contact, services, verification,
-    diaspora: true, desk: { name: desk?.name || null }, requests_open: requests?.n || 0, messages_unread: unread?.n || 0,
-    journey: journeyFor({ verified: verification.verified, requests: requests?.n || 0, contracts }),
+    diaspora, desk: { name: desk?.name || null }, requests_open: requests?.n || 0, messages_unread: unread?.n || 0, invoices_open: invoicesOpen,
+    journey: diaspora ? journeyFor({ verified: verification.verified, requests: requests?.n || 0, contracts }) : null,
     prefs: { notify_email: req.customer.notify_email !== false, two_factor: Boolean(req.customer.two_factor), two_factor_available: mailConfigured() } });
+}));
+
+// ---- Invoices (diaspora and Tanzanian customers) --------------------------------------
+// Finance raises an invoice on the customer's accepted request before the
+// contract. "Pay now" shows MKUYU's payment details; the customer pays outside
+// the system, then uploads proof here. Finance accepts or rejects it.
+const invoiceView = (row) => ({
+  id: row.id, reference: row.reference, purpose: row.purpose, property: row.property_name || null, service: row.service,
+  amount: Number(row.amount_required), received: row.amount_received, balance: row.balance, due: fmtDate(row.due_date), due_date: row.due_date,
+  status: row.status, status_label: row.status_label, overdue: row.overdue || row.status === "overdue", reject_reason: row.reject_reason, note: row.note,
+  can_pay: !proofRefusal(row, row.proofs),
+  proofs: row.proofs.map((p) => ({ id: p.id, sent: fmtDate(p.created_at), paid_on: fmtDate(p.paid_on), amount: Number(p.amount_claimed), transaction_id: p.transaction_id,
+    status: p.status, received: p.status === "accepted" ? Number(p.amount_received) : null, reject_reason: p.status === "rejected" ? p.reject_reason : null,
+    receipt_number: p.receipt_number || null, receipt_url: p.status === "accepted" ? `/customer/invoices/${row.id}/receipts/${p.id}` : null })),
+});
+router.get("/invoices", requireCustomer, route(async (req, res) => {
+  const rows = await invoicesWithStatus("i.client_id=$1 AND i.cancelled_at IS NULL", [req.customer.client_id]);
+  res.json(rows.map(invoiceView));
+}));
+router.get("/payment-details", requireCustomer, route(async (req, res) => {
+  res.json((await paymentDetails()).map((d) => ({ id: d.id, kind: d.kind, bank_name: d.bank_name, branch: d.branch, swift_code: d.swift_code, network: d.network, account_name: d.account_name, account_number: d.account_number })));
+}));
+router.post("/invoices/:id/proof", requireCustomer, (req, res, next) => {
+  try { requireHeader(req); } catch (error) { return next(error); }
+  uploadDocumentFile(req, res, (error) => (error ? next(new HttpError(400, error.message)) : next()));
+}, route(async (req, res) => {
+  const [invoice] = await invoicesWithStatus("i.id=$1 AND i.client_id=$2", [idParam(req.params.id), req.customer.client_id]);
+  if (!invoice) { cleanupUploadedFile(req.file); throw new HttpError(404, "Invoice not found."); }
+  if (tooMany(`proof:${req.customer.client_id}`, 30, 60 * 60 * 1000)) { cleanupUploadedFile(req.file); throw new HttpError(429, "Too many uploads. Please try again later."); }
+  const proof = await submitProof(invoice, req.body || {}, req.file || null);
+  await query("INSERT INTO audit_logs (organization_id, user_id, action, module, record_id, details_json) VALUES ($1, NULL, 'invoice_proof_uploaded', 'invoice', $2, $3::jsonb)",
+    [invoice.organization_id, String(invoice.id), JSON.stringify({ proof_id: proof.id, client_id: req.customer.client_id, duplicate_flag: proof.duplicate_flag, by: "customer" })]);
+  broadcastChange("payments");
+  res.status(201).json({ ok: true, message: "Thank you. MKUYU Finance will check your payment and you will see the result here." });
+}));
+router.get("/invoices/:id/receipts/:proofId", requireCustomer, route(async (req, res) => {
+  const [invoice] = await invoicesWithStatus("i.id=$1 AND i.client_id=$2", [idParam(req.params.id), req.customer.client_id]);
+  const proof = invoice?.proofs.find((p) => p.id === idParam(req.params.proofId) && p.status === "accepted");
+  if (!proof) throw new HttpError(404, "Receipt not found.");
+  invoiceReceiptPdf(res, invoice, proof);
 }));
 
 // ---- Requests from inside the portal ------------------------------------------
@@ -650,7 +708,7 @@ router.post("/preferences", requireCustomer, route(async (req, res) => {
 
 
 // ---- Video calls ------------------------------------------------------------------
-router.post("/calls", requireCustomer, route(async (req, res) => {
+router.post("/calls", requireCustomer, requireDiaspora, route(async (req, res) => {
   requireHeader(req);
   if (tooMany(`call:${req.customer.client_id}`, 6, 10 * 60 * 1000)) throw new HttpError(429, "Please wait a little before calling again.");
   const existing = await currentCall(req.customer.client_id);
@@ -668,21 +726,21 @@ router.post("/calls", requireCustomer, route(async (req, res) => {
   }
   res.status(201).json({ call: callView(await currentCall(req.customer.client_id), "customer", { desk: "Diaspora Desk", customer: req.customer.name }) });
 }));
-router.post("/calls/:id/answer", requireCustomer, route(async (req, res) => {
+router.post("/calls/:id/answer", requireCustomer, requireDiaspora, route(async (req, res) => {
   requireHeader(req);
   const done = await query("UPDATE video_calls SET status='active', answered_at=NOW() WHERE id=$1 AND client_id=$2 AND status='ringing' AND started_by='staff' RETURNING id", [idParam(req.params.id), req.customer.client_id]);
   if (!done.rows.length) throw new HttpError(409, "The call has ended.");
   broadcastChange("diaspora");
   res.json({ ok: true });
 }));
-router.post("/calls/:id/end", requireCustomer, route(async (req, res) => {
+router.post("/calls/:id/end", requireCustomer, requireDiaspora, route(async (req, res) => {
   requireHeader(req);
   await finishCall(idParam(req.params.id), { clientId: req.customer.client_id, decline: req.body?.decline === true });
   res.json({ ok: true });
 }));
 
 
-router.get("/requests", requireCustomer, route(async (req, res) => {
+router.get("/requests", requireCustomer, requireDiaspora, route(async (req, res) => {
   const rows = (await query(
     `SELECT l.id, l.service, l.status, l.budget, l.created_at, l.appointment_at, p.id AS property_id, p.name AS property_name, p.location
        FROM leads l LEFT JOIN properties p ON p.id=l.property_id
@@ -693,7 +751,7 @@ router.get("/requests", requireCustomer, route(async (req, res) => {
     status: r.appointment_at ? `Meeting / viewing on ${fmtDate(r.appointment_at)}` : (REQUEST_TEXT[r.status] || "In progress") })));
 }));
 
-router.post("/requests", requireCustomer, route(async (req, res) => {
+router.post("/requests", requireCustomer, requireDiaspora, route(async (req, res) => {
   requireHeader(req);
   // Diaspora customers are served only once MKUYU has verified who they are.
   // Checked here on the server, so it cannot be skipped from the browser.
@@ -814,7 +872,7 @@ router.post("/contracts/:id/sign", requireCustomer, route(async (req, res) => {
 // ---- Identity documents (self sign-ups) ------------------------------------------
 const DOC_KINDS = { passport: "Passport (photo page) or NIDA", selfie: "Selfie holding your passport open at the photo page (recommended)", residence: "Proof of residence abroad (visa, residence card or permit)", other: "Other supporting document" };
 
-router.get("/verification", requireCustomer, route(async (req, res) => {
+router.get("/verification", requireCustomer, requireDiaspora, route(async (req, res) => {
   const docs = (await query(`SELECT id, category, original_filename, uploaded_at, to_char(expires_on,'YYYY-MM-DD') AS expires_on FROM documents WHERE client_id=$1 AND category LIKE 'kyc_%' AND status <> 'superseded' ORDER BY id DESC`, [req.customer.client_id])).rows;
   const events = (await query("SELECT action, note, created_at FROM verification_events WHERE client_id=$1 ORDER BY id DESC LIMIT 30", [req.customer.client_id])).rows;
   const EVENT_TEXT = { documents_submitted: "You sent documents", verify: "MKUYU verified your identity", reject: "Documents sent back to you", revoke: "Verification removed", confirm_citizenship: "Nationality confirmed", desk_ok: "Checked by the Diaspora Desk", expiry_reminder: "Reminder: a document is about to expire" };
@@ -823,7 +881,7 @@ router.get("/verification", requireCustomer, route(async (req, res) => {
     documents: docs.map((d) => ({ kind: d.category.slice(4), name: d.original_filename, date: fmtDate(d.uploaded_at), expires_on: d.expires_on })) });
 }));
 
-router.post("/verification/documents", requireCustomer, (req, res, next) => {
+router.post("/verification/documents", requireCustomer, requireDiaspora, (req, res, next) => {
   // The header is checked before the file is read, so a foreign page cannot upload.
   if (req.get(CUSTOMER_HEADER) !== "1") return res.status(403).json({ error: "request refused" });
   uploadDocumentFile(req, res, (error) => (error ? next(error) : next()));
@@ -894,7 +952,7 @@ const messageRow = (m) => ({
 });
 const messageState = (m) => ({ id: m.id, body: m.deleted_at ? "" : m.body, deleted: Boolean(m.deleted_at), edited: Boolean(m.edited_at) && !m.deleted_at, read: Boolean(m.read_at), delivered: Boolean(m.delivered_at || m.read_at), reactions: { me: m.reaction_customer || null, desk: m.reaction_staff || null } });
 
-router.get("/messages", requireCustomer, route(async (req, res) => {
+router.get("/messages", requireCustomer, requireDiaspora, route(async (req, res) => {
   const rows = (await query(`${MESSAGE_SELECT} WHERE m.client_id=$1 AND NOT m.hidden_customer ORDER BY m.id DESC LIMIT 200`, [req.customer.client_id])).rows.reverse();
   // Opening the conversation marks the desk's replies as delivered and read.
   const seen = await query("UPDATE customer_messages SET read_at=NOW(), delivered_at=COALESCE(delivered_at, NOW()) WHERE client_id=$1 AND sender='staff' AND read_at IS NULL", [req.customer.client_id]);
@@ -906,7 +964,7 @@ router.get("/messages", requireCustomer, route(async (req, res) => {
 // message the page has, the current state (seen, reactions) of recent messages,
 // whether the desk is typing, and how many replies are waiting. "peek" counts
 // without marking as read.
-router.get("/messages/poll", requireCustomer, route(async (req, res) => {
+router.get("/messages/poll", requireCustomer, requireDiaspora, route(async (req, res) => {
   const clientId = req.customer.client_id;
   const after = Math.max(0, Number.parseInt(req.query.after, 10) || 0);
   const peek = req.query.peek === "1";
@@ -922,13 +980,13 @@ router.get("/messages/poll", requireCustomer, route(async (req, res) => {
   res.json({ messages: fresh.map(messageRow), state: recent.map(messageState), typing: isTyping(clientId, "staff"), unread, call });
 }));
 
-router.post("/messages/typing", requireCustomer, (req, res) => {
+router.post("/messages/typing", requireCustomer, requireDiaspora, (req, res) => {
   if (req.get(CUSTOMER_HEADER) !== "1") return res.status(403).json({ error: "request refused" });
   setTyping(req.customer.client_id, "customer");
   res.json({ ok: true });
 });
 
-router.post("/messages/react", requireCustomer, route(async (req, res) => {
+router.post("/messages/react", requireCustomer, requireDiaspora, route(async (req, res) => {
   if (req.get(CUSTOMER_HEADER) !== "1") throw new HttpError(403, "request refused");
   const id = Number.parseInt(req.body?.message_id, 10);
   const emoji = req.body?.emoji ? String(req.body.emoji) : null;
@@ -940,7 +998,7 @@ router.post("/messages/react", requireCustomer, route(async (req, res) => {
   res.json({ ok: true });
 }));
 
-router.post("/messages/:id/edit", requireCustomer, route(async (req, res) => {
+router.post("/messages/:id/edit", requireCustomer, requireDiaspora, route(async (req, res) => {
   if (req.get(CUSTOMER_HEADER) !== "1") throw new HttpError(403, "request refused");
   const id = idParam(req.params.id);
   const body = String(req.body?.body || "").replace(/\r\n/g, "\n").trim();
@@ -955,7 +1013,7 @@ router.post("/messages/:id/edit", requireCustomer, route(async (req, res) => {
   res.json({ message: messageRow(row) });
 }));
 
-router.post("/messages/:id/delete", requireCustomer, route(async (req, res) => {
+router.post("/messages/:id/delete", requireCustomer, requireDiaspora, route(async (req, res) => {
   if (req.get(CUSTOMER_HEADER) !== "1") throw new HttpError(403, "request refused");
   const id = idParam(req.params.id);
   const scope = req.body?.scope === "all" ? "all" : "me";
@@ -972,7 +1030,7 @@ router.post("/messages/:id/delete", requireCustomer, route(async (req, res) => {
   res.json({ ok: true });
 }));
 
-router.post("/messages", requireCustomer, (req, res, next) => {
+router.post("/messages", requireCustomer, requireDiaspora, (req, res, next) => {
   if (req.get(CUSTOMER_HEADER) !== "1") return res.status(403).json({ error: "request refused" });
   next();
 }, route(async (req, res) => {
