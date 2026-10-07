@@ -1900,6 +1900,7 @@ router.post("/contracts/:id/schedule", route(async (req, res) => {
   }
   if (existing > 0) await query("DELETE FROM debts WHERE contract_id=$1 AND organization_id=$2", [id, orgId]);
   const createdIds = await insertSchedule(contract, { deposit, installments, firstDueDate, frequency });
+  await allocateEarlierPayments(id);
   // The plan Finance settled on is the contract's plan from now on.
   await query("UPDATE contracts SET deposit_amount=$1, installment_count=$2, first_due_date=$3, payment_frequency=$4 WHERE id=$5", [deposit, installments, firstDueDate, frequency, id]);
   res.status(201).json({ created: createdIds.length, debts: await Promise.all(createdIds.map((debtId) => Debt.get(debtId))) });
@@ -1942,7 +1943,18 @@ async function createScheduleFromTerms(contractId) {
   const deposit = Number(contract.deposit_amount || 0);
   if (deposit >= Number(contract.value)) return 0;
   const ids = await insertSchedule(contract, { deposit, installments, firstDueDate: String(contract.first_due_date).slice(0, 10), frequency: contract.payment_frequency || "monthly" });
+  await allocateEarlierPayments(contractId);
   return ids.length;
+}
+
+// Money approved before the plan existed (a deposit paid on a customer invoice
+// is carried onto the contract when it is created) is spread over the new
+// installments, oldest payment first, so the deposit shows as paid.
+async function allocateEarlierPayments(contractId) {
+  const payments = (await query("SELECT id FROM payments WHERE contract_id=$1 AND status='approved' ORDER BY paid_at, id", [contractId])).rows;
+  const touched = [];
+  for (const payment of payments) touched.push(...await Payment.allocate(payment.id));
+  await resyncInstallmentState(touched);
 }
 
 router.get("/debts/overdue", route(async (req, res) => res.json(await Debt.overdue())));

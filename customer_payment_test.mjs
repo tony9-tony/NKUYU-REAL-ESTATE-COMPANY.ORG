@@ -209,6 +209,10 @@ try {
   const ledger = (await query("SELECT amount, status, reference, receipt_number, approved_by FROM payments WHERE contract_id=$1", [res.body.id])).rows;
   check(ledger.length === 3 && ledger.every((p) => p.status === "approved" && /^RCT-/.test(p.receipt_number) && Number(p.approved_by) === users.fm.id)
     && ledger.reduce((sum, p) => sum + Number(p.amount), 0) === 1600000, "the TZS 1,600,000 paid on the invoices is in the contract's payments, with the same receipts");
+  const plan = await call(`/contracts/${res.body.id}/schedule`, { as: "md", method: "POST", body: { deposit: 1600000, installments: 2, first_due_date: ymd(30), frequency: "monthly" } });
+  const debts = (await query("SELECT amount, status FROM debts WHERE contract_id=$1 ORDER BY due_date, id", [res.body.id])).rows;
+  check(plan.status === 201 && debts.length === 3 && Number(debts[0].amount) === 1600000 && debts[0].status === "paid" && debts.slice(1).every((d) => d.status !== "paid"),
+    "a payment plan made later counts the invoice money: the deposit shows as paid");
 
   section("10. a drafted contract cannot be submitted while unpaid; overdue; the list");
   const leadC = await lead(clientB.id);
