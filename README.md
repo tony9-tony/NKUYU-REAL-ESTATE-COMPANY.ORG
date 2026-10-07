@@ -164,7 +164,22 @@ Without a reset from the administrator, saving the form only says "Contact your 
 
 ## Your work today
 
-Finance, Sales and the Managing Director open on a simple home: a short numbered list of the jobs waiting for them, one sentence each and one button that opens the job already filtered (for example *Payments waiting for your approval*). A strip under it shows how their work moves, and their main pages carry a one-line tip saying what their step is. The menus, permissions and screens are unchanged.
+Finance, Sales, the Property Officer and the Managing Director open on a simple home: a short numbered list of the jobs waiting for them, one sentence each and one button that opens the job already filtered (for example *Payments waiting for your approval*). A strip under it shows how their work moves, and their main pages carry a one-line tip saying what their step is. The menus, permissions and screens are unchanged.
+
+## Owner listings
+
+When an owner wants MKUYU to sell their property, the **Property Officer** runs it on **Owner listings** (menu: Business). Each seller property has one listing that moves through fixed stages, none of which can be skipped:
+
+**Received → Visit booked → Valued → Documents checked → Mandate signed → Listed → Under offer → Sold** (or **Withdrawn** at any point, with a reason).
+
+1. **Received**: opens by itself when Sales accepts a website Sell request (the seller becomes a client), or the Property Officer adds an owner who walked in.
+2. **Visit booked / Valued**: the Property Officer visits, then records the date, a suggested price range (low and high) and a written note.
+3. **Documents checked**: the **Legal Officer** only. They record the title deed number and confirm the owner's identity and authority to sell. The Property Officer, the Sales manager and the MD cannot mark this step.
+4. **Sell mandate**: the Property Officer agrees the listing price, commission and end date with the owner. The **Managing Director signs every mandate**; it does not count until then. A commission below the standard rate is marked as a discount. Nobody signs a mandate they agreed themselves. The MD can send it back with a reason.
+5. **Offers**: every offer is recorded, presented to the owner **in writing** (letter, email, WhatsApp or SMS), and the owner's decision is recorded with its date (accepted, rejected or countered with a price). **Under offer** follows an accepted offer; if that buyer falls away, *Back on the market* returns it to Listed. **Sold** needs an accepted offer.
+6. **Weekly update**: the Property Officer logs every update to the owner (date, channel, note). An active listing with no update for **7 days** is **overdue**: it shows on the Property Officer's *Your work today*, in a count for the MD, and becomes an urgent task on their Assignments (the same reminder pattern as Customer Service hand-offs). Logging the update closes that task.
+
+The **standard commission rate** is a setting (default 3%); the MD changes it from the Owner listings page. The Sales Department Manager and the MD may also act on the owner side and give a listing to a Property Officer. Every step is checked again by the server and written to the audit log (`owner_listing_*`). Permissions: `run_owner_listings` (Property Officer, Department Manager, MD), `check_owner_documents` (Legal Officer), `sign_sell_mandate` (MD). Code: `backend/src/sales/ownerListing.js` (the stages and rules), `backend/src/routes/ownerListings.js` (`/org/owner-listings`). Test: `npm run test:owner-listings`.
 
 ## Backups
 
@@ -284,6 +299,7 @@ Tests never touch the live database: `test_support/guard.mjs` derives a separate
 ```powershell
 npm run test          # unit, access matrix, frontend smoke, end-to-end
 npm run test:final    # payments, refunds, property/contract rules
+npm run test:owner-listings  # owner selling: stages, Legal check, MD signature, 7-day updates
 ```
 
 On Windows, double-click `run-tests.bat`; the results are written to `test-results.txt`.

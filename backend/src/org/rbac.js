@@ -32,6 +32,7 @@ export const BUSINESS_PERMISSIONS = new Set([
   ...[...READ_ONLY_MODULES].map((module) => `view_${module}`),
   "submit_contract", "review_legal", "request_changes", "approve_legal", "validate_finance", "approve_management",
   "view_financial", "approve",
+  "run_owner_listings", "check_owner_documents", "sign_sell_mandate",
 ]);
 
 export function can(access, permission) {

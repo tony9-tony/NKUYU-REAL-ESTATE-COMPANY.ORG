@@ -43,7 +43,8 @@
     "test:notices": "node notifications_test.mjs",
     "test:notices:db": "node --import ./test_support/guard.mjs notifications_db_test.mjs",
     "test:customer-portal": "node --import ./test_support/guard.mjs customer_portal_test.mjs",
-    "test:diaspora-desk": "node --import ./test_support/guard.mjs diaspora_desk_test.mjs"
+    "test:diaspora-desk": "node --import ./test_support/guard.mjs diaspora_desk_test.mjs",
+    "test:owner-listings": "node --import ./test_support/guard.mjs owner_listing_test.mjs"
   },
   "engines": {
     "node": ">=20"

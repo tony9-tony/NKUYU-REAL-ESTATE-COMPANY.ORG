@@ -279,6 +279,7 @@ const viewMeta = {
   appointments: ["Appointments", "Viewings, calls, meetings and inspections"],
   requests: ["Requests & leads", "Buy, Rent and Sell requests and Contact-page messages from the website, from arrival to answer"],
   leads: ["Requests & leads", "Enquiries recorded by the team (calls, walk-ins, referrals), before they become clients"],
+  "owner-listings": ["Owner listings", "Owners selling through MKUYU: visit and valuation, title check, sell mandate, offers and a weekly update"],
   documents: ["Documents", "Agreements, titles, receipts, reports and permits"],
   templates: ["Contract templates", "The Word files every new contract is produced on"],
   reports: ["Reports", "Generated and uploaded management reports"],
@@ -929,6 +930,8 @@ async function refresh() {
   if (canSeeVerification()) loadVerification({ quiet: true }).then(() => { updateNavigation(); if (["verification", "dashboard"].includes(state.view) && modalBackdrop.hidden) render(); });
   // Keeps the Requests count in the navigation current.
   if (canModule("leads") && can("view")) reloadRequests().then(() => { updateNavigation(); if (state.view === "requests") render(); });
+  // Owner listings: counts for "Your work today" and the menu badge.
+  if (canOwnerListings()) loadOwnerListingWork().then(() => { updateNavigation(); if (state.view === "dashboard" && modalBackdrop.hidden) render(); });
 }
 
 function applyWorkspace(payload) {
@@ -1003,6 +1006,7 @@ function isAdmin() {
 const BUSINESS_PERMISSIONS = new Set([
   "submit_contract", "review_legal", "request_changes", "approve_legal", "validate_finance", "approve_management",
   "view_financial", "approve", "view_projects", "view_properties", "view_appointments",
+  "run_owner_listings", "check_owner_documents", "sign_sell_mandate",
 ]);
 
 function can(permission) {
@@ -1076,6 +1080,9 @@ const NAV_ITEMS = [
   // Website Buy/Rent requests, followed from arrival to client. Same module
   // and permission as Leads: it is a narrower view of the same records.
   { view: "requests", label: "Requests & leads", icon: "inbox", module: "leads", permission: "view", group: "Business" },
+  // Owner selling: the Property Officer's page. Legal (title check) and the MD
+  // (mandate signature) see it too; nobody else does.
+  { view: "owner-listings", label: "Owner listings", icon: "home", group: "Business", ownerListings: true },
   // Identity checks of diaspora sign-ups: the Diaspora Desk checks, Legal verifies.
   { view: "verification", label: "Diaspora verification", icon: "shield", group: "Business", diasporaVerification: true },
   { view: "diaspora-messages", label: "Diaspora messages", icon: "mail", group: "Business", diasporaVerification: true },
@@ -1114,6 +1121,7 @@ function canSeeNavItem(item) {
   if (isSystemAdminOnly() && (item.view === "dashboard" || item.view === "admin-dashboard")) return false;
   if (item.adminOnly) return isAdmin();
   if (item.diasporaVerification) return inDiasporaDesk() || can("approve_legal") || can("approve_management");
+  if (item.ownerListings) return canOwnerListings();
   if (item.anyOf) return item.anyOf.some((permission) => can(permission));
   if (!item.module) return item.permission ? can(item.permission) : true;
   return canModule(item.module) && can(item.permission);
@@ -1193,6 +1201,8 @@ function navSources() {
     verification: verificationsNeedingMe().map((row) => `${row.id}:${row.verification_status}:${row.citizenship_confirmed_at ? 1 : 0}`),
     // Customer messages not yet opened by the desk.
     "diaspora-messages": (state.dmThreads?.rows || []).reduce((sum, row) => sum + Number(row.unread || 0), 0),
+    // The server's count of owner listings waiting on this person.
+    "owner-listings": ownerListingsNeedingMe(),
   };
 }
 
@@ -1230,7 +1240,7 @@ function updateNavigation() {
     // waiting on this person, which already falls as they act, so it stays
     // until the work is done rather than clearing on sight.
     const sources = navSources();
-    const live = new Set(["assignments", "verification", "diaspora-messages"]);
+    const live = new Set(["assignments", "verification", "diaspora-messages", "owner-listings"]);
     if (sources[activeView] !== undefined && !live.has(activeView)) markSeen(`nav:${activeView}`, sources[activeView]);
     let lastGroup = null;
     nav.innerHTML = allowed.map((item) => {
@@ -2414,7 +2424,7 @@ function renderOrganization(section = "staff") {
   const myRank = Number(org.me?.rank || 0);
   const assignable = (role) => role.active !== false && role.name !== "System Administrator" && (isAdmin() || Number(role.rank || 0) <= myRank);
   const editableRole = (role) => isAdmin() || (!role.system_role && Number(role.rank || 0) <= myRank);
-  const RESERVED_KEYS = new Set(["manage_users", "manage_roles", "manage_permissions", "manage_settings", "view_audit", "approve_management", "approve_legal", "validate_finance"]);
+  const RESERVED_KEYS = new Set(["manage_users", "manage_roles", "manage_permissions", "manage_settings", "view_audit", "approve_management", "approve_legal", "validate_finance", "check_owner_documents", "sign_sell_mandate"]);
   const roleOptions = org.roles.filter(editableRole).map((role) => `<option value="${role.id}" data-rank="${Number(role.rank || 0)}" data-permissions="${escapeHtml(JSON.stringify(role.permissions || []))}">${escapeHtml(role.name)} · rank ${Number(role.rank || 0)} · ${role.permission_count || 0} privileges</option>`).join("");
   const staffRoleOptions = org.roles.filter(assignable).map((role) => `<option value="${role.id}">${escapeHtml(role.name)} · rank ${Number(role.rank || 0)}</option>`).join("");
   const departmentOptions = org.departments.filter((department) => department.active !== false).map((department) => `<option value="${department.id}">${escapeHtml(titleCase(department.name))}</option>`).join("");
@@ -2534,7 +2544,8 @@ function renderAdminConsole(org, { canManage, canAddStaff, canAddToDepartment = 
         Number(d.all_members || 0) ? "" : `<button class="btn btn-danger btn-small" data-action="delete-department" data-id="${d.id}">Delete</button>`,
       ].join("");
       // Add staff: only where the department has a default role (not Management) and is active.
-      const addStaff = canAddToDepartment && d.active !== false && d.default_role
+      // MANAGEMENT (MD) and ICT & ADMINISTRATION (Admin) are locked: the server refuses them too.
+  const addStaff = canAddToDepartment && d.active !== false && d.default_role && !d.staff_locked
         ? `<button class="btn btn-gold btn-small" data-action="add-department-staff" data-id="${d.id}" title="New account for this department · role: ${escapeHtml(d.default_role)}">${icon("plus")}Add staff</button>` : "";
       return `<div class="dept-group" data-department="${escapeHtml(d.name)}">
         <div class="dept-group-head" style="flex-wrap:wrap;gap:.6rem">
@@ -3063,6 +3074,8 @@ function workspaceRole() {
   if (can("validate_finance") && canSeeFinancial()) return "finance";
   if (can("submit_contract") && !can("approve_legal") && canModule("contracts")) return "sales";
   if ((can("approve_legal") || can("review_legal")) && canModule("contracts")) return "legal";
+  // The Property Officer: owner selling is their day.
+  if (can("run_owner_listings")) return "property";
   const roleNames = (state.organization.me?.user?.roles || []).map((role) => String(role.name || ""));
   if (roleNames.some((name) => /customer service/i.test(name))) return "cs";
   return null;
@@ -3081,12 +3094,17 @@ const PAGE_TIPS = {
   },
   legal: {
     contracts: "Your step: press the button on each contract. Submitted → Start legal review → Legal approval. After Finance validates, send it to the MD; after the MD approves, send it to the customer and record the signature.",
+    "owner-listings": "Your step: open each listing marked “Valued”, check the title deed and the owner's identity and authority to sell, then press “Check title and documents”.",
   },
   cs: {
     assignments: "Your step: open each task, contact the customer the way they asked (phone, WhatsApp or email), write what was agreed and press Submit.",
   },
   md: {
     contracts: "Your step: open a contract marked “Under MD review”, read it, then press “Management approval” or reject it with a reason.",
+    "owner-listings": "Your step: open each mandate “Waiting for the MD”, check the price and the commission, then press “Sign mandate” or send it back with a reason.",
+  },
+  property: {
+    "owner-listings": "Your step: visit and value each property, agree the mandate with the owner, present every offer in writing, and send every owner an update at least once a week.",
   },
 };
 /** "From the website" / "Added by staff": the two halves of Requests & leads. */
@@ -3109,11 +3127,13 @@ const WORK_FLOW = {
   legal: ["Sales submits", "You review and approve", "Finance checks the money", "You send it to the MD", "You release it and record the signature"],
   desk: ["Diaspora customer signs up or asks in the portal", "You check their documents", "Legal verifies them", "You hand the request to Customer Service", "You accept their report and prepare the contract"],
   cs: ["Sales hands you a request", "You contact the customer", "You write a short report", "Sales accepts it", "The customer becomes a client"],
+  property: ["An owner wants to sell", "You visit and value it", "Legal checks the title", "You agree the mandate; the MD signs it", "You list it, present every offer, update the owner weekly"],
 };
 
 function workTodayPanel(role) {
   const summary = state.summary || {};
   const work = summary.work || {};
+  const ownerWork = state.ownerListingWork || {};
   const n = (value) => Number(value || 0);
   const jobs = [];
   // job: count (null = always available), title, what to do, button, where it goes.
@@ -3142,8 +3162,21 @@ function workTodayPanel(role) {
     job(n(work.contracts_changes), "Contracts sent back to you", "Fix what Legal asked for, then submit again.", "Fix contracts", toView("contracts", { status: "changes_requested" }), "amber");
     job(n(work.contracts_draft), "Drafts not yet sent to Legal", "Check the draft and press “Submit to Legal”.", "Submit drafts", toView("contracts", { status: "draft" }));
     job(null, "Customer ready to buy or rent?", "The system fills the contract, price and payment plan for you.", "Prepare a contract", { action: "generate-contract" });
+    // A Sales manager who also runs owner listings sees the owners left waiting.
+    if (can("run_owner_listings")) job(n(ownerWork.overdue), "Owners with no update for 7 days", "Every owner gets an update at least once a week. Make sure the Property Officer sends it.", "See owners", toView("owner-listings", { ownerStage: "overdue" }), "red");
+  }
+  if (role === "property") {
+    job(n(ownerWork.mine_overdue), "Owners waiting for their weekly update", "Call or message each owner, then press “Log update”. 7 days without an update is overdue.", "Update owners", toView("owner-listings", { ownerStage: "overdue" }), "red");
+    job(n(ownerWork.received), "New owners to visit", "Book the visit, value the property, then record the price range and your note.", "Book visits", toView("owner-listings", { ownerStage: "received" }), "gold");
+    job(n(ownerWork.mandate_to_agree), "Mandates to agree with the owner", "Legal has checked the title. Agree the price, commission and end date; the MD then signs.", "Agree mandates", toView("owner-listings", { ownerStage: "documents_checked" }));
+    job(n(ownerWork.offers_open), "Offers to present or answer", "Present every offer to the owner in writing, then record their decision.", "Open offers", toView("owner-listings", { ownerStage: "listed" }));
+    job(null, "Owner walked in to sell?", "Open their listing so the visit, valuation and weekly updates are tracked.", "New owner listing", { action: "owner-listing-new" });
   }
   if (role === "md") {
+    if (canOwnerListings()) {
+      job(n(ownerWork.awaiting_md), "Sell mandates waiting for your signature", "No mandate counts until you sign it. Check the price and the commission.", "Sign mandates", toView("owner-listings", { ownerStage: "documents_checked" }), "gold");
+      job(n(ownerWork.overdue), "Owners with no update for 7 days", "The Property Officer must update every owner weekly.", "See owners", toView("owner-listings", { ownerStage: "overdue" }), "red");
+    }
     job(n(work.contracts_management), "Contracts waiting for your approval", "Open each one, read it, then approve or reject.", "Review contracts", toView("contracts", { status: "pending_management_approval" }), "gold");
     job(n(work.contracts_customer), "With the customer to sign", "No action needed. Legal records the signature.", "See them", toView("contracts", { status: "customer_pending" }));
     if (canSeeFinancial()) {
@@ -3157,6 +3190,7 @@ function workTodayPanel(role) {
     job(n(work.contracts_under_review), "Contracts you are reviewing", "Check the clauses and the parties, then press “Legal approval” or send it back with a reason.", "Finish reviews", toView("contracts", { status: "under_review" }));
     job(n(work.contracts_to_md), "Finance has checked the money", "Press “Send for management approval”.", "Send to the MD", toView("contracts", { status: "legal_approved" }));
     job(n(work.contracts_release), "The MD approved", "Press “Send to customer” so the customer can sign.", "Send to customers", toView("contracts", { status: "approved" }));
+    if (can("check_owner_documents")) job(n(ownerWork.awaiting_legal), "Seller titles to check", "The Property Officer has valued these. Check the title deed and the owner's identity and authority to sell.", "Check titles", toView("owner-listings", { ownerStage: "valued" }));
     job(verificationsNeedingMe().filter((row) => row.verification_status === "verified").length, "Diaspora nationality to confirm", "The Diaspora Desk has verified these customers. Confirm their nationality before they can sign an agreement.", "Open verification", toView("verification"));
     job(n(work.contracts_customer), "With the customer for signature", "When the customer has signed and the deposit is paid, attach the signed contract (“Replace with signed contract”) and press “Record customer signature”.", "Record signatures", toView("contracts", { status: "customer_pending" }), "amber");
   }
@@ -4531,6 +4565,11 @@ function render() {
     addRequestTabs();
     addPageTip();
     if (!state.requests && !state.requestsRequested) loadRequests().then(() => { updateNavigation(); if (state.view === "requests") render(); });
+  }
+  if (state.view === "owner-listings") {
+    renderOwnerListings();
+    addPageTip();
+    if (!state.ownerListingsRequested) loadOwnerListings();
   }
   if (state.view === "documents") renderDocuments();
   if (state.view === "templates") renderTemplatesPage();
@@ -6171,6 +6210,288 @@ document.addEventListener("submit", async (event) => {
 });
 
 /* --------------------------------------------------------------------------
+   Owner listings: an owner selling through MKUYU, from first visit to sold.
+   The Property Officer runs the owner side, Legal checks the title and the MD
+   signs every sell mandate. The buttons come from the server's
+   available_actions; the server re-checks every one.
+   -------------------------------------------------------------------------- */
+const OWNER_STAGE_TONES = { received: "pending", visit_booked: "scheduled", valued: "active", documents_checked: "verified", mandate_signed: "verified", listed: "active", under_offer: "featured", sold: "sold", withdrawn: "inactive" };
+const OWNER_STAGE_LABELS = { received: "Received", visit_booked: "Visit booked", valued: "Valued", documents_checked: "Documents checked", mandate_signed: "Mandate signed", listed: "Listed", under_offer: "Under offer", sold: "Sold", withdrawn: "Withdrawn" };
+const OWNER_MANDATE_LABELS = { none: "Not agreed yet", awaiting_md: "Waiting for the MD", returned: "Sent back by the MD", signed: "Signed by the MD" };
+const OWNER_ACTION_LABELS = {
+  set_officer: "Give to a Property Officer", book_visit: "Book visit", record_valuation: "Record valuation",
+  check_documents: "Check title and documents", agree_mandate: "Agree mandate", sign_mandate: "Sign mandate", return_mandate: "Send mandate back",
+  mark_listed: "Mark listed", record_offer: "Record offer", mark_sold: "Mark sold", back_to_market: "Back on the market",
+  log_update: "Log update", withdraw: "Withdraw",
+  present_offer: "Presented in writing", decide_accept: "Owner accepted", decide_reject: "Owner rejected", decide_counter: "Owner countered",
+};
+const OWNER_PRIMARY_ACTIONS = new Set(["book_visit", "record_valuation", "check_documents", "agree_mandate", "sign_mandate", "mark_listed", "record_offer", "mark_sold", "log_update"]);
+const OWNER_CHANNELS = { phone: "Phone call", whatsapp: "WhatsApp", sms: "SMS", email: "Email", visit: "Visit", letter: "Letter" };
+const OWNER_WRITTEN = { letter: "Letter", email: "Email", whatsapp: "WhatsApp", sms: "SMS" };
+const OWNER_DECISION_LABELS = { accepted: "Accepted", rejected: "Rejected", countered: "Countered" };
+const OWNER_PROPERTY_TYPES = ["House", "Apartment", "Villa", "Land / plot", "Commercial", "Other"];
+
+function canOwnerListings() {
+  return ["run_owner_listings", "check_owner_documents", "sign_sell_mandate"].some((permission) => can(permission));
+}
+
+/** The server's count of listings waiting on this person (menu badge). */
+function ownerListingsNeedingMe() {
+  const work = state.ownerListingWork;
+  if (!work || !canOwnerListings()) return 0;
+  return (can("run_owner_listings") ? Number(work.mine_overdue || 0) : 0)
+    + (can("check_owner_documents") ? Number(work.awaiting_legal || 0) : 0)
+    + (can("sign_sell_mandate") ? Number(work.awaiting_md || 0) : 0);
+}
+
+async function loadOwnerListingWork() {
+  try { state.ownerListingWork = await api("/org/owner-listings/summary"); } catch { state.ownerListingWork = null; }
+}
+
+async function loadOwnerListings() {
+  state.ownerListingsRequested = true;
+  try {
+    const rows = await api("/org/owner-listings");
+    state.ownerListings = Array.isArray(rows) ? rows : [];
+  } catch (error) { state.ownerListings = { error: error.message || "Unable to load owner listings." }; }
+  await loadOwnerListingWork();
+  updateNavigation();
+  if (state.view === "owner-listings" && modalBackdrop.hidden) render();
+}
+
+function ownerStageBadge(stage) {
+  return badgeVariant(OWNER_STAGE_LABELS[stage] || stage, OWNER_STAGE_TONES[stage] || "neutral");
+}
+
+function ownerUpdateCell(row) {
+  if (["sold", "withdrawn"].includes(row.stage)) return `<span class="muted">—</span>`;
+  const days = Number(row.days_since_update || 0);
+  const text = row.last_update_at ? (days === 0 ? "Updated today" : `${days} day${days === 1 ? "" : "s"} since update`) : `No update yet · ${days} day${days === 1 ? "" : "s"}`;
+  return `${row.update_overdue ? badgeVariant("Update overdue", "overdue") : ""}<span class="cell-sub">${escapeHtml(text)}</span>`;
+}
+
+function renderOwnerListings() {
+  const data = state.ownerListings;
+  if (!data) { content.innerHTML = `<div class="panel">${emptyState("Loading", "", { iconName: "home", compact: true })}</div>`; return; }
+  if (data.error) { content.innerHTML = `<div class="panel">${escapeHtml(data.error)}</div>`; return; }
+  const filter = state.filters?.ownerStage || "active";
+  const matches = (row, key) => key === "all" || (key === "active" ? !["sold", "withdrawn"].includes(row.stage) : key === "overdue" ? row.update_overdue : row.stage === key);
+  const tabs = [["active", "Active"], ["overdue", "Update overdue"], ...Object.entries(OWNER_STAGE_LABELS), ["all", "All"]]
+    .map(([key, label]) => `<button class="seg-btn${filter === key ? " active" : ""}" data-action="owner-filter" data-filter-key="${key}">${escapeHtml(label)} (${data.filter((row) => matches(row, key)).length})</button>`).join("");
+  const rows = data.filter((row) => matches(row, filter));
+  const work = state.ownerListingWork || {};
+  const standard = Number(work.standard_commission || 3);
+  const list = rows.map((row) => {
+    const mandate = row.stage === "documents_checked" && row.mandate_status !== "none" ? `<span class="cell-sub">${escapeHtml(OWNER_MANDATE_LABELS[row.mandate_status] || row.mandate_status)}</span>` : "";
+    const below = row.commission_below_standard ? `<span class="cell-sub">Commission below standard</span>` : "";
+    return `<tr>
+      <td><span class="cell-main">${escapeHtml(row.owner_name)}</span><span class="cell-sub">${escapeHtml([row.property_type, row.location].filter(Boolean).join(" · "))}</span><span class="cell-sub">${escapeHtml([row.owner_phone, row.owner_email].filter(Boolean).join(" · "))}</span></td>
+      <td>${ownerStageBadge(row.stage)}${mandate}${below}</td>
+      <td>${row.officer_name ? escapeHtml(row.officer_name) : `<span class="muted">Not given to anyone yet</span>`}</td>
+      <td>${ownerUpdateCell(row)}</td>
+      <td class="align-right"><div class="row-actions"><button class="btn btn-small${(row.available_actions || []).some((a) => OWNER_PRIMARY_ACTIONS.has(a)) ? " btn-primary" : ""}" data-action="owner-listing-open" data-id="${row.id}">Open</button></div></td></tr>`;
+  }).join("");
+  const newButton = can("run_owner_listings") ? `<button class="btn btn-primary" data-action="owner-listing-new">${icon("plus")}New owner listing</button>` : "";
+  const rateButton = can("sign_sell_mandate") ? `<button class="btn btn-soft" data-action="owner-commission">Change standard rate</button>` : "";
+  content.innerHTML = `
+    <div class="toolbar"><div class="toolbar-filters"><div class="segmented" role="group" aria-label="Owner listing stage">${tabs}</div></div><div class="toolbar-end">${rateButton}${newButton}</div></div>
+    <div class="section-head section-head-tight"><div><h2 class="section-title">Owner listings</h2><div class="section-note">Standard commission: ${escapeHtml(String(standard))}% · every owner gets an update at least once a week</div></div></div>
+    ${rows.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Owner and property</th><th>Stage</th><th>Property Officer</th><th>Owner update</th><th class="align-right">Action</th></tr></thead><tbody>${list}</tbody></table></div>`
+      : `<div class="panel">${emptyState("Nothing here", "An owner listing opens when Sales accepts a Sell request from the website, or when the Property Officer adds an owner who walked in.", { iconName: "home", compact: true })}</div>`}`;
+}
+
+function ownerRow(label, value) {
+  return value === null || value === undefined || value === "" ? "" : `<tr><th>${escapeHtml(label)}</th><td>${value}</td></tr>`;
+}
+
+async function openOwnerListing(listingId) {
+  let listing;
+  try { listing = await api(`/org/owner-listings/${listingId}`); }
+  catch (error) { showToast(error.message || "Unable to open the listing."); return; }
+  state.ownerListingDetail = listing;
+  const yesNo = (value) => (value === true ? "Confirmed" : value === false ? "Not confirmed" : null);
+  const actions = (listing.available_actions || []).map((action) => `<button type="button" class="btn btn-small ${OWNER_PRIMARY_ACTIONS.has(action) ? "btn-primary" : action === "withdraw" || action === "return_mandate" ? "btn-danger-ghost" : "btn-soft"}" data-action="owner-action" data-owner-action="${action}">${escapeHtml(OWNER_ACTION_LABELS[action] || action)}</button>`).join("");
+  const details = `<table class="data-table"><tbody>
+    ${ownerRow("Owner", escapeHtml(listing.owner_name))}
+    ${ownerRow("Contact", escapeHtml([listing.owner_phone, listing.owner_email].filter(Boolean).join(" · ")))}
+    ${ownerRow("Property", escapeHtml([listing.property_type, listing.location].filter(Boolean).join(" · ")))}
+    ${ownerRow("Owner's asking price", listing.asking_price ? escapeHtml(money(listing.asking_price)) : null)}
+    ${ownerRow("Property Officer", listing.officer_name ? escapeHtml(listing.officer_name) : `<span class="muted">Not given to anyone yet</span>`)}
+    ${ownerRow("Visit", listing.visit_at ? escapeHtml(formatDate(listing.visit_at, true)) : null)}
+    ${ownerRow("Valuation", listing.valued_at ? `${escapeHtml(money(listing.price_low))} – ${escapeHtml(money(listing.price_high))}<span class="cell-sub">${escapeHtml(listing.valuation_note || "")}</span><span class="cell-sub">${escapeHtml([listing.valued_by_name, formatDate(listing.valued_at)].filter(Boolean).join(" · "))}</span>` : null)}
+    ${ownerRow("Title and documents", listing.documents_checked_at ? `Title deed ${escapeHtml(listing.title_deed_number || "")}<span class="cell-sub">Identity: ${escapeHtml(yesNo(listing.owner_identity_confirmed) || "—")} · Authority to sell: ${escapeHtml(yesNo(listing.owner_authority_confirmed) || "—")}</span>${listing.documents_note ? `<span class="cell-sub">${escapeHtml(listing.documents_note)}</span>` : ""}<span class="cell-sub">${escapeHtml([listing.documents_checked_by_name, "Legal", formatDate(listing.documents_checked_at)].filter(Boolean).join(" · "))}</span>` : null)}
+    ${ownerRow("Sell mandate", listing.mandate_status !== "none" ? `${escapeHtml(OWNER_MANDATE_LABELS[listing.mandate_status] || listing.mandate_status)}<span class="cell-sub">Listing price ${escapeHtml(money(listing.mandate_price))} · commission ${escapeHtml(String(Number(listing.commission_percent)))}% · ends ${escapeHtml(formatDate(listing.mandate_end_date))}</span>${listing.commission_below_standard ? `<span class="cell-sub">Below the standard rate of ${escapeHtml(String(Number(listing.standard_commission)))}%</span>` : ""}${listing.mandate_agreed_by_name ? `<span class="cell-sub">Agreed by ${escapeHtml(listing.mandate_agreed_by_name)}</span>` : ""}${listing.mandate_signed_by_name ? `<span class="cell-sub">Signed by ${escapeHtml(listing.mandate_signed_by_name)} · ${escapeHtml(formatDate(listing.mandate_signed_at))}</span>` : ""}${listing.mandate_note ? `<span class="cell-sub">${escapeHtml(listing.mandate_note)}</span>` : ""}` : null)}
+    ${ownerRow("Sold", listing.sold_at ? `${escapeHtml(money(listing.sold_price))} · ${escapeHtml(formatDate(listing.sold_at))}` : null)}
+    ${ownerRow("Withdrawn", listing.withdrawn_at ? `${escapeHtml(formatDate(listing.withdrawn_at))}<span class="cell-sub">${escapeHtml(listing.withdrawn_reason || "")}</span>` : null)}
+    ${ownerRow("Owner update", ownerUpdateCell(listing))}
+  </tbody></table>`;
+  const offers = (listing.offers || []).map((offer) => {
+    const status = offer.decision
+      ? `${escapeHtml(OWNER_DECISION_LABELS[offer.decision] || offer.decision)} · ${escapeHtml(formatDate(offer.decision_date))}${offer.counter_amount ? ` · ${escapeHtml(money(offer.counter_amount))}` : ""}${offer.fell_through_at ? `<span class="cell-sub">Fell through: ${escapeHtml(offer.fell_through_reason || "")}</span>` : ""}`
+      : offer.presented_on ? `Presented ${escapeHtml(formatDate(offer.presented_on))} · ${escapeHtml(OWNER_WRITTEN[offer.presented_how] || offer.presented_how || "")}<span class="cell-sub">Waiting for the owner's decision</span>` : `<span class="muted">Not presented yet</span>`;
+    const buttons = (offer.available_actions || []).map((action) => `<button type="button" class="btn btn-small ${action === "present_offer" ? "btn-primary" : "btn-soft"}" data-action="owner-action" data-owner-action="${action}" data-offer="${offer.id}">${escapeHtml(OWNER_ACTION_LABELS[action] || action)}</button>`).join("");
+    return `<tr><td><span class="cell-main">${escapeHtml(money(offer.amount))}</span><span class="cell-sub">${escapeHtml([offer.buyer_name, offer.buyer_phone].filter(Boolean).join(" · "))}</span><span class="cell-sub">${escapeHtml(formatDate(offer.offered_on))}${offer.conditions ? ` · ${escapeHtml(offer.conditions)}` : ""}</span></td><td>${status}</td><td class="align-right"><div class="row-actions">${buttons}</div></td></tr>`;
+  }).join("");
+  const updates = (listing.updates || []).map((u) => `<li><strong>${escapeHtml(formatDate(u.sent_on))} · ${escapeHtml(OWNER_CHANNELS[u.channel] || u.channel)}</strong><span class="muted"> · ${escapeHtml(u.recorded_by_name || "")}</span><div class="field-help">${escapeHtml(u.note)}</div></li>`).join("");
+  const history = (listing.history || []).map((h) => `<li><strong>${escapeHtml(humanize(String(h.action).replace(/^owner_listing_/, "")))}</strong><span class="muted"> · ${escapeHtml(h.user_name || "System")} · ${escapeHtml(formatDateTime(h.created_at, true))}</span></li>`).join("");
+  modal.dataset.type = "owner-listing";
+  modal.classList.add("modal-wide");
+  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(listing.owner_name)}</h2><p class="modal-sub">${escapeHtml(OWNER_STAGE_LABELS[listing.stage] || listing.stage)}${listing.location ? ` · ${escapeHtml(listing.location)}` : ""}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
+    ${actions ? `<div class="row-actions">${actions}</div>` : `<p class="field-help">Nothing for you to do on this listing right now.</p>`}
+    ${details}
+    <h3 class="section-title">Offers</h3>
+    ${offers ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Offer</th><th>Owner's decision</th><th class="align-right"></th></tr></thead><tbody>${offers}</tbody></table></div>` : `<p class="field-help">No offers yet. Every offer is recorded and presented to the owner in writing.</p>`}
+    <h3 class="section-title">Weekly updates to the owner</h3>
+    ${updates ? `<ol class="history-list">${updates}</ol>` : `<p class="field-help">No update logged yet.</p>`}
+    <h3 class="section-title">History</h3>
+    ${history ? `<ol class="history-list">${history}</ol>` : `<p class="field-help">No history yet.</p>`}
+    <div class="form-actions"><button type="button" class="btn" data-action="close-modal">Close</button></div>`;
+  modalBackdrop.hidden = false;
+}
+
+/** One small form per step. `listing` is null for a new listing. */
+async function openOwnerForm(action, offerId = null) {
+  const listing = state.ownerListingDetail;
+  const offer = offerId ? (listing?.offers || []).find((row) => String(row.id) === String(offerId)) : null;
+  const work = state.ownerListingWork || {};
+  const standard = Number(work.standard_commission || 3);
+  const field = (name, label, input, help = "", full = false) => `<div class="field${full ? " full" : ""}"><label for="owner-${name}">${escapeHtml(label)}</label>${input}${help ? `<span class="field-help">${escapeHtml(help)}</span>` : ""}</div>`;
+  const textInput = (name, { type = "text", value = "", required = true, extra = "" } = {}) => `<input id="owner-${name}" name="${name}" type="${type}" value="${escapeHtml(String(value ?? ""))}"${required ? " required" : ""} ${extra}>`;
+  const note = (name, label, required = true, help = "") => field(name, label, `<textarea id="owner-${name}" name="${name}" rows="3" maxlength="4000"${required ? " required" : ""}></textarea>`, help, true);
+  const select = (name, options, value = "") => `<select id="owner-${name}" name="${name}">${Object.entries(options).map(([key, label]) => `<option value="${escapeHtml(key)}"${key === value ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select>`;
+  const amountInput = (name, value = "") => textInput(name, { type: "number", value, extra: 'min="1" step="any" inputmode="decimal"' });
+  let title = OWNER_ACTION_LABELS[action] || "Owner listing";
+  let sub = listing ? listing.owner_name : "";
+  let fields = "";
+  let submit = "Save";
+  if (action === "new") {
+    title = "New owner listing";
+    sub = "An owner who wants MKUYU to sell their property";
+    fields = field("owner_name", "Owner's name", textInput("owner_name"))
+      + field("owner_phone", "Phone", textInput("owner_phone", { type: "tel", required: false }))
+      + field("owner_email", "Email", textInput("owner_email", { type: "email", required: false }), "Phone or email is needed for the weekly update.")
+      + field("property_type", "Type of property", select("property_type", Object.fromEntries(OWNER_PROPERTY_TYPES.map((t) => [t, t])), "House"))
+      + field("location", "Where is it?", textInput("location"), "Area and town")
+      + field("asking_price", "Owner's asking price (TZS)", textInput("asking_price", { type: "number", required: false, extra: 'min="1" step="any"' }))
+      + note("description", "About the property", false);
+    submit = "Open listing";
+  } else if (action === "commission") {
+    title = "Standard commission rate";
+    sub = "A mandate below this rate is shown to you as a discount when you sign";
+    fields = field("standard_commission", "Standard rate (%)", textInput("standard_commission", { type: "number", value: standard, extra: 'min="0.1" max="20" step="0.1"' }));
+  } else if (action === "set_officer") {
+    let officers = [];
+    try { officers = await api("/org/owner-listings/officers"); } catch { officers = []; }
+    fields = field("officer_id", "Property Officer", `<select id="owner-officer_id" name="officer_id" required>${(Array.isArray(officers) ? officers : []).map((o) => `<option value="${o.id}"${Number(o.id) === Number(listing.officer_id) ? " selected" : ""}>${escapeHtml(o.display_name)}</option>`).join("")}</select>`, "", true);
+  } else if (action === "book_visit") {
+    fields = field("visit_at", "Visit date and time", textInput("visit_at", { type: "datetime-local" }), "Agree the time with the owner.", true);
+  } else if (action === "record_valuation") {
+    fields = field("visit_date", "Date of the visit", textInput("visit_date", { type: "date", value: listing.visit_at ? String(listing.visit_at).slice(0, 10) : today(), extra: `max="${today()}"` }))
+      + field("price_low", "Suggested price from (TZS)", amountInput("price_low"))
+      + field("price_high", "Suggested price up to (TZS)", amountInput("price_high"))
+      + note("note", "Your valuation note", true, "What you saw and why this price range. The owner and the MD may read it.");
+  } else if (action === "check_documents") {
+    sub = `${listing.owner_name} · Legal only`;
+    fields = field("title_deed_number", "Title deed number", textInput("title_deed_number"), "", true)
+      + `<div class="field full"><label class="checkbox-field"><input type="checkbox" name="owner_identity_confirmed"><span>The owner's identity is confirmed</span></label></div>`
+      + `<div class="field full"><label class="checkbox-field"><input type="checkbox" name="owner_authority_confirmed"><span>The owner has the authority to sell (owner on the title, or a valid power of attorney)</span></label></div>`
+      + note("note", "Note", false, "If something is wrong, do not save: write to the Property Officer instead.");
+    submit = "Mark documents checked";
+  } else if (action === "agree_mandate") {
+    fields = field("mandate_price", "Agreed listing price (TZS)", amountInput("mandate_price", listing.price_high ? Number(listing.price_high) : ""))
+      + field("commission_percent", "Commission (%)", textInput("commission_percent", { type: "number", value: standard, extra: 'min="0.1" max="20" step="0.1"' }), `The standard rate is ${standard}%.`)
+      + field("mandate_end_date", "Mandate ends on", textInput("mandate_end_date", { type: "date", extra: `min="${today()}"` }))
+      + note("note", "Note", false);
+    submit = "Send to the MD to sign";
+  } else if (action === "sign_mandate") {
+    sub = `${listing.owner_name} · listing price ${money(listing.mandate_price)} · commission ${Number(listing.commission_percent)}%${listing.commission_below_standard ? ` (below the standard ${Number(listing.standard_commission)}%)` : ""}`;
+    fields = `<p class="field-help full">The mandate counts only once you sign it. Agreed by ${escapeHtml(listing.mandate_agreed_by_name || "the Property Officer")}.</p>`;
+    submit = "Sign mandate";
+  } else if (action === "return_mandate" || action === "back_to_market" || action === "withdraw") {
+    fields = note("reason", action === "withdraw" ? "Why is the listing withdrawn?" : action === "back_to_market" ? "Why did the accepted buyer fall away?" : "What must change?", true);
+    submit = OWNER_ACTION_LABELS[action];
+  } else if (action === "mark_listed") {
+    const options = (state.properties || []).map((p) => `<option value="${p.id}"${Number(p.id) === Number(listing.property_id) ? " selected" : ""}>${escapeHtml(p.name)}</option>`).join("");
+    fields = field("property_id", "Property in the register (optional)", `<select id="owner-property_id" name="property_id"><option value="">Not in the register yet</option>${options}</select>`, "Link the property once it is added to Properties.", true);
+    submit = "Mark listed";
+  } else if (action === "record_offer") {
+    fields = field("buyer_name", "Buyer's name", textInput("buyer_name"))
+      + field("buyer_phone", "Buyer's phone", textInput("buyer_phone", { type: "tel", required: false }))
+      + field("amount", "Offer (TZS)", amountInput("amount"))
+      + field("offered_on", "Offer date", textInput("offered_on", { type: "date", value: today(), extra: `max="${today()}"` }))
+      + note("conditions", "Conditions of the offer", false, "Record every offer, however low. Present it to the owner in writing next.");
+    submit = "Record offer";
+  } else if (action === "present_offer") {
+    sub = `${listing.owner_name} · offer ${money(offer?.amount)}`;
+    fields = field("presented_how", "Sent to the owner in writing by", select("presented_how", OWNER_WRITTEN, "whatsapp"))
+      + field("presented_on", "Date sent", textInput("presented_on", { type: "date", value: today(), extra: `max="${today()}"` }))
+      + note("note", "Note", false);
+    submit = "Save";
+  } else if (action.startsWith("decide_")) {
+    const decision = { decide_accept: "accepted", decide_reject: "rejected", decide_counter: "countered" }[action];
+    sub = `${listing.owner_name} · offer ${money(offer?.amount)}`;
+    fields = `<input type="hidden" name="decision" value="${decision}">`
+      + field("decision_date", "Date of the owner's decision", textInput("decision_date", { type: "date", value: today(), extra: `max="${today()}"` }))
+      + (decision === "countered" ? field("counter_amount", "Owner's counter price (TZS)", amountInput("counter_amount")) : "")
+      + note("note", "Note", false, decision === "accepted" ? "The listing moves to Under offer." : "");
+  } else if (action === "mark_sold") {
+    const accepted = (listing.offers || []).find((o) => o.decision === "accepted" && !o.fell_through_at);
+    fields = field("sold_price", "Sale price (TZS)", amountInput("sold_price", accepted ? Number(accepted.amount) : ""))
+      + field("sold_on", "Date sold", textInput("sold_on", { type: "date", value: today(), extra: `max="${today()}"` }));
+  } else if (action === "log_update") {
+    fields = field("channel", "How the owner was updated", select("channel", OWNER_CHANNELS, "phone"))
+      + field("sent_on", "Date", textInput("sent_on", { type: "date", value: today(), extra: `max="${today()}"` }))
+      + note("note", "What you told the owner", true);
+    submit = "Log update";
+  }
+  modal.dataset.type = "owner-form";
+  modal.classList.remove("modal-wide");
+  modal.innerHTML = `<div class="modal-head"><div><h2 class="modal-title">${escapeHtml(title)}</h2><p class="modal-sub">${escapeHtml(sub)}</p></div><button class="close-btn" data-action="close-modal" aria-label="Close">${closeIcon()}</button></div>
+    <form id="owner-form" class="form-grid" data-owner-action="${escapeHtml(action)}" data-id="${listing && action !== "new" && action !== "commission" ? listing.id : ""}" data-offer="${offerId || ""}">
+      ${fields}
+      <div class="form-actions full">${listing && action !== "new" && action !== "commission" ? `<button type="button" class="btn" data-action="owner-listing-open" data-id="${listing.id}">Back</button>` : `<button type="button" class="btn" data-action="close-modal">Cancel</button>`}<button class="btn btn-primary" type="submit">${escapeHtml(submit)}</button></div>
+    </form>`;
+  modalBackdrop.hidden = false;
+  setTimeout(() => modal.querySelector("input:not([type=hidden]), select, textarea")?.focus(), 0);
+}
+
+const OWNER_ENDPOINTS = {
+  set_officer: "officer", book_visit: "visit", record_valuation: "valuation", check_documents: "documents",
+  agree_mandate: "mandate", sign_mandate: "mandate/sign", return_mandate: "mandate/return", mark_listed: "listed",
+  record_offer: "offers", back_to_market: "back-to-market", mark_sold: "sold", withdraw: "withdraw", log_update: "updates",
+};
+
+document.addEventListener("submit", async (event) => {
+  const form = event.target;
+  if (form.id !== "owner-form") return;
+  event.preventDefault();
+  const action = form.dataset.ownerAction;
+  const listingId = form.dataset.id;
+  const data = Object.fromEntries(new FormData(form));
+  if (action === "check_documents") {
+    data.owner_identity_confirmed = Boolean(form.elements.owner_identity_confirmed?.checked);
+    data.owner_authority_confirmed = Boolean(form.elements.owner_authority_confirmed?.checked);
+  }
+  let path = `/org/owner-listings/${listingId}/${OWNER_ENDPOINTS[action] || ""}`;
+  let method = "POST";
+  if (action === "new") path = "/org/owner-listings";
+  if (action === "commission") { path = "/org/owner-listings/settings"; method = "PUT"; }
+  if (action === "present_offer") path = `/org/owner-listings/${listingId}/offers/${form.dataset.offer}/present`;
+  if (action.startsWith("decide_")) path = `/org/owner-listings/${listingId}/offers/${form.dataset.offer}/decision`;
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  try {
+    const saved = await api(path, { method, body: JSON.stringify(data) });
+    showToast("Saved.");
+    state.ownerListingsRequested = false;
+    if (action === "commission") { closeModal(); await loadOwnerListings(); return; }
+    await loadOwnerListings();
+    if (state.view === "owner-listings") render();
+    await openOwnerListing(saved?.id || listingId);
+  } catch (error) { showToast(error.message || "Could not save."); button.disabled = false; }
+});
+
+/* --------------------------------------------------------------------------
    Project stages: the building steps and overall progress diaspora buyers follow.
    -------------------------------------------------------------------------- */
 const STANDARD_STAGES = ["Land clearing and survey", "Foundation", "Structure and walls", "Roofing", "Finishing", "Handover"];
@@ -7806,6 +8127,12 @@ document.addEventListener("click", async (event) => {
     try { await api("/org/me/signature-title", { method: "PUT", body: JSON.stringify({ signature_title: document.getElementById("signature-title")?.value || "" }) }); showToast("Signature title saved."); await reloadProfile(); }
     catch (error) { showToast(error.message || "Unable to save."); }
   }
+  // Owner listings (see renderOwnerListings).
+  if (action === "owner-filter") { state.filters = { ...state.filters, ownerStage: target.dataset.filterKey }; render(); }
+  if (action === "owner-listing-open") await openOwnerListing(id);
+  if (action === "owner-listing-new") { state.ownerListingDetail = null; await openOwnerForm("new"); }
+  if (action === "owner-commission") { state.ownerListingDetail = null; await openOwnerForm("commission"); }
+  if (action === "owner-action") await openOwnerForm(target.dataset.ownerAction, target.dataset.offer || null);
   if (action === "work-go") {
     // A "Your work today" card: open the screen already narrowed to the job.
     closeModal();

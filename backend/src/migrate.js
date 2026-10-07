@@ -172,6 +172,11 @@ const permissions = [
   ["view_projects", "See projects (read only)"],
   ["view_properties", "See properties (read only)"],
   ["view_appointments", "See appointments (read only)"],
+  // Owner selling (see sales/ownerListing.js). The Property Officer runs the
+  // owner side, Legal checks the title, and the MD signs every sell mandate.
+  ["run_owner_listings", "Run owner listings: visit, valuation, mandate terms, offers, weekly updates"],
+  ["check_owner_documents", "Check an owner's title and documents (Legal)"],
+  ["sign_sell_mandate", "Sign a sell mandate (Managing Director)"],
   ...MODULES.map((module) => [`access_${module}`, `Access ${MODULE_LABELS[module] || module}`]),
 ];
 const businessAccess = MODULES.map((module) => `access_${module}`);
@@ -204,11 +209,11 @@ export const defaultRoles = [
 
   // MANAGEMENT. Approves where the business rules require it. Deliberately has
   // no system administration and no authority to review or rewrite legal terms.
-  ["Managing Director", "Organization-wide business authority and management approval. No system administration.", 80, "organization", ["access_projects", "access_properties", "access_clients", "access_leads", "access_contracts", "access_documents", "access_appointments", "access_follow_ups", "access_debts", "access_payments", "access_reminders", "access_reports", "view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "approve_management", "request_changes", ...taskWorkflow, "upload_contract_templates"]],
+  ["Managing Director", "Organization-wide business authority and management approval. No system administration.", 80, "organization", ["access_projects", "access_properties", "access_clients", "access_leads", "access_contracts", "access_documents", "access_appointments", "access_follow_ups", "access_debts", "access_payments", "access_reminders", "access_reports", "view", "create", "edit", "delete", "approve", "export", "view_financial", "view_reports", "approve_management", "request_changes", ...taskWorkflow, "upload_contract_templates", "sign_sell_mandate", "run_owner_listings"]],
 
   // LEGAL. Owns the contract lifecycle and the final contract record.
   ["Legal Manager", "Owns the contract record and supervises the legal desk", 45, "department", ["access_contracts", "access_documents", "access_clients", "view_projects", "view_properties", "view_appointments", "access_reports", "view", "create", "edit", "delete", "approve", "export", "view_reports", "review_legal", "request_changes", "approve_legal", "upload_contract_templates", ...taskWorkflow]],
-  ["Legal Officer", "Prepares, reviews and controls contract records", 35, "department", ["access_contracts", "access_documents", "access_clients", "view_projects", "view_properties", "view_appointments", "access_reports", "view", "create", "edit", "delete", "approve", "view_reports", "review_legal", "request_changes", "approve_legal", "upload_contract_templates"]],
+  ["Legal Officer", "Prepares, reviews and controls contract records", 35, "department", ["access_contracts", "access_documents", "access_clients", "view_projects", "view_properties", "view_appointments", "access_reports", "view", "create", "edit", "delete", "approve", "view_reports", "review_legal", "request_changes", "approve_legal", "upload_contract_templates", "check_owner_documents"]],
 
   // ICT & ADMINISTRATION. Controls the system, never the business.
   ["ICTO", "Controls accounts, roles, permissions, settings, security and audit. No business authority.", 35, "organization", [...systemAccess, "upload_contract_templates"]],
@@ -219,11 +224,11 @@ export const defaultRoles = [
   ["Finance Officer", "Payments, installments, receipts and financial term validation", 15, "own", ["access_debts", "access_payments", "access_reminders", "access_reports", "access_contracts", "access_clients", "view_projects", "view_properties", "view_appointments", "view", "create", "edit", "view_financial", "view_reports", "validate_finance", "request_changes"]],
 
   // SALES, MARKETING & OPERATIONS. Initiates deals, never approves them.
-  ["Department Manager", "Department-wide operational management and team supervision", 40, "department", ["access_projects", "access_properties", "access_clients", "access_leads", "access_appointments", "access_documents", "access_follow_ups", "access_reports", "access_contracts", "view", "create", "edit", "delete", "approve", "export", "view_reports", "submit_contract", "request_changes", ...taskWorkflow]],
+  ["Department Manager", "Department-wide operational management and team supervision", 40, "department", ["access_projects", "access_properties", "access_clients", "access_leads", "access_appointments", "access_documents", "access_follow_ups", "access_reports", "access_contracts", "view", "create", "edit", "delete", "approve", "export", "view_reports", "submit_contract", "request_changes", ...taskWorkflow, "run_owner_listings"]],
   ["Sales, Marketing & Operations Officer", "Initiates deals and supplies customer, property and project detail", 20, "own", ["access_leads", "access_clients", "access_properties", "access_projects", "access_contracts", "access_appointments", "access_documents", "access_follow_ups", "access_reports", "view", "create", "edit", "view_reports", "submit_contract", "request_changes", "upload_contract_templates"]],
   ["Sales Officer", "Leads, clients, viewings and deal initiation", 15, "own", ["access_leads", "access_clients", "access_properties", "access_projects", "access_contracts", "access_appointments", "access_follow_ups", "access_reports", "view", "create", "edit", "view_reports", "submit_contract", "upload_contract_templates"]],
   ["Marketing Officer", "Campaign leads, listings and marketing documents", 15, "own", ["access_leads", "access_clients", "access_properties", "access_projects", "access_documents", "access_appointments", "access_reports", "view", "create", "edit", "view_reports"]],
-  ["Property Officer", "Estate inventory, listings and viewings", 15, "own", ["access_properties", "access_projects", "access_clients", "access_appointments", "access_documents", "view", "create", "edit"]],
+  ["Property Officer", "Estate inventory, listings and viewings, and the owner side of selling: valuation, sell mandate, offers and weekly owner updates", 15, "own", ["access_properties", "access_projects", "access_clients", "access_appointments", "access_documents", "view", "create", "edit", "run_owner_listings"]],
 
   // CUSTOMER SERVICE. Communicates and follows up; owns no contract content.
   ["Customer Service Manager", "Runs the customer service desk and its follow-up discipline", 32, "department", ["access_clients", "access_appointments", "access_leads", "access_follow_ups", "view_properties", "access_reports", "view", "create", "edit", "delete", "approve", "export", "view_reports", ...taskWorkflow]],
@@ -293,6 +298,75 @@ const roleRenames = { "Contracts & Legal Officer": "Legal Officer" };
 // A Sell submission from the website carries the seller's property details.
 async function migrateSellLeads() {
   await query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS sell_details JSONB");
+}
+
+// Owner selling: one listing per seller property, its offers and the weekly
+// updates sent to the owner (see sales/ownerListing.js). Additive only.
+async function migrateOwnerListings() {
+  await query(`CREATE TABLE IF NOT EXISTS owner_listings (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    lead_id INTEGER REFERENCES leads(id) ON DELETE SET NULL,
+    client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+    property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL,
+    owner_name TEXT NOT NULL, owner_phone TEXT, owner_email TEXT,
+    property_type TEXT, location TEXT, asking_price NUMERIC(14,2), description TEXT,
+    stage TEXT NOT NULL DEFAULT 'received' CHECK (stage IN ('received','visit_booked','valued','documents_checked','mandate_signed','listed','under_offer','sold','withdrawn')),
+    officer_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    visit_at TIMESTAMPTZ,
+    valued_at TIMESTAMPTZ, valued_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    price_low NUMERIC(14,2), price_high NUMERIC(14,2), valuation_note TEXT,
+    documents_checked_at TIMESTAMPTZ, documents_checked_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    title_deed_number TEXT, owner_identity_confirmed BOOLEAN, owner_authority_confirmed BOOLEAN, documents_note TEXT,
+    mandate_status TEXT NOT NULL DEFAULT 'none' CHECK (mandate_status IN ('none','awaiting_md','returned','signed')),
+    mandate_price NUMERIC(14,2), commission_percent NUMERIC(5,2), standard_commission NUMERIC(5,2), mandate_end_date DATE,
+    mandate_agreed_by INTEGER REFERENCES users(id) ON DELETE SET NULL, mandate_agreed_at TIMESTAMPTZ,
+    mandate_signed_by INTEGER REFERENCES users(id) ON DELETE SET NULL, mandate_signed_at TIMESTAMPTZ, mandate_note TEXT,
+    listed_at TIMESTAMPTZ, sold_at TIMESTAMPTZ, sold_price NUMERIC(14,2),
+    withdrawn_at TIMESTAMPTZ, withdrawn_reason TEXT,
+    last_update_at TIMESTAMPTZ,
+    overdue_level INTEGER NOT NULL DEFAULT 0,
+    reminder_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await query("CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_listings_lead ON owner_listings (lead_id) WHERE lead_id IS NOT NULL");
+  await query("CREATE INDEX IF NOT EXISTS idx_owner_listings_org_stage ON owner_listings (organization_id, stage)");
+  await query("CREATE INDEX IF NOT EXISTS idx_owner_listings_officer ON owner_listings (officer_id)");
+  await query(`CREATE TABLE IF NOT EXISTS owner_listing_offers (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    listing_id INTEGER NOT NULL REFERENCES owner_listings(id) ON DELETE CASCADE,
+    buyer_name TEXT NOT NULL, buyer_phone TEXT,
+    amount NUMERIC(14,2) NOT NULL CHECK (amount > 0), offered_on DATE NOT NULL, conditions TEXT,
+    recorded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    presented_on DATE, presented_how TEXT CHECK (presented_how IS NULL OR presented_how IN ('letter','email','whatsapp','sms')),
+    presented_by INTEGER REFERENCES users(id) ON DELETE SET NULL, presented_note TEXT,
+    decision TEXT CHECK (decision IS NULL OR decision IN ('accepted','rejected','countered')),
+    decision_date DATE, counter_amount NUMERIC(14,2), decision_note TEXT,
+    decision_recorded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    fell_through_at TIMESTAMPTZ, fell_through_reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await query("CREATE INDEX IF NOT EXISTS idx_owner_listing_offers_listing ON owner_listing_offers (listing_id, created_at)");
+  await query(`CREATE TABLE IF NOT EXISTS owner_listing_updates (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    listing_id INTEGER NOT NULL REFERENCES owner_listings(id) ON DELETE CASCADE,
+    sent_on DATE NOT NULL,
+    channel TEXT NOT NULL CHECK (channel IN ('phone','whatsapp','sms','email','visit','letter')),
+    note TEXT NOT NULL,
+    recorded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await query("CREATE INDEX IF NOT EXISTS idx_owner_listing_updates_listing ON owner_listing_updates (listing_id, sent_on DESC)");
+  // Sellers MKUYU already accepted (a website Sell request turned into a
+  // client) get their listing once, at "Received". The 7-day clock starts now.
+  await query(
+    `INSERT INTO owner_listings (organization_id, lead_id, client_id, owner_name, owner_phone, owner_email, property_type, location, asking_price)
+     SELECT l.organization_id, l.id, l.client_id, l.name, l.phone, l.email,
+            l.sell_details->>'property_type', l.sell_details->>'location',
+            NULLIF(l.sell_details->>'asking_price','')::numeric
+       FROM leads l
+      WHERE l.service = 'sell' AND l.client_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM owner_listings o WHERE o.lead_id = l.id)`,
+  );
 }
 
 async function migratePaymentApproval() {
@@ -615,6 +689,7 @@ export async function runMigrations({ seedDemo = process.env.NODE_ENV !== "produ
   // The morning appointment reminder pops up once per person per day.
   await query("CREATE TABLE IF NOT EXISTS appointment_reminder_days (user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, shown_on DATE NOT NULL, shown_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (user_id, shown_on))");
   await migrateSellLeads();
+  await migrateOwnerListings();
   for (const table of scopedTables) {
     await query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL`);
     await query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id) ON DELETE SET NULL`);

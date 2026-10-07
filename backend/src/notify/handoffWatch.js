@@ -4,6 +4,7 @@
 // The task is what the Customer Service officer and the Desk already watch (attention badge),
 // so no new screen is needed. A failure here only logs; it never touches the request itself.
 import { query } from "../db.js";
+import { chaseOverdueOwnerUpdates } from "../sales/ownerListingStore.js";
 
 const HOUR = 60 * 60 * 1000;
 const hours = () => Math.max(1, Number(process.env.HANDOFF_OVERDUE_HOURS) || 24);
@@ -34,7 +35,11 @@ export async function chaseOverdueHandoffs() {
 
 export function startHandoffWatch() {
   if (process.env.HANDOFF_WATCH === "0") return;
-  const run = () => chaseOverdueHandoffs().catch((error) => console.error("handoff watch:", error.message));
+  // The same timer chases owner listings with no weekly update (sales/ownerListingStore.js).
+  const run = () => {
+    chaseOverdueHandoffs().catch((error) => console.error("handoff watch:", error.message));
+    chaseOverdueOwnerUpdates().catch((error) => console.error("owner update watch:", error.message));
+  };
   setTimeout(run, 90 * 1000).unref?.();
   setInterval(run, 30 * 60 * 1000).unref?.();
 }

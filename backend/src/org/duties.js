@@ -36,6 +36,17 @@ export const CONTRACT_OWNERSHIP = {
   approve_management: ["MANAGEMENT"],
 };
 
+/**
+ * Owner selling decision points (see sales/ownerListing.js). The owner side
+ * belongs to Sales (Property Officer, Department Manager) and the MD; only
+ * Legal checks the title, and only the MD signs the mandate.
+ */
+export const OWNER_LISTING_OWNERSHIP = {
+  run_owner_listings: ["SALES, MARKETING & OPERATIONS", "MANAGEMENT"],
+  check_owner_documents: ["LEGAL"],
+  sign_sell_mandate: ["MANAGEMENT"],
+};
+
 /** The only department permitted to hold system-administration permissions. */
 export const SYSTEM_ADMIN_DEPARTMENT = "ICT & ADMINISTRATION";
 
@@ -86,6 +97,13 @@ export const DEPARTMENT_DEFAULT_ROLE = {
 export const DEFAULT_STAFF_ROLE = "Staff Member";
 
 /**
+ * Departments nobody is added to with "Add staff" on the Departments page: the
+ * MD's department and the system administrators'. Their members are set on the
+ * Staff page with a deliberately chosen role.
+ */
+export const STAFF_LOCKED_DEPARTMENTS = new Set(["MANAGEMENT", SYSTEM_ADMIN_DEPARTMENT]);
+
+/**
  * Cross-department hand-offs a department-scoped assigner may make, on top of
  * assigning within their own department. Sales hands website leads to
  * Customer Service, who contact the customer. Nothing else crosses a
@@ -119,6 +137,7 @@ export const ROLE_DUTIES = {
     { key: "financial_oversight", label: "Oversee financial performance", description: "Sees income, outstanding balances and financial reporting.", permissions: ["access_debts", "access_payments", "access_reminders", "view_financial", "view_reports", "export"] },
     { key: "management_reporting", label: "Receive management reporting", description: "Reviews organization-wide performance across departments.", permissions: ["view_reports", "export"] },
     { key: "contract_templates", label: "Maintain contract templates", description: "Uploads the Word templates contracts are generated on and chooses the default.", permissions: ["upload_contract_templates"] },
+    { key: "sell_mandate_signature", label: "Sign every sell mandate", description: "A sell mandate (listing price, commission, end date) counts only once the MD signs it, and never one the MD agreed personally. May also act on owner listings and sets the standard commission rate.", permissions: ["sign_sell_mandate", "run_owner_listings"] },
   ],
   "ICTO": [
     { key: "account_administration", label: "Manage staff accounts", description: "Creates, activates and deactivates staff accounts.", permissions: ["manage_users", "view"] },
@@ -147,12 +166,11 @@ export const ROLE_DUTIES = {
     { key: "contract_preparation", label: "Prepare contracts", description: "Drafts agreements and clauses from the approved commercial terms.", permissions: ["access_contracts", "view", "create", "edit", "delete"] },
     { key: "legal_review", label: "Review contracts", description: "Checks clauses, verifies legality and raises corrections.", permissions: ["review_legal", "request_changes", "access_contracts", "view"] },
     { key: "legal_approval", label: "Approve contracts legally", description: "Gives or withholds legal approval. Sole owner of this permission outside administrators.", permissions: ["approve_legal", "approve"] },
-    { key: "legal_documents", label: "Manage legal documents", description: "Attaches and maintains agreements, titles and legal records.", permissions: ["access_documents", "view", "create", "edit"] },
+    { key: "legal_documents", label: "Manage legal documents", description: "Attaches and maintains agreements, titles and legal records. Before a sell mandate, checks the seller's title deed and confirms the owner's identity and authority to sell; only Legal marks that step, never the Property Officer.", permissions: ["access_documents", "view", "create", "edit", "check_owner_documents"] },
     { key: "revision_history", label: "Maintain contract history", description: "Keeps revisions, clauses and the final record traceable.", permissions: ["access_contracts", "access_reports", "view", "view_reports"] },
     { key: "customer_verification", label: "Verify customer and project detail", description: "Confirms the parties and property named on the contract. Sees projects and properties, never changes them.", permissions: ["access_clients", "view_projects", "view_properties", "view"] },
     { key: "appointment_awareness", label: "Follow customer appointments", description: "Sees every appointment Sales arranges with a customer, to prepare the contract in time. Read only: never arranges, edits or cancels one.", permissions: ["view_appointments", "view"] },
-    { key: "contract_templates", label: "Maintain contract templates", description: "Uploads the Word templates contracts are generated on and chooses the default.", permissions: ["upload_contract_templates"] },
-  ],
+    { key: "contract_templates", label: "Maintain contract templates", description: "Uploads the Word templates contracts are generated on and chooses the default.", permissions: ["upload_contract_templates"] },  ],
   "Finance Manager": [
     { key: "financial_operations", label: "Run day-to-day finance", description: "Owns payments, installments, receipts and the collection register.", permissions: ["access_debts", "access_payments", "access_reminders", "view", "create", "edit", "delete", "view_financial"] },
     { key: "financial_term_validation", label: "Validate contract financial terms", description: "Confirms price, deposit, payment plan, installments and due dates.", permissions: ["validate_finance", "request_changes", "access_contracts", "access_clients"] },
@@ -178,6 +196,7 @@ export const ROLE_DUTIES = {
     { key: "department_reporting", label: "Report on department performance", description: "Turns departmental activity into management reporting.", permissions: ["access_reports", "view_reports", "export"] },
     { key: "deal_initiation_supervision", label: "Supervise deal initiation", description: "Ensures deals are raised correctly and submitted to Legal. Does not approve them.", permissions: ["submit_contract", "request_changes", "access_contracts"] },
     { key: "work_assignment", label: "Assign work within the department", description: "Hands work to department staff and reviews what they submit. Cannot assign outside the department.", permissions: ["assign_tasks", "review_tasks"] },
+    { key: "owner_selling_supervision", label: "Supervise owner selling", description: "May act on any owner listing and give it to a Property Officer. Cannot check the title (Legal) or sign the mandate (MD).", permissions: ["run_owner_listings"] },
   ],
   "Sales, Marketing & Operations Officer": [
     { key: "deal_initiation", label: "Initiate the deal", description: "Creates the customer, property and project detail a contract needs.", permissions: ["access_clients", "access_properties", "access_projects", "view", "create", "edit"] },
@@ -212,6 +231,7 @@ export const ROLE_DUTIES = {
     { key: "viewings_and_inspections", label: "Coordinate viewings and inspections", description: "Hosts site visits and records inspection outcomes.", permissions: ["access_appointments", "view", "create", "edit"] },
     { key: "property_documents", label: "Maintain property documents", description: "Attaches titles, permits and plans to the property.", permissions: ["access_documents", "view", "create", "edit"] },
     { key: "customer_coordination", label: "Coordinate with customers", description: "Answers property availability questions raised by sales and customer service.", permissions: ["access_clients", "view"] },
+    { key: "owner_selling", label: "Run owner selling", description: "Visits and values the owner's property, agrees the sell mandate and commission with the owner (the MD signs it), records every offer and presents it to the owner in writing, and sends every owner an update at least once a week.", permissions: ["run_owner_listings"] },
   ],
   "Customer Service Manager": [
     { key: "customer_service_leadership", label: "Supervise the customer service desk", description: "Reviews service quality, workload and outstanding customer commitments.", permissions: ["access_clients", "access_appointments", "access_leads", "access_follow_ups", "view", "create", "edit", "approve"] },
@@ -366,9 +386,9 @@ export function checkRoleDuties(roleName, rolePermissions, duties) {
  * belonging to the department responsible for it. This is what stops the MD,
  * ICT or a line manager from acquiring legal or financial authority.
  */
-export function checkContractOwnership(rolesByName) {
+export function checkContractOwnership(rolesByName, ownership = { ...CONTRACT_OWNERSHIP, ...OWNER_LISTING_OWNERSHIP }) {
   const violations = [];
-  for (const [permission, owners] of Object.entries(CONTRACT_OWNERSHIP)) {
+  for (const [permission, owners] of Object.entries(ownership)) {
     for (const role of Object.values(rolesByName)) {
       if (!role.permissions.includes(permission)) continue;
       // The System Administrator is the documented break-glass superuser.
