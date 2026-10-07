@@ -1153,7 +1153,7 @@ router.post("/requests/:id/handed-off", requireModuleAccess("leads"), requirePer
   // A request goes to Customer Service, nobody else.
   const inCs=await queryOne("SELECT 1 FROM user_departments ud JOIN departments d ON d.id=ud.department_id WHERE ud.user_id=$1 AND d.active=TRUE AND d.name='CUSTOMER SERVICE'",[task.assigned_to]);
   if(!inCs)return res.status(400).json({error:"a request can only be handed to a Customer Service officer"});
-  const r=await queryOne("UPDATE leads SET task_id=$1,handed_off_at=NOW(),status='handed_off',outcome=NULL,outcome_note=NULL,outcome_at=NULL,outcome_by=NULL,appointment_at=NULL,appointment_type=NULL WHERE id=$2 RETURNING *",[taskId,leadId]);
+  const r=await queryOne("UPDATE leads SET task_id=$1,handed_off_at=NOW(),overdue_level=0,status='handed_off',outcome=NULL,outcome_note=NULL,outcome_at=NULL,outcome_by=NULL,appointment_at=NULL,appointment_type=NULL WHERE id=$2 RETURNING *",[taskId,leadId]);
   // The Customer Service officer must be able to open the request they were asked to call about (a diaspora request is otherwise the Desk's alone).
   if(lead.source==="diaspora-portal")await addRecordShare({entity:"lead",recordId:leadId,userId:task.assigned_to,createdBy:req.user.id}).catch(()=>{});
   await audit(req,"handed_off","lead",leadId,{task_id:taskId});res.json(r);
