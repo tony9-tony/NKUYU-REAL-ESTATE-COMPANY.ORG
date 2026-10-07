@@ -2901,7 +2901,7 @@ router.get("/diaspora/legal", route(async (req, res) => {
   const properties = (await query(
     `SELECT p.id, p.name, p.location, p.status, pr.name AS project_name, p.legal_status, p.title_deed_no, p.title_deed_kind, p.legal_note, p.legal_checked_at, u.display_name AS legal_checked_by_name
        FROM properties p LEFT JOIN projects pr ON pr.id=p.project_id LEFT JOIN users u ON u.id=p.legal_checked_by
-      WHERE p.organization_id=$1 ORDER BY (p.legal_status='not_checked') DESC, p.name LIMIT 400`, [org])).rows;
+      WHERE p.organization_id=$1 ORDER BY (p.legal_status='not_checked') DESC, (p.legal_status='issues') DESC, p.name LIMIT 3000`, [org])).rows;
   const transfers = (await query(
     `SELECT c.id, c.contract_number, c.status, c.transfer_stage, c.transfer_note, c.transfer_updated_at, cl.name AS client_name, p.name AS property_name
        FROM contracts c JOIN clients cl ON cl.id=c.client_id AND cl.is_diaspora=TRUE LEFT JOIN properties p ON p.id=c.property_id
